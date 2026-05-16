@@ -1,0 +1,45 @@
+# Build artifacts
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go test / coverage
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Local config / runtime data (portable; рядом с бинарником)
+config.yaml
+proxylm.db
+proxylm.db-journal
+proxylm.db-wal
+proxylm.db-shm
+*.log
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Go workspace
+go.work
+go.work.sum
+
+# Vendor (опционально; обычно не коммитим)
+vendor/
+
+# Claude Code local settings (per-user permissions allowlist, auto-generated)
+.claude/settings.local.json
+
+# Claude worktrees
+.claude/worktrees/
+
+# Git temporary files
+.git/COMMIT_MSG_*.txt

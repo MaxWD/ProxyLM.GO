@@ -1,0 +1,36 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    reviewers:
+      - MaxWD
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      production:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    reviewers:
+      - MaxWD
+    commit-message:
+      prefix: chore
+      include: scope

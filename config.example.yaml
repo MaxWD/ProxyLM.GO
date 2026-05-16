@@ -1,0 +1,93 @@
+# ProxyLM.GO — пример конфигурации
+# Скопируй в config.yaml и подправь под себя.
+#
+# При первом запуске `proxylm serve` без файла config.yaml рядом с бинарником
+# этот шаблон будет автоматически создан там же (он встроен в бинарник
+# через //go:embed). Дальше его можно править — изменения подхватятся
+# при следующем старте daemon'а (hot-reload в MVP не реализован).
+
+proxy:
+  host: 0.0.0.0
+  port: 8080
+  log_level: info       # debug | info | warning | error
+
+# API-ключи для аутентификации клиентских сервисов.
+# Используется заголовок: Authorization: Bearer <key>
+auth:
+  api_keys:
+    - name: service-a
+      key: sk-proxy-replace-me-aaaaa
+    - name: service-b
+      key: sk-proxy-replace-me-bbbbb
+  # Отдельный ключ для подключения TUI / админ-эндпоинтов
+  admin_key: sk-admin-replace-me
+
+# Стратегия маршрутизации:
+#   model_affinity_least_busy   — предпочесть сервер, где модель уже загружена,
+#                                  иначе с наименьшей очередью (ПО УМОЛЧАНИЮ)
+#   round_robin                  — чередовать
+#   least_busy                   — только по длине очереди
+#   deferred_model_then_capable  — сервер назначается только при освобождении:
+#                                   сначала запрос под current_model, иначе первый совместимый
+#   preserve_model_coverage      — как deferred, но активно «защищает» уникальное
+#                                   покрытие: если сервер — единственный держатель
+#                                   своей модели, он не свопает её, пока для неё
+#                                   ещё есть задачи в очереди
+routing:
+  strategy: model_affinity_least_busy
+
+# Retry при ошибках бэкенда
+#
+# Семантика (v1.0+): max_attempts — это ОБЩЕЕ число попыток у одного запроса
+# поверх всех серверов. После ошибки следующая попытка стремится уйти на
+# другой healthy-сервер с этой моделью; «упавший» сервер исключается
+# только на одну следующую попытку (rolling exclusion size 1). Если других
+# совместимых серверов нет — повторяется на том же. Между попытками —
+# экспоненциальный backoff (initial → ×2 → ... → насыщение max_backoff_ms).
+retry:
+  max_attempts: 3            # общее число попыток на запрос (включая первую)
+  initial_backoff_ms: 500    # экспоненциальный backoff
+  max_backoff_ms: 8000
+
+# Авто-обнаружение моделей на серверах (через /v1/models)
+discovery:
+  enabled: true
+  interval_seconds: 30
+  unhealthy_after_failed_polls: 3
+
+# Хранение истории запросов
+# Путь относительный — резолвится относительно каталога бинарника (portable).
+storage:
+  database_path: ./proxylm.db
+  history_retention_days: 30
+  vacuum_on_start: false
+
+# TUI
+tui:
+  show_completed_minutes: 30      # сколько держать завершённые в таблице (на стороне TUI)
+
+# Совместимость OpenAI-совместимых бэкендов по response_format:
+#   passthrough            — отправлять как есть (по умолчанию)
+#   normalize_json_object  — преобразовать response_format.type=json_object в json_schema
+#   strict_reject          — ранний 400 на прокси, если type не json_schema|text
+compat:
+  response_format_mode: passthrough
+
+# Бэкенд-серверы
+backends:
+  - name: srv1
+    url: http://127.0.0.1:1234           # LM Studio default
+    priority: 100                        # ниже число = выше приоритет, используется если свободно >1 сервера
+    type: openai                         # openai | ollama
+    timeout_seconds: 600
+    api_key: null                        # если бэкенд требует токен
+    # Опционально: явно перечислить модели (выключает discovery для этого сервера)
+    # models:
+    #   - qwen2.5:14b
+    #   - llama3.1:8b
+
+  - name: srv2
+    url: http://127.0.0.1:11434          # Ollama default
+    priority: 200
+    type: openai                         # Ollama имеет OpenAI-совместимый shim на /v1/*
+    timeout_seconds: 600

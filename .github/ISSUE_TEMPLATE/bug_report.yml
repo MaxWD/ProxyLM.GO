@@ -1,0 +1,104 @@
+name: Bug report
+description: Report a bug in ProxyLM.GO
+title: "bug: <short summary>"
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please fill in the fields below.
+
+        **Before filing**, please search [existing issues](https://github.com/MaxWD/ProxyLM.GO/issues?q=is%3Aissue) to avoid duplicates.
+
+  - type: checkboxes
+    id: prereqs
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I have searched existing issues and this is not a duplicate.
+          required: true
+        - label: I am using a supported version (latest minor release).
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: ProxyLM.GO version
+      description: Output of `proxylm version`.
+      placeholder: "v0.9.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Other (specify in description)
+    validations:
+      required: true
+
+  - type: input
+    id: backend
+    attributes:
+      label: Upstream LLM backend
+      description: What are you proxying to (LM Studio, Ollama, other OpenAI-compatible server)? Include backend version if known.
+      placeholder: "LM Studio 0.3.5 / Ollama 0.3.12"
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal sequence that triggers the bug.
+      placeholder: |
+        1. Start `proxylm serve` with config X.
+        2. Send a request to `/v1/chat/completions` with payload Y.
+        3. Observe behaviour Z.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: |
+        Daemon logs around the failure. **Redact API keys, admin tokens, and request body content before pasting.**
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration snippet
+      description: |
+        Relevant section of `config.yaml`. **Redact `admin_key` and any `api_key` fields.**
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+    validations:
+      required: false
