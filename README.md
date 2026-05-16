@@ -1,202 +1,220 @@
 # ProxyLM.GO
 
-ProxyLM.GO — это посредник между вашими приложениями и сервисами больших языковых моделей (LLM). Для приложения он выглядит как обычный OpenAI-совместимый сервер, но за его спиной может стоять любое количество фактических серверов — как локальные (LM Studio, Ollama), так и облачные. Главное, чтобы сервер поддерживал OpenAI API. ProxyLM.GO сам решает, к какому из них адресовать каждый запрос.
+[![CI](https://github.com/MaxWD/ProxyLM.GO/actions/workflows/ci.yml/badge.svg)](https://github.com/MaxWD/ProxyLM.GO/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/MaxWD/ProxyLM.GO?include_prereleases)](https://github.com/MaxWD/ProxyLM.GO/releases)
+[![Go](https://img.shields.io/github/go-mod/go-version/MaxWD/ProxyLM.GO)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Главная задача — **выжать максимум из имеющейся инфраструктуры LLM-серверов**: не дать каждому серверу тратить время на постоянное переключение моделей и одновременно равномерно нагружать все доступные серверы, чтобы результат приходил к пользователю как можно быстрее. Каждая LLM-модель занимает много памяти видеокарты; если на одном сервере доступно несколько моделей и приложения дёргают их вперемешку, серверу приходится выгружать одну модель и подгружать другую буквально на каждом запросе — это занимает секунды-минуты, и всё это время пользователи ждут. ProxyLM.GO собирает входящие запросы в очередь и **группирует их по модели**: сначала все запросы к модели A, потом все к модели B — модель загружается один раз и обрабатывает всю очередь, прежде чем её сменят. Если ту же модель умеют несколько серверов, запросы распределяются между ними параллельно и каждый новый запрос уходит к наименее загруженному — простаивающих машин не остаётся, и одна и та же ферма GPU отдаёт результаты заметно быстрее.
+OpenAI-compatible HTTP proxy for local LLM servers (LM Studio, Ollama) with model-aware queueing, retry/failover, SSE streaming, and a Bubble Tea TUI. Single portable binary, no CGO.
 
-Поставляется одним исполняемым файлом, который работает фоновой службой и имеет встроенный консольный интерфейс мониторинга. Кросс-компилируется под Windows, Linux и macOS.
+**[На русском](README.ru.md)** · English
 
-## Возможности
+---
 
-- OpenAI-совместимый API: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/healthz`
-- **Model-affinity queue**: запросы для текущей модели сервера обслуживаются до конца, прежде чем модель будет переключена
-- Несколько backend-серверов, авто-discovery моделей через `/v1/models`, failover на резервный сервер
-- Streaming (SSE) с прозрачным проксированием чанков
-- Bearer-аутентификация по поименованным API-ключам (имя клиента попадает в логи и историю; ключ — нет)
-- История запросов в SQLite, retention 30 дней (настраивается)
-- btop-подобный TUI на Bubble Tea — отдельный процесс через WebSocket к daemon'у
-- Установка как Windows Service / systemd unit / launchd job одной командой (`proxylm service install`)
-- Portable: конфиг и БД лежат рядом с бинарником
+## Overview
 
-## Архитектура
+ProxyLM.GO sits between your applications and one or more local (or remote) OpenAI-compatible LLM servers. To the client it looks like a standard OpenAI API endpoint; behind the scenes it manages routing, queuing, and failover across multiple backends.
 
-```
-  клиенты (service-a, service-b, ...)
-            │  HTTP / OpenAI-совместимый формат
-            ▼
-   ┌─────────────────────────────────┐
-   │ ProxyLM.GO daemon               │
-   │  AuthN ─► Router ─► per-server  │       ┌───────────┐
-   │            queues + workers ────┼──────►│ srv1 (LM) │
-   │              (drain current     │       └───────────┘
-   │               model fully)      │       ┌───────────┐
-   │  Discovery / SQLite / IPC ──────┼──────►│ srv2 (Ol) │
-   │                                 │       └───────────┘
-   └────────────────┬────────────────┘
-                    │ WebSocket /admin/stream
-                    ▼
-              TUI (Bubble Tea)
-```
+The primary design goal is to eliminate redundant model swaps. Each LLM occupies significant VRAM; when multiple clients request different models in an interleaved pattern, a server without a proxy spends seconds to minutes unloading and reloading models on every request. ProxyLM.GO collects incoming requests into per-server queues and **drains all pending requests for the currently loaded model before switching** — the model loads once and processes its entire backlog. Requests for the same model across multiple capable servers are distributed in parallel to keep GPU utilization high.
 
-Подробности — в [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
+## Features
 
-## Установка
+- **Model-affinity queue** — per-server worker drains all queued requests for the current model before switching; prevents redundant model swaps (INV-1..INV-3)
+- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/healthz`
+- **Multiple backends** — route across any number of OpenAI-compatible servers (LM Studio, Ollama, or cloud); configurable priority per backend
+- **Auto-discovery** — polls each backend's `/v1/models` at a configurable interval; marks unhealthy servers after N consecutive failures
+- **Retry and failover** — exponential backoff with rolling server exclusion; failover to another healthy backend after local retries (INV-5)
+- **SSE streaming** — transparent chunk-by-chunk proxying; no buffering, no retry after the first chunk is sent to the client (INV-6)
+- **Bearer authentication** — named API keys; client name appears in logs and history, the key itself does not
+- **Request history in SQLite** — pure-Go, no CGO (`modernc.org/sqlite`); configurable retention
+- **Bubble Tea TUI** — live request table, server health status, log stream; connects to the daemon over WebSocket
+- **System service** — install as Windows Service, systemd unit, or launchd job with one command
+- **Portable** — config and database live next to the binary; no installation required
 
-### Готовый бинарник
-
-Скачать соответствующий артефакт для своей платформы (`proxylm-<os>-<arch>[.exe]`) и положить в произвольную папку. Никакие рантаймы / интерпретаторы не нужны.
-
-### Сборка из исходников
-
-Требуется Go 1.22+:
+## Screenshots
 
 ```
-git clone <repo-url> proxylm.go
-cd proxylm.go
-go build -ldflags "-s -w -X main.version=dev" -o bin/proxylm .
++- ProxyLM.GO v0.9.5 -----------------------------------------------------------------------+
+| Servers: srv1 *(qwen2.5:14b)  srv2 *(idle)  srv3 x(down) | Q:4  Run:2  Done30m:17  Fail:1 |
++-----------+------------+----------+----------------+---------+--------+-------+-----------+
+| ID        | State      | Recv'd   | Model          | Server  | Done   | Queue | Status    |
++-----------+------------+----------+----------------+---------+--------+-------+-----------+
+| 0042      | done       | 14:01:02 | qwen2.5:14b    | srv1    |14:01:08| 0.1s  | OK        |
+| 0043      | run        | 14:02:11 | llama3.1:8b    | srv2    |   -    |  -    | ...       |
+| 0044      | queued     | 14:02:15 | llama3.1:8b    | srv2*   |   -    |  -    | ...       |
+| 0045      | queued     | 14:02:20 | qwen2.5:14b    | srv1*   |   -    |  -    | ...       |
+| 0040      | fail       | 13:55:40 | qwen2.5:14b    | srv1    |13:55:55| 0.2s  | ERR(2)    |
++-----------+------------+----------+----------------+---------+--------+-------+-----------+
+| Log                                                                                        |
+| 14:02:11 INFO  api      accepted req#0043 client=service-b model=llama3.1:8b              |
+| 14:02:11 INFO  router   chose srv2 (model loaded, queue=0)                                |
+| 14:01:02 INFO  api      accepted req#0042 client=service-a model=qwen2.5:14b              |
++--------------------------------------------------------------------------------------------+
+  F1 Help   F5 Refresh   /Search   F10 Quit
 ```
 
-Или скрипт:
+## Quick Start
 
+### 1. Download
+
+Download the pre-built binary for your platform from [Releases](https://github.com/MaxWD/ProxyLM.GO/releases):
+
+| Platform      | Archive                             |
+|---------------|-------------------------------------|
+| Linux x86-64  | `proxylm_linux_x86_64.tar.gz`       |
+| Linux ARM64   | `proxylm_linux_arm64.tar.gz`        |
+| macOS x86-64  | `proxylm_macos_x86_64.tar.gz`       |
+| macOS ARM64   | `proxylm_macos_arm64.tar.gz`        |
+| Windows x86-64| `proxylm_windows_x86_64.zip`        |
+
+Extract the archive. No runtime or interpreter is required.
+
+> Note: `go install github.com/MaxWD/ProxyLM.GO@latest` does not work — the Go module path is a local name (`proxylm`), not the GitHub URL. Installation is via the pre-built binary or by building from source.
+
+### 2. Run the daemon
+
+```sh
+./proxylm serve
 ```
-# Windows
-.\scripts\build.ps1
 
-# Linux / macOS
-./scripts/build.sh
+On first run the daemon writes `config.yaml` and `proxylm.db` next to the binary from the embedded template. Edit `config.yaml` before the next start.
+
+### 3. Configure backends
+
+Open `config.yaml` and adjust the `backends` section:
+
+```yaml
+backends:
+  - name: lm-studio
+    url: http://127.0.0.1:1234   # LM Studio default
+    type: openai
+    timeout_seconds: 600
+
+  - name: ollama
+    url: http://127.0.0.1:11434  # Ollama default
+    type: openai                 # Ollama exposes an OpenAI-compatible /v1/* shim
+    timeout_seconds: 600
 ```
 
-### Кросс-компиляция (без CGO, один файл на каждую цель)
+Change the placeholder keys in `auth.api_keys` and `auth.admin_key`, then restart the daemon.
 
-```
-GOOS=windows GOARCH=amd64 go build -o bin/proxylm-windows-amd64.exe .
-GOOS=linux   GOARCH=amd64 go build -o bin/proxylm-linux-amd64    .
-GOOS=linux   GOARCH=arm64 go build -o bin/proxylm-linux-arm64    .
-GOOS=darwin  GOARCH=arm64 go build -o bin/proxylm-darwin-arm64   .
-```
+### 4. Connect the TUI
 
-Или одной командой:
-
-```
-.\scripts\build-all.ps1
+```sh
+./proxylm tui --connect ws://localhost:8080 --token <admin_key>
 ```
 
-## Быстрый старт
+### 5. Send a request
 
-1. Положить бинарник `proxylm` (или `proxylm.exe`) в произвольную папку.
-
-2. Запустить daemon:
-
-   ```
-   ./proxylm serve
-   ```
-
-   При первом запуске рядом с бинарником появятся `config.yaml` (из встроенного шаблона) и `proxylm.db` (SQLite). Откорректировать `config.yaml`: подправить секцию `backends:` под свои IP/порты, поменять API-ключи в `auth.api_keys` и `auth.admin_key`. Перезапустить.
-
-3. В отдельном терминале — TUI:
-
-   ```
-   ./proxylm tui --connect ws://localhost:8080 --token <admin_key>
-   ```
-
-Пример запроса:
-
-```
+```sh
 curl -H "Authorization: Bearer sk-proxy-replace-me-aaaaa" \
      -H "Content-Type: application/json" \
      -d '{"model":"qwen2.5:14b","messages":[{"role":"user","content":"hi"}]}' \
      http://localhost:8080/v1/chat/completions
 ```
 
-Больше примеров (streaming, embeddings, `/v1/models`) — в [`docs/API.md`](./docs/API.md) §4.
+More examples (streaming, embeddings, `/v1/models`) — see [docs/API.md](docs/API.md) §4.
+
+## Configuration
+
+Full annotated example: [`config.example.yaml`](config.example.yaml).
+
+| Section             | Purpose                                                                                   |
+|---------------------|-------------------------------------------------------------------------------------------|
+| `proxy`             | `host`, `port`, `log_level` (debug / info / warning / error)                              |
+| `auth.api_keys`     | Named Bearer keys for client services                                                     |
+| `auth.admin_key`    | Separate key for TUI and `/admin/*` endpoints                                             |
+| `routing.strategy`  | `model_affinity_least_busy` (default), `least_busy`, `round_robin`, `deferred_model_then_capable`, `preserve_model_coverage` |
+| `retry`             | `max_attempts`, `initial_backoff_ms`, `max_backoff_ms`; rolling server exclusion (size 1) |
+| `discovery`         | `enabled`, `interval_seconds`, `unhealthy_after_failed_polls`                             |
+| `storage`           | `database_path`, `history_retention_days`, `vacuum_on_start`                             |
+| `tui`               | `show_completed_minutes` — how long completed requests stay visible in the table          |
+| `compat`            | `response_format_mode`: `passthrough` / `normalize_json_object` / `strict_reject`        |
+| `backends`          | List of servers: `name`, `url`, `priority`, `type`, `timeout_seconds`, `api_key`, `models` |
+
+CLI flags `--host` / `--port` on the `serve` command override YAML values.
+
+The `compat.response_format_mode` setting is useful for mixed backend pools:
+- `passthrough` — forward `response_format` as-is (default).
+- `normalize_json_object` — rewrite `response_format.type=json_object` to `json_schema` before the upstream call.
+- `strict_reject` — return HTTP 400 at the proxy if `type` is not `json_schema` or `text`.
+
+## Architecture Overview
+
+```
+  clients (service-a, service-b, ...)
+            |  HTTP / OpenAI-compatible format
+            v
+   +----------------------------------+
+   | ProxyLM.GO daemon                |        +-----------+
+   |  AuthN -> Router -> per-server   |------->| srv1 (LM) |
+   |           queues + workers       |        +-----------+
+   |           (drain current model   |        +-----------+
+   |            fully before switch)  |------->| srv2 (Ol) |
+   |  Discovery / SQLite / IPC        |        +-----------+
+   +----------------+-----------------+
+                    |  WebSocket /admin/stream
+                    v
+              TUI (Bubble Tea)
+```
+
+The scheduler enforces **model affinity**: a server's worker pops requests for the currently loaded model first. Only when that sub-queue is empty does it switch to the next model. This is the core invariant (INV-2) that eliminates redundant VRAM swaps.
+
+Full design details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## TUI
 
-```
-┌─ ProxyLM.GO v0.1.0 ──────────────────────────────────────────────────────────────────────────┐
-│ Servers: srv1 ●(qwen2.5:14b)  srv2 ●(idle)  srv3 ✗(down) │ Q:4  Run:2  Done30m:17  Fail:1   │
-├──────────────────────────────────────────────────────────────────────────────────────────────┤
-│  ID    State       Recv'd      Model           Server     Done       Queue   LLM    I/O tok   Status  │
-│  0042  ✓ done      14:01:02    qwen2.5:14b     srv1       14:01:08   0.1s    6.3s   312/82    OK      │
-│  0043  ▶ run       14:02:11    llama3.1:8b     srv2       —          0.1s    —      400/—     …       │
-│  0044  ⏳ queued   14:02:15    llama3.1:8b     srv2*      —          —       —      —/—       …       │
-│  0045  ⏳ queued   14:02:20    qwen2.5:14b     srv1*      —          —       —      —/—       …       │
-│  0040  ✗ fail      13:55:40    qwen2.5:14b     srv1       13:55:55   0.2s    15.0s  —/—       ERR(2)  │
-├─ Log ────────────────────────────────────────────────────────────────────────────────────────┤
-│ 14:02:11 INFO  api      accepted req#0043 client=service-b model=llama3.1:8b               │
-│ 14:02:11 INFO  router   chose srv2 (model loaded, queue=0)                                  │
-│ 14:01:02 INFO  api      accepted req#0042 client=service-a model=qwen2.5:14b                │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-   F1 Help  F5 Refresh  F10 Quit
+The TUI is a separate process that connects to the running daemon over WebSocket and receives a real-time stream of request events and log lines.
+
+```sh
+./proxylm tui --connect ws://localhost:8080 --token <admin_key>
 ```
 
-Хоткеи: `F1` — справка, `F5` — переподключение / refresh снапшота, `F10` или `q` — выход, `/` — поиск по таблице.
+Hotkeys: `F1` help, `F5` reconnect/refresh snapshot, `/` search, `F10` or `q` quit.
 
-Завершённые запросы скрываются из таблицы через `tui.show_completed_minutes` (default 30) — но остаются в SQLite.
+Completed requests are hidden from the table after `tui.show_completed_minutes` (default 30) but remain in SQLite.
 
-В `cmd.exe` юникод-глифы (`●`, `✓`, `▶`, `⏳`) могут рендериться некорректно. Включи ASCII-fallback:
+On Windows `cmd.exe` Unicode glyphs may not render correctly. Enable ASCII fallback:
 
-```
+```bat
 set PROXYLM_NO_UNICODE=1
 proxylm.exe tui --connect ws://localhost:8080 --token <admin_key>
 ```
 
-## Конфигурация
+## Build from Source
 
-Полный пример с комментариями — [`config.example.yaml`](./config.example.yaml). Ключевые секции:
+Requires Go 1.25.10 or later. No CGO.
 
-| Секция            | Назначение                                                         |
-|-------------------|--------------------------------------------------------------------|
-| `proxy`           | `host`, `port`, `log_level`                                         |
-| `auth.api_keys`   | список Bearer-ключей с `name`/`key`                                 |
-| `auth.admin_key`  | отдельный ключ для TUI и `/admin/*` эндпоинтов                      |
-| `routing.strategy`| `model_affinity_least_busy` (default), `least_busy`, `round_robin`, `deferred_model_then_capable` |
-| `retry`           | `max_attempts`, `initial_backoff_ms`, `max_backoff_ms` (rolling exclusion: упавший сервер пропускается ровно на 1 след. попытку) |
-| `discovery`       | `interval_seconds`, `unhealthy_after_failed_polls`                  |
-| `storage`         | `database_path`, `history_retention_days`                           |
-| `tui`             | `show_completed_minutes`                                            |
-| `compat`          | `response_format_mode` (`passthrough`, `normalize_json_object`, `strict_reject`) |
-| `backends`        | список серверов: `name`, `url`, `priority`, `type`, `timeout_seconds`, `models` |
-
-CLI-флаги `--host` / `--port` у `serve` переопределяют YAML.
-
-Для mixed-пула OpenAI-совместимых бэкендов полезен `compat.response_format_mode`:
-- `passthrough` — прокси не меняет `response_format`.
-- `normalize_json_object` — конвертирует `response_format.type=json_object` в `json_schema` перед upstream-вызовом.
-- `strict_reject` — возвращает ранний `400` на прокси, если `response_format.type` не `json_schema|text`.
-
-## Запуск как сервис
-
-ProxyLM.GO поддерживает регистрацию в системном Service Manager через единую CLI:
-
-```
-proxylm service install     # регистрирует службу под Windows / systemd / launchd
-proxylm service start
-proxylm service status
-proxylm service stop
-proxylm service uninstall
+```sh
+git clone https://github.com/MaxWD/ProxyLM.GO.git
+cd ProxyLM.GO
+go build -ldflags "-s -w -X main.version=dev" -o bin/proxylm .
 ```
 
-Под капотом — `github.com/kardianos/service`, который определяет ОС и работает соответственно:
-- **Windows:** Service Control Manager (`sc.exe`-эквивалент). После `install` служба видна в `services.msc`.
-- **Linux:** systemd unit в `/etc/systemd/system/proxylm.service` (нужны root-права для `install`/`uninstall`).
-- **macOS:** launchd plist в `~/Library/LaunchAgents/`.
+On Windows:
 
-Имя службы — `proxylm`. Рабочий каталог — каталог бинарника; конфиг и БД лежат там же.
-
-Конфиг с ключами должен иметь права `0600` (Linux/macOS) и принадлежать пользователю, под которым работает служба.
-
-## Разработка
-
-Установка зависимостей:
-
-```
-go mod download
+```powershell
+.\scripts\build.ps1
 ```
 
-Тесты и линт:
+Cross-compilation (single static binary per target, no CGO):
 
+```sh
+GOOS=linux   GOARCH=amd64 go build -o bin/proxylm-linux-amd64   .
+GOOS=linux   GOARCH=arm64 go build -o bin/proxylm-linux-arm64   .
+GOOS=darwin  GOARCH=arm64 go build -o bin/proxylm-darwin-arm64  .
+GOOS=windows GOARCH=amd64 go build -o bin/proxylm-windows-amd64.exe .
 ```
+
+Or all targets at once:
+
+```powershell
+.\scripts\build-all.ps1
+```
+
+Run tests:
+
+```sh
 go test ./...
 go test -cover ./internal/core/...
 gofmt -l .
@@ -204,20 +222,55 @@ go vet ./...
 golangci-lint run
 ```
 
-Структура каталогов и обзор модулей — [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) §12.
+## Run as a Service
 
-## Документация
+ProxyLM.GO can register itself with the system service manager via a single CLI:
 
-- Архитектура: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)
-- Полное ТЗ (FR / NFR / инварианты / acceptance-критерии): [`docs/SRS.md`](./docs/SRS.md)
-- API-контракт (OpenAI и admin/IPC): [`docs/API.md`](./docs/API.md)
-- Роли и владельцы документов: [`docs/AGENTS.md`](./docs/AGENTS.md)
-- Идеи и задачи на будущее (парковка, не roadmap): [`docs/FUTURE.md`](./docs/FUTURE.md)
+```sh
+proxylm service install    # Windows Service / systemd unit / launchd job
+proxylm service start
+proxylm service status
+proxylm service stop
+proxylm service uninstall
+```
 
-## Лицензия
+Backed by [`github.com/kardianos/service`](https://github.com/kardianos/service):
 
-MIT.
+- **Windows** — Service Control Manager; the service appears in `services.msc` after `install`.
+- **Linux** — systemd unit written to `/etc/systemd/system/proxylm.service`; requires root for `install`/`uninstall`.
+- **macOS** — launchd plist written to `~/Library/LaunchAgents/`.
 
-## Статус
+The service working directory is the directory containing the binary; config and database are resolved relative to it.
 
-Pre-1.0 alpha. Архитектурный скелет и документация готовы; реализация ядра в работе. Репозиторий приватный — issue tracker и канал обратной связи согласовываются отдельно.
+On Linux/macOS set `config.yaml` permissions to `0600` and ensure it is owned by the user running the service.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, scheduler algorithm, retry/failover, streaming, IPC, database schema, code layout |
+| [docs/SRS.md](docs/SRS.md) | Software Requirements Specification: FR/NFR, invariants, acceptance criteria, out-of-scope |
+| [docs/API.md](docs/API.md) | API contract: OpenAI v1 endpoints, admin/IPC WebSocket, backend call format |
+| [docs/AGENTS.md](docs/AGENTS.md) | Contributor roles and document ownership map |
+
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+
+## Security
+
+To report a security vulnerability, see [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Built With
+
+- [Bubble Tea](https://github.com/charmbracelet/bubbletea) — TUI framework
+- [Lip Gloss](https://github.com/charmbracelet/lipgloss) — terminal styling
+- [chi](https://github.com/go-chi/chi) — HTTP router
+- [coder/websocket](https://github.com/coder/websocket) — WebSocket (no CGO)
+- [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) — pure-Go SQLite
+- [cobra](https://github.com/spf13/cobra) — CLI framework
+- [kardianos/service](https://github.com/kardianos/service) — cross-platform service manager
