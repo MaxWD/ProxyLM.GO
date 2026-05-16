@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -68,7 +69,8 @@ func TestRouter_ErrNoServer(t *testing.T) {
 	if err == nil {
 		t.Fatal("ожидалась ошибка ErrNoServer")
 	}
-	if _, ok := err.(*ErrNoServer); !ok {
+	var noServerErr *ErrNoServer
+	if !errors.As(err, &noServerErr) {
 		t.Errorf("ожидался *ErrNoServer, получен %T", err)
 	}
 }

@@ -30,11 +30,16 @@ func Dial(ctx context.Context, baseURL, token string) (*Client, error) {
 		return nil, fmt.Errorf("ipc: пустой token")
 	}
 	url := baseURL + "/admin/stream"
-	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+	conn, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"Authorization": []string{"Bearer " + token},
 		},
 	})
+	// On failed handshake coder/websocket returns the *http.Response so the
+	// caller can read the body for error details; we don't, so just drain.
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("ipc dial %s: %w", url, err)
 	}

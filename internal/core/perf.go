@@ -253,8 +253,8 @@ func solveNNLS3(obs []perfObservation) (float64, float64, float64, bool) {
 		}
 	}
 	// 4. all-zero — всегда допустимо.
-	if r := rss3(obs, 0, 0, 0); r < bestRSS {
-		bestRSS, bestA, bestK1, bestK2 = r, 0, 0, 0
+	if rss3(obs, 0, 0, 0) < bestRSS {
+		bestA, bestK1, bestK2 = 0, 0, 0
 	}
 	return clampNonNeg(bestA), clampNonNeg(bestK1), clampNonNeg(bestK2), true
 }

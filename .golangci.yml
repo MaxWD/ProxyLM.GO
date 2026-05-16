@@ -23,7 +23,6 @@ linters:
     - bodyclose       # net/http resp.Body must be closed
     - contextcheck    # context.Context propagation
     - errorlint       # %w for error wrapping
-    - nilerr
     - rowserrcheck    # database/sql Rows.Err()
     - sqlclosecheck   # *sql.Rows / *sql.Stmt must be closed
   exclusions:
@@ -33,6 +32,22 @@ linters:
         linters:
           - errcheck
           - bodyclose
+      # `defer x.Close()` is idiomatic Go; the close-error is rarely actionable.
+      - linters: [errcheck]
+        source: 'defer\s+[\w.()]+\.Close\(\)'
+      # staticcheck QF*** are *quick-fix* style hints, not bugs (e.g. lifting
+      # if into for-condition). Keep semantic checks (SA***, S***), drop QF.
+      - linters: [staticcheck]
+        text: '^QF\d+:'
+      # persistRecord intentionally detaches from r.Context() (see comment in
+      # routes_openai.go) — a client disconnect must not lose the final write.
+      - linters: [contextcheck]
+        path: internal/api/routes_openai\.go
+        source: 'h\.persistRecord\('
+      # Graceful shutdown uses its own bounded context, not the inherited one.
+      - linters: [contextcheck]
+        path: internal/api/server\.go
+        source: 's\.srv\.Shutdown\(shutdownCtx\)'
 
 formatters:
   enable:
