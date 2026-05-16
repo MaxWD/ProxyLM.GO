@@ -228,8 +228,15 @@ func TestScheduler_Deferred_DistributesBetweenIdleServers(t *testing.T) {
 }
 
 // TestScheduler_Deferred_DrainBeforeSwap: один сервер, current_model=m1,
-// pool заполнен [m1, m2, m1]. Worker должен отработать оба m1, и только потом m2.
+// pool заполнен [m2, m1]. Worker должен отработать m1 (j3) до swap на m2 (j2).
 // Это INV-2/3, перенесённый из push-режима в pull.
+//
+// Детерминированность порядка Push'а обеспечивается hold-паттерном:
+//   - j1/m1 запускается первым и блокируется внутри Run до сигнала holdRelease.
+//   - Пока j1 занимает сервер (InFlight=true), последовательно публикуем
+//     j2/m2 и j3/m1 в pool через busy-wait на pool.Len(), без time.Sleep.
+//   - К моменту завершения j1 в pool гарантированно лежит [j2/m2, j3/m1].
+//   - PopFor (INV-2/3): current_model=m1 → сначала j3/m1, потом swap на j2/m2.
 func TestScheduler_Deferred_DrainBeforeSwap(t *testing.T) {
 	srv := mkSrv(t, "a", 100, true, "m1", "m1", "m2")
 	s, cancel := makeDeferredSched(t, []*ServerInfo{srv}, RetryConfig{MaxAttempts: 1})
@@ -246,29 +253,67 @@ func TestScheduler_Deferred_DrainBeforeSwap(t *testing.T) {
 		}
 	}
 
+	// Hold-каналы: j1 блокируется до явного сигнала, чтобы мы успели
+	// детерминированно уложить j2 и j3 в pool пока j1 в работе.
+	j1Running := make(chan struct{})
+	holdRelease := make(chan struct{})
+
 	var wg sync.WaitGroup
-	submit := func(id, model string) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, _ = s.Submit(context.Background(), &Job{ID: id, Model: model, Run: mkRun(id, model)})
-		}()
+
+	// j1 — "держатель": запускается первым, уведомляет j1Running и блокируется.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = s.Submit(context.Background(), &Job{
+			ID:    "j1",
+			Model: "m1",
+			Run: func(_ context.Context, _ *ServerInfo) JobResult {
+				orderMu.Lock()
+				order = append(order, "j1/m1")
+				orderMu.Unlock()
+				close(j1Running) // сигнал: сервер занят j1
+				<-holdRelease    // ждём разрешения завершиться
+				return JobResult{HTTPStatus: 200}
+			},
+		})
+	}()
+
+	// Ждём, пока j1 действительно стартовал (сервер занят).
+	select {
+	case <-j1Running:
+	case <-time.After(2 * time.Second):
+		t.Fatal("j1 не начал работу — что-то не так с initial dispatch")
 	}
-	// Запускаем все три Submit'а почти одновременно — порядок в pool определяет
-	// порядок их Push'а; чтобы получить детерминированный [m1, m2, m1] вход,
-	// делаем sequential Submit с маленькой синхронизацией через WaitGroup
-	// (а не time.Sleep, как требует CLAUDE.md).
-	//
-	// Для детерминированной последовательности добавления — последовательный
-	// Push в pool через прямые вызовы pool.Push, ручной Wake и блок жидания.
-	// Но это потребует ручного управления done-каналом. Проще: один Submit
-	// в фоне держит first slot, далее серийный Push.
-	//
-	// Здесь идём проще: первый Submit стартует и идёт в работу (m1 уже current);
-	// остальные два кладутся в pool через свои Submit'ы быстро друг за другом.
-	submit("j1", "m1")
-	submit("j2", "m2")
-	submit("j3", "m1")
+
+	// Теперь сервер занят j1 (InFlight=true). Последовательно кладём j2 и j3
+	// в pool. Используем busy-wait на pool.Len() — без time.Sleep (CLAUDE.md).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = s.Submit(context.Background(), &Job{ID: "j2", Model: "m2", Run: mkRun("j2", "m2")})
+	}()
+	for {
+		if s.pool.Len() >= 1 {
+			break
+		}
+		runtime.Gosched()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = s.Submit(context.Background(), &Job{ID: "j3", Model: "m1", Run: mkRun("j3", "m1")})
+	}()
+	for {
+		if s.pool.Len() >= 2 {
+			break
+		}
+		runtime.Gosched()
+	}
+
+	// pool = [j2/m2, j3/m1], сервер держит j1 с current_model=m1. Отпускаем j1.
+	// После j1 PopFor должен взять j3/m1 (drain current), затем j2/m2 (swap).
+	close(holdRelease)
 	wg.Wait()
 
 	orderMu.Lock()

@@ -1,45 +1,50 @@
-# golangci-lint config для ProxyLM.GO
-# Запуск: golangci-lint run
+# golangci-lint v2 config for ProxyLM.GO
+# Run: golangci-lint run
+# Migration guide: https://golangci-lint.run/docs/product/migration-guide
+
+version: "2"
 
 run:
   timeout: 5m
-  go: "1.22"
   tests: true
 
 linters:
-  disable-all: true
+  default: none
   enable:
-    # Default set
+    # Default set (gosimple is merged into staticcheck in v2)
     - errcheck
-    - gosimple
     - govet
     - ineffassign
     - staticcheck
     - unused
-    # Дополнительно
-    - gofmt
-    - goimports
+    # Extras
     - misspell
     - unconvert
-    - bodyclose       # net/http resp.Body должен закрываться
+    - bodyclose       # net/http resp.Body must be closed
     - contextcheck    # context.Context propagation
-    - errorlint       # %w для wrapping
+    - errorlint       # %w for error wrapping
     - nilerr
     - rowserrcheck    # database/sql Rows.Err()
-    - sqlclosecheck   # *sql.Rows / *sql.Stmt должны закрываться
+    - sqlclosecheck   # *sql.Rows / *sql.Stmt must be closed
+  exclusions:
+    rules:
+      # Tests may use long functions and skip a few checks.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - bodyclose
 
-linters-settings:
-  gofmt:
-    simplify: true
-  goimports:
-    local-prefixes: proxylm
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - proxylm
 
 issues:
-  exclude-rules:
-    # Тестам можно использовать длинные функции и т.п.
-    - path: _test\.go
-      linters:
-        - errcheck
-        - bodyclose
   max-issues-per-linter: 0
   max-same-issues: 0
