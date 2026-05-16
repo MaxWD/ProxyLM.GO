@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest a new feature or enhancement
+title: "feat: <short summary>"
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Please describe the problem first — solutions are easier to evaluate when the motivating use-case is clear.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that ProxyLM.GO does not currently support, or supports poorly?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What behaviour, API, or configuration option would solve the problem?
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you have thought about, workarounds you tried, or related tools.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: pr
+    attributes:
+      label: Willing to contribute a PR?
+      options:
+        - "Yes — I plan to send a PR"
+        - "Maybe — depends on guidance from maintainers"
+        - "No — request only"
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+    validations:
+      required: false

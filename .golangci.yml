@@ -1,0 +1,45 @@
+# golangci-lint config для ProxyLM.GO
+# Запуск: golangci-lint run
+
+run:
+  timeout: 5m
+  go: "1.22"
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    # Default set
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    # Дополнительно
+    - gofmt
+    - goimports
+    - misspell
+    - unconvert
+    - bodyclose       # net/http resp.Body должен закрываться
+    - contextcheck    # context.Context propagation
+    - errorlint       # %w для wrapping
+    - nilerr
+    - rowserrcheck    # database/sql Rows.Err()
+    - sqlclosecheck   # *sql.Rows / *sql.Stmt должны закрываться
+
+linters-settings:
+  gofmt:
+    simplify: true
+  goimports:
+    local-prefixes: proxylm
+
+issues:
+  exclude-rules:
+    # Тестам можно использовать длинные функции и т.п.
+    - path: _test\.go
+      linters:
+        - errcheck
+        - bodyclose
+  max-issues-per-linter: 0
+  max-same-issues: 0

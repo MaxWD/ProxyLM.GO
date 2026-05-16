@@ -1,0 +1,121 @@
+version: 2
+
+project_name: proxylm
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: proxylm
+    main: ./
+    binary: proxylm
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: proxylm
+    ids:
+      - proxylm
+    name_template: >-
+      {{ .ProjectName }}_v{{ .Version }}_
+      {{- if eq .Os "darwin" }}macos
+      {{- else }}{{ .Os }}{{ end }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - SECURITY.md
+      - CONTRIBUTING.md
+      - CODE_OF_CONDUCT.md
+      - config.example.yaml
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - '^chore\(deps\):'
+      - '^chore: bump'
+      - '^docs:'
+      - '^test:'
+      - '^style:'
+      - merge conflict
+      - 'Merge pull request'
+      - 'Merge branch'
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Performance
+      regexp: '^.*?perf(\(.+\))??!?:.+$'
+      order: 2
+    - title: Refactor
+      regexp: '^.*?refactor(\(.+\))??!?:.+$'
+      order: 3
+    - title: Other
+      order: 999
+
+release:
+  github:
+    owner: MaxWD
+    name: ProxyLM.GO
+  draft: false
+  prerelease: auto
+  mode: replace
+  name_template: "ProxyLM.GO v{{ .Version }}"
+  header: |
+    ## ProxyLM.GO {{ .Tag }}
+
+    OpenAI-compatible HTTP proxy for local LLMs (LM Studio, Ollama) with model-aware
+    queueing, retry/failover, SSE streaming, and a Bubble Tea TUI. Single portable
+    binary, no CGO.
+  footer: |
+    ---
+
+    ### Installation
+
+    Download the archive for your platform, extract, and run:
+
+    ```sh
+    ./proxylm serve          # start the daemon
+    ./proxylm tui            # connect the TUI client
+    ```
+
+    First run creates `config.yaml` next to the binary from the embedded template.
+    Edit it to add your LM Studio / Ollama backends.
+
+    See the [README](https://github.com/MaxWD/ProxyLM.GO/blob/main/README.md) for full
+    documentation and [SECURITY.md](https://github.com/MaxWD/ProxyLM.GO/blob/main/SECURITY.md)
+    for the vulnerability disclosure process.
+
+    **Full Changelog**: https://github.com/MaxWD/ProxyLM.GO/compare/{{ .PreviousTag }}...{{ .Tag }}
