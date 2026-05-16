@@ -13,6 +13,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    # Use bash on all runners (incl. Windows via Git for Windows).
+    # Avoids PowerShell parsing quirks like splitting "-flag=value" on dots
+    # (e.g. -coverprofile=coverage.out → "-coverprofile=coverage" + ".out").
+    shell: bash
+
 jobs:
   test:
     name: Build & Test (${{ matrix.os }})
@@ -71,6 +78,10 @@ jobs:
           fi
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: latest
+          # Build linter from source using the Go toolchain set up above
+          # (the prebuilt binary in older action versions ships its own
+          # older Go runtime, which trips typecheck on go.mod >= 1.25).
+          install-mode: goinstall
