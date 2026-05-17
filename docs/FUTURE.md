@@ -85,3 +85,13 @@ This document records features that did not make it into current releases but ar
 **Problem:** `modernc.org/sqlite` (pure-Go) is noticeably slower than `mattn/go-sqlite3` (CGO) under high history throughput.
 
 **Solution:** build tag `sqlite_cgo` switches to `mattn/go-sqlite3` instead of `modernc`; default remains pure-Go. Relevant for high-throughput installations (R-7 in SRS.md §9.2).
+
+---
+
+## 10. Model aliasing / fallback mapping (priority: low)
+
+**Problem:** when a client requests a model not present on any healthy server, the proxy returns `ErrNoServer` / 503. Some clients work with an entire model family (e.g., "any 20B+ instruct") and do not want a 404 when a specific model name is not deployed.
+
+**Solution:** config parameter at the `compat.model_aliases` level (or a separate section) with rules of the form `from: <model> → to: [<candidate1>, <candidate2>, …]`. When a request arrives for a model absent from all healthy servers, the proxy substitutes it with the first available candidate from the list and forwards; both model names (`requested_model` vs `actual_model`) are recorded in logs and history.
+
+**Constraint:** currently (v0.9.3 baseline) the absence of a model returns `ErrNoServer` / 503 — this is a deliberate choice until aliasing is implemented.

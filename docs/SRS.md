@@ -1,7 +1,7 @@
 # ProxyLM.GO — Software Requirements Specification (SRS)
 
-Document version: 0.7.0
-Target release: ProxyLM.GO v0.1.0 (MVP) + additions v0.7.0
+Document version: 0.9.3
+Baseline: ProxyLM.GO v0.9.3 (first public release)
 Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`API.md`](./API.md), [`AGENTS.md`](./AGENTS.md)
 
 ---
@@ -14,7 +14,7 @@ ProxyLM.GO is an HTTP proxy in Go placed in front of local LLM servers (LM Studi
 
 Delivered as a **single portable binary**: the same executable can run as a daemon (service) or as a TUI client to a running daemon. On first run, `config.yaml` and `proxylm.db` are automatically created alongside the binary. Cross-compiles to any OS (`GOOS`/`GOARCH`) without a CGO toolchain.
 
-This document describes functional and non-functional requirements, scheduler invariants, MVP acceptance criteria, and explicit out-of-scope items for version 0.1.0.
+This document describes functional and non-functional requirements, scheduler invariants, acceptance criteria, and explicit out-of-scope items for v0.9.3 baseline.
 
 ### 1.2. Scope
 
@@ -63,7 +63,7 @@ The product applies to installations where:
 | Operator / admin    | Person monitoring load and errors; starts / stops the daemon                               | TUI (via WebSocket `/admin/stream`), CLI    |
 | Integrator / DevOps | Installs, configures, and deploys the proxy                                                 | CLI (`proxylm serve`, `proxylm service …`)  |
 
-ProxyLM.GO is **not** intended for exposure to the public internet in MVP — it is designed for a trusted internal network.
+ProxyLM.GO is **not** intended for exposure to the public internet — it is designed for a trusted internal network.
 
 ---
 
@@ -145,7 +145,7 @@ Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 | FR-38  | The TUI MUST work correctly in Windows Terminal, cmd.exe, PowerShell, and standard Linux terminals (xterm-256color). |
 | FR-39  | The TUI MUST display timestamps (`Queued`/`Started`/`Completed at` columns in the table, log timestamps) in the OS local timezone. The daemon stores/transmits time in UTC; conversion happens on the TUI side. |
 | FR-40  | The TUI MUST display each server in the HeaderBar on a separate line (multi-line). Header height grows proportionally to the number of servers; the log pane shrinks proportionally. |
-| FR-41  | The daemon MUST collect all observations from completed requests per `(server_name, model)` pair in memory and compute the linear model parameters `loaded·t_load + b·k_in + c·k_out ≈ t_all` (3×3 normal equations; 2×2 fallback if no reload observations or 3×3 is singular). Minimum for a valid estimate — 3 observations (`perfMinSamples = 3`). Fields `perf_ok`, `t_load_ms`, `tok_in_per_sec`, `tok_out_per_sec` are published in `ServerState`; the TUI MUST show them in the HeaderBar server line in the format `t_load · ↓tok_in/s · ↑tok_out/s`. If `perf_ok = false` or `current_model` is empty — the metrics line is empty. Fields `tokens_per_sec` and `ttft_ms` are **removed** (introduced in v0.7.0). |
+| FR-41  | The daemon MUST collect all observations from completed requests per `(server_name, model)` pair in memory and compute the linear model parameters `loaded·t_load + b·k_in + c·k_out ≈ t_all` (3×3 normal equations; 2×2 fallback if no reload observations or 3×3 is singular). Minimum for a valid estimate — 3 observations (`perfMinSamples = 3`). Fields `perf_ok`, `t_load_ms`, `tok_in_per_sec`, `tok_out_per_sec` are published in `ServerState`; the TUI MUST show them in the HeaderBar server line in the format `t_load · ↓tok_in/s · ↑tok_out/s`. If `perf_ok = false` or `current_model` is empty — the metrics line is empty. Fields `tokens_per_sec` and `ttft_ms` are **removed**. |
 
 ### 3.8. CLI / Launch
 
@@ -157,7 +157,7 @@ Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 | FR-42  | `proxylm config validate` MUST parse and validate the config via the typed model; on error — print a clear message and exit with code ≥ 1. |
 | FR-43  | `proxylm tui --connect ws://host:port --token <admin_key>` MUST connect to a running daemon. |
 
-### 3.9. Performance Metrics (introduced in v0.7.0)
+### 3.9. Performance Metrics
 
 | ID     | Requirement |
 |--------|-------------|
@@ -213,7 +213,7 @@ Fields (minimum):
 | `attempts`      | int              | total attempts across all servers                        |
 | `error`         | str \| None      | message when `failed`                                    |
 | `stream`        | bool             | streaming request flag                                   |
-| `model_reloaded` | bool           | `true` if dispatch triggered a model switch on the server (introduced in v0.7.0) |
+| `model_reloaded` | bool           | `true` if dispatch triggered a model switch on the server |
 
 #### `RequestRecord` State Diagram
 
@@ -361,9 +361,9 @@ During normal operation (without a process restart) no request from `pending` mu
 
 ---
 
-## 7. MVP Acceptance Criteria (v0.1.0)
+## 7. Acceptance Criteria (v0.9.3 baseline)
 
-MVP is considered complete when **all** items below are satisfied:
+The baseline is considered complete when **all** items below are satisfied:
 
 | ID    | Criterion | Verification method |
 |-------|-----------|---------------------|
@@ -386,17 +386,17 @@ MVP is considered complete when **all** items below are satisfied:
 | AC-17 | First `proxylm serve` launch without an existing `config.yaml` alongside the binary creates it from the embedded template and continues startup. | manual |
 | AC-18 | `proxylm service install` registers the service on Windows (Service Manager) and Linux (systemd unit); `service start/stop` manages its lifecycle. | manual |
 | AC-19 | Build `GOOS=linux GOARCH=arm64 go build` on a Windows host successfully produces a binary without CGO toolchain. | manual |
-| AC-20 | After at least 3 completed requests to one model on one server, `ServerState.perf_ok = true`; `tok_out_per_sec > 0`; TUI shows the metric in the header line. (introduced in v0.7.0) | integration test |
-| AC-21 | RM column in TUI table: a row with `model_reloaded=true` shows `✓`, a row without reload shows `—`. (introduced in v0.7.0) | manual + SQL query |
-| AC-22 | `Tab` in TUI cycles focus Header → Requests → Log → Header; in paneHeader `↑`/`↓` change the selected server; `Enter` opens the server-detail modal with per-model table. (introduced in v0.7.0) | manual |
-| AC-23 | Request table: columns are aligned in the terminal without shifting when pending rows are present (glyph `…` occupies exactly one cell). (introduced in v0.7.0) | manual |
-| AC-24 | Field `model_reloaded` is present in the SQLite `requests` table (verified by `.schema requests`); value `1` for requests with model switch, `0` for others. (introduced in v0.7.0) | SQL query |
+| AC-20 | After at least 3 completed requests to one model on one server, `ServerState.perf_ok = true`; `tok_out_per_sec > 0`; TUI shows the metric in the header line. | integration test |
+| AC-21 | RM column in TUI table: a row with `model_reloaded=true` shows `✓`, a row without reload shows `—`. | manual + SQL query |
+| AC-22 | `Tab` in TUI cycles focus Header → Requests → Log → Header; in paneHeader `↑`/`↓` change the selected server; `Enter` opens the server-detail modal with per-model table. | manual |
+| AC-23 | Request table: columns are aligned in the terminal without shifting when pending rows are present (glyph `…` occupies exactly one cell). | manual |
+| AC-24 | Field `model_reloaded` is present in the SQLite `requests` table (verified by `.schema requests`); value `1` for requests with model switch, `0` for others. | SQL query |
 
 ---
 
-## 8. Out of Scope for MVP
+## 8. Out of Scope (deferred to FUTURE)
 
-The following are explicitly **not** implemented in version 0.1.0:
+The following are explicitly **not** implemented in the v0.9.3 baseline:
 
 - Web UI (HTML interface).
 - Prometheus metrics / `GET /metrics`.
@@ -425,25 +425,25 @@ The following are explicitly **not** implemented in version 0.1.0:
 | A-3   | The Ollama OpenAI shim (`/v1/*`) correctly responds to `/v1/models` and `/v1/chat/completions`. | Native `/api/*` support is out of scope; users must use the OpenAI shim. |
 | A-4   | The network between the proxy and backend is stable; significant packet loss is treated as a server failure. | Failover should compensate. |
 | A-5   | Clients retry requests on 5xx from their side (since the proxy will have exhausted its own attempts). | Some requests will fail at the client when all backends are down. |
-| A-6   | `usage` in the final SSE chunk from the backend is present **often enough** for token statistics to be useful. | If absent — `input_tokens`/`output_tokens` remain `NULL` (see U-1 in §9.3); fallback token counting deferred to v0.2. |
+| A-6   | `usage` in the final SSE chunk from the backend is present **often enough** for token statistics to be useful. | If absent — `input_tokens`/`output_tokens` remain `NULL` (see U-1 in §9.3); fallback token counting tracked in [`docs/FUTURE.md`](./FUTURE.md). |
 
 ### 9.2. Risks
 
 | ID    | Risk | Mitigation |
 |-------|------|------------|
-| R-1   | Starvation of model B under an infinite stream of model A requests (see ARCHITECTURE §3). | Document as a deliberate trade-off; in v0.2 — optional `max_consecutive_requests_per_model`. |
+| R-1   | Starvation of model B under an infinite stream of model A requests (see ARCHITECTURE §3). | Documented as a deliberate trade-off; possible mitigation tracked in [`docs/FUTURE.md`](./FUTURE.md) (item §8). |
 | R-2   | LM Studio takes a long time to load a large model into VRAM → request timeout. | `backends[].timeout_seconds` (default 600) + recommendation in README. |
 | R-3   | Mismatch between discovery model list and reality (model deleted on host between polls). | Request will get 404 from backend → standard error path + next discovery cycle corrects ModelMap. |
 | R-4   | Concurrent access to `current_model` between the worker and the router. | Worker updates `current_model` under the server's `sync.Mutex`; router reads the value under the same mutex (or `atomic.Pointer[string]`); eventual consistency is acceptable for heuristics. |
-| R-5   | Queue size is unbounded — DoS from a client. | Out of scope for MVP; to be addressed in v0.2 (`max_queue_size_per_server`). |
+| R-5   | Queue size is unbounded — DoS from a client. | Documented as a deliberate trade-off; mitigation tracked in [`docs/FUTURE.md`](./FUTURE.md). |
 | R-6   | Key leakage into logs during debugging. | Masking in `internal/api/auth.go`; covered by unit test. |
-| R-7   | `modernc.org/sqlite` is slower than the CGO variant under high history write load. | Async history writing (via channel), batch inserts; in v0.2 — evaluate switching to CGO with conditional build. |
+| R-7   | `modernc.org/sqlite` is slower than the CGO variant under high history write load. | Async history writing (via channel), batch inserts; further mitigation tracked in [`docs/FUTURE.md`](./FUTURE.md) (item §9). |
 
 ### 9.3. Closed Questions (Confirmed Decisions)
 
 All questions previously marked "requires clarification" have been confirmed and are considered final for MVP.
 
-- **U-1.** Token counting when `usage` is absent in the backend response — leave `NULL`. Fallback counting **deferred to v0.2**.
+- **U-1.** Token counting when `usage` is absent in the backend response — leave `NULL`. Fallback counting tracked in [`docs/FUTURE.md`](./FUTURE.md).
 - **U-2.** `GET /v1/models` returns models **from healthy servers only**.
 - **U-3.** `proxylm serve` when all backends are unavailable at startup — **starts** and returns `503` for requests until discovery finds at least one healthy server.
 - **U-4.** On mid-stream SSE disconnection — send `event: error` with `data: {"error": {"code": "stream_aborted", "message": "..."}}`, then `data: [DONE]` (see API.md §1.6).
@@ -457,44 +457,18 @@ Additionally confirmed regarding scheduler behavior:
 
 ---
 
-## 10. Version Plan
+## 10. Versioning and Roadmap
 
-### v0.1.0 — MVP
+### Current baseline: v0.9.3 (first public release)
 
-Fully implements FR-1 … FR-43, NFR-1 … NFR-12, INV-1 … INV-8, AC-1 … AC-19.
+Fully implements:
+- FR-1 … FR-47 (HTTP API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics)
+- NFR-1 … NFR-12
+- INV-1 … INV-8
+- AC-1 … AC-24
 
-### v0.7.0 — regression metrics + TUI UX
+### Future work
 
-Added FR-44 … FR-47, AC-20 … AC-24:
+Roadmap items, ideas, and deferred mitigations are tracked **exclusively** in [`docs/FUTURE.md`](./FUTURE.md). No version-numbered roadmap is maintained inside this SRS — see `CLAUDE.md` (FUTURE-RULE) for how items move from FUTURE to a real release.
 
-- Linear performance regression `(server, model)`: `t_load`, `tok_in_per_sec`, `tok_out_per_sec` in IPC and TUI header.
-- RM (Reload Model) column in request table; `model_reloaded` field in DB and IPC.
-- Interactive header (`paneHeader`): Tab navigation, `↑`/`↓` server selection, server-detail modal.
-- Queue glyph fix: `…` (U+2026) instead of `⏳` for correct column alignment.
-
-### v0.2.0 — first patch (first priorities)
-
-- `max_consecutive_requests_per_model` — starvation protection (R-1).
-- `max_queue_size_per_server` — backpressure / DoS mitigation (R-5).
-- Optional fallback token counting (U-1).
-- Native Ollama endpoints (`/api/generate`, `/api/chat`) — passthrough.
-- Prometheus metrics (`/metrics`).
-- Per-client 429 rate limiting (key-based).
-- Hot config reload for adding/removing backends without restart.
-- Queue persistence (optional mode, via the same SQLite).
-- Optional CGO-SQLite build (`mattn/go-sqlite3`) under build tag — for high-throughput installations (R-7).
-
-### v0.3.0+ — under discussion
-
-- Web UI.
-- Cluster mode.
-- Per-client quotas in monetary units.
-- mTLS / OAuth2.
-- **Model aliasing / fallback mapping.** Config parameter at the `compat.model_aliases` level
-  (or a separate section) with rules of the form `from: <model> → to: [<candidate1>, <candidate2>, …]`.
-  When a request arrives for a model absent from all healthy servers, the proxy
-  "substitutes" it with one of the compatible candidates and forwards; both models
-  (`requested_model` vs `actual_model`) are recorded in logs and history. Use case: the client
-  only needs a model family (e.g., any 20B+ instruct) and does not want to fail with 404
-  when a specific installation is not deployed. Currently (v0.3.0) the absence of a model
-  returns `ErrNoServer` / 503 — this is a deliberate choice until aliasing is implemented.
+Versioning follows SemVer; see `CLAUDE.md` (section «Версионирование (SemVer)») for the bump policy and how the `MAJOR.MINOR.PATCH` components are chosen by Claude Code at commit time.
