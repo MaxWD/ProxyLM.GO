@@ -92,9 +92,74 @@ model: sonnet
 
 Делегирование оформляй явно: в ответе пользователю или в TODO укажи «**Задача для `<agent>`:** ...». Когда возможно, формулируй задачу как файл-список + критерии приёмки.
 
+## Workflow при защищённом main (стандартный PR-цикл)
+
+`main` на `MaxWD/ProxyLM.GO` **защищён** branch protection rules: прямой `git push origin main` отклоняется (`GH006: Protected branch update failed`). Любое изменение проходит через PR с прохождением 5 required status checks (`Build & Test (ubuntu|windows|macos-latest)`, `Lint`, `govulncheck`).
+
+### Стандартный цикл изменения
+
+Каждый раз, когда нужно внести изменения в `main` (от багфикса до docs), формулируй пользователю ровно такую последовательность:
+
+```powershell
+# 1. Создать feature branch от main
+git switch -c <type>/<short-slug>           # type ∈ {feat, fix, docs, chore, refactor, test}
+                                             # пример: feat/router-weighted, fix/scheduler-leak, docs/clarify-srs
+
+# 2. Закоммитить изменения (множественные коммиты допустимы — squash при merge соединит)
+git add <files>
+git commit -m "<conventional commit message>"
+
+# 3. Push feature branch
+git push -u origin <branch-name>
+
+# 4. Создать PR через web UI (gh CLI не установлен у пользователя по умолчанию)
+#    GitHub после push выведет ссылку вида:
+#    https://github.com/MaxWD/ProxyLM.GO/pull/new/<branch-name>
+#    Title: <conventional commit subject>
+#    Body: краткое описание изменений + связанные issues (Closes #N)
+
+# 5. Дождаться зелёного CI (3-5 минут, 5 status checks)
+
+# 6. Squash-merge через web UI (Settings → Branches → "Require linear history" включено)
+#    Кнопка "Squash and merge" → подтверждение → "Delete branch"
+
+# 7. Подтянуть merge локально
+git switch main
+git pull origin main
+git branch -d <branch-name>   # local cleanup (remote уже удалён через web UI)
+```
+
+**Если коммиты случайно сделаны в local `main`** (вместо feature branch), используй паттерн «перенести в ветку + откатить local main»:
+
+```powershell
+git switch -c <type>/<slug>          # создаёт ветку из текущего HEAD (с локальными коммитами)
+git branch -f main origin/main       # local main возвращается к remote main (коммиты сохранены в новой ветке)
+git push -u origin <branch>          # push feature branch
+# далее PR через web UI как обычно
+```
+
+### Релизный цикл
+
+После того как изменения в `main` merged через PR:
+
+```powershell
+git switch main && git pull origin main      # быть на свежем main
+git tag v<X>.<Y>.<Z>                          # SemVer; bump по правилам CLAUDE.md
+git push origin v<X>.<Y>.<Z>                  # push тега
+```
+
+Push тега `v*.*.*` триггерит `release.yml` → GoReleaser собирает 5 архивов + checksums + создаёт GitHub Release. Теги push'аются напрямую (не через PR) — branch protection не блокирует push тегов.
+
+### Когда нужен hotfix без PR
+
+Если admin (MaxWD) включил в branch protection `Allow bypass: <username>`, тогда прямой `git push origin main` сработает для maintainer. Это для emergency-only; обычные изменения должны идти через PR (CI всё-таки проверяет код).
+
+Если bypass не включён и нужен срочный push: либо временно сними правило в Settings → Branches → Edit ruleset, либо иди через PR (быстрее в среднем).
+
 ## Что НЕ делать
 
 - **Не делай `git push` без явного запроса пользователя.** Public-push — это hard-to-reverse операция (после публикации секрет в истории считается утёкшим, даже если потом force-push'нуть).
+- **Не пытайся `git push origin main` напрямую** — main защищён, push отклонится. Всегда формулируй PR-flow через feature branch (см. секцию выше).
 - **Не создавай репозиторий на GitHub** (`gh repo create`) без явного запроса. Пользователь может предпочесть создать вручную через web UI с правильными настройками (visibility, default branch, README seed).
 - **Не публикуй Release** (`gh release create`) без подтверждения. Особенно — не помечай как «Latest», пока пользователь не подтвердил.
 - **Не используй `--force-push`** для main или релизных тегов. Если в истории найдена утечка — обсуждай с пользователем.
@@ -109,7 +174,7 @@ model: sonnet
 Эти шаги агент выполнить не может — формулируешь рекомендации и оставляешь пользователю:
 
 1. **Создание репозитория на GitHub** — через web UI или `gh repo create MaxWD/ProxyLM.GO --public --description "..."`. Включить: Issues, Discussions (рекомендуется для Q&A), Wiki (опц.), Projects (опц.). Default branch: `main`.
-2. **Branch protection rules** на `main`: require pull request reviews (≥1), require status checks (CI must pass), require linear history (опц.), не позволять force-push.
+2. **Branch protection rules** на `main` (**уже настроено** на `MaxWD/ProxyLM.GO`): require pull request, require 5 status checks (`Build & Test ubuntu/windows/macos-latest`, `Lint`, `govulncheck`), require linear history, no force-push. Detail: пользователь может включить **Allow bypass** для своего аккаунта (Settings → Branches → Edit ruleset → Bypass list) — тогда прямой push для maintainer возможен в emergency, но обычный поток остаётся PR-based. См. секцию «Workflow при защищённом main» выше — формулируй пользователю команды по этому шаблону при каждом изменении.
 3. **GitHub Personal Access Token** или `gh auth login` (через OAuth) — для работы `gh` CLI из агента.
 4. **GPG-подпись коммитов и тегов** (опционально, повышает доверие): `git config --global commit.gpgsign true` + загрузка GPG-ключа в GitHub. Альтернатива — SSH-signing (с Git 2.34+).
 5. **Repository topics** для discoverability (список ниже; добавляются через web UI «About → ⚙ → Topics» или `gh repo edit --add-topic ...`):
