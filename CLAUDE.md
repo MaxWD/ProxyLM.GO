@@ -97,6 +97,33 @@ ProxyLM.GO/
 
 При неоднозначности (например, рефакторинг плюс новый флаг) — спросить пользователя, какой компонент инкрементировать.
 
+## Git workflow на public-репозитории (PROTECTED-MAIN-RULE)
+
+`origin/main` на `MaxWD/ProxyLM.GO` **защищён** branch protection. Прямой `git push origin main` отклоняется (`GH006: Protected branch update failed`). Это применяется ко **всем** агентам и main-agent'у одинаково.
+
+**Стандартный цикл изменения (любая правка кода/docs):**
+
+1. `git switch -c <type>/<short-slug>` — feature branch (type ∈ `feat`/`fix`/`docs`/`chore`/`refactor`/`test`).
+2. Коммит(ы) с conventional-commits message.
+3. `git push -u origin <branch>` — push feature branch.
+4. Создать PR через web UI (`https://github.com/MaxWD/ProxyLM.GO/pull/new/<branch>`); gh CLI не установлен у пользователя.
+5. Дождаться зелёного CI (5 status checks).
+6. Squash-merge через web UI (linear-history включён).
+7. Локально: `git switch main && git pull origin main && git branch -d <branch>`.
+
+**Если коммиты случайно ушли в локальный `main`** — спасать через перенос на ветку:
+```
+git switch -c <type>/<slug>          # ветка из текущего HEAD с коммитами
+git branch -f main origin/main       # local main → origin/main
+git push -u origin <branch>          # затем PR
+```
+
+**Релизные теги** (`v*.*.*`) push'аются **напрямую** — branch protection не блокирует push тегов. Тег триггерит `release.yml` (GoReleaser) → GitHub Release.
+
+**Команды без явного запроса пользователя НЕ выполняются:** `git push`, `git tag` на remote, `gh repo create`, `gh release create`, force-push, переписывание истории. См. также §«Executing actions with care» в системном промпте.
+
+Полная процедура — в `.claude/agents/github-publisher.md` (раздел «Workflow при защищённом main»).
+
 ## docs/FUTURE.md — парковка идей (FUTURE-RULE)
 
 `docs/FUTURE.md` — это **список идей и задач на будущее**, накопленный за время разработки. Из этого файла **ничего не реализуется без явного запроса пользователя**:
