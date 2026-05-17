@@ -1,225 +1,225 @@
 # ProxyLM.GO — Software Requirements Specification (SRS)
 
-Версия документа: 0.7.0
-Целевой релиз: ProxyLM.GO v0.1.0 (MVP) + дополнения v0.7.0
-Связанные документы: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`API.md`](./API.md), [`AGENTS.md`](./AGENTS.md)
+Document version: 0.7.0
+Target release: ProxyLM.GO v0.1.0 (MVP) + additions v0.7.0
+Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`API.md`](./API.md), [`AGENTS.md`](./AGENTS.md)
 
 ---
 
-## 1. Введение
+## 1. Introduction
 
-### 1.1. Назначение
+### 1.1. Purpose
 
-ProxyLM.GO — HTTP-прокси на Go, размещаемый перед локальными LLM-серверами (LM Studio, Ollama, любой OpenAI-совместимый бэкенд). Главная задача — **сериализовать запросы по моделям**, чтобы избежать постоянной перезагрузки моделей в VRAM, которая возникает при произвольном чередовании запросов от нескольких клиентов к нескольким моделям.
+ProxyLM.GO is an HTTP proxy in Go placed in front of local LLM servers (LM Studio, Ollama, any OpenAI-compatible backend). The primary goal is to **serialize requests by model**, preventing constant model reloads into VRAM that occur when multiple clients send requests to multiple models in arbitrary order.
 
-Поставляется как **единый portable-бинарник**: один и тот же исполняемый файл может работать как daemon (служба) либо как TUI-клиент к запущенному daemon'у. При первом запуске рядом с бинарником автоматически создаются `config.yaml` и `proxylm.db`. Кросс-компилируется под любую ОС (`GOOS`/`GOARCH`) без CGO-toolchain.
+Delivered as a **single portable binary**: the same executable can run as a daemon (service) or as a TUI client to a running daemon. On first run, `config.yaml` and `proxylm.db` are automatically created alongside the binary. Cross-compiles to any OS (`GOOS`/`GOARCH`) without a CGO toolchain.
 
-Документ описывает функциональные и нефункциональные требования к продукту, инварианты ядра, acceptance-критерии MVP и явные out-of-scope для версии 0.1.0.
+This document describes functional and non-functional requirements, scheduler invariants, MVP acceptance criteria, and explicit out-of-scope items for version 0.1.0.
 
-### 1.2. Область применения
+### 1.2. Scope
 
-Продукт применим в инсталляциях, где:
-- Несколько внутренних сервисов (`service-a`, `service-b`, …) совместно используют один или несколько локальных LLM-серверов с ограниченной VRAM.
-- Запросы могут идти к разным моделям, при этом одновременная загрузка всех моделей в VRAM невозможна.
-- Требуется единая точка аутентификации, истории запросов и наблюдения через TUI.
+The product applies to installations where:
+- Multiple internal services (`service-a`, `service-b`, …) share one or more local LLM servers with limited VRAM.
+- Requests may target different models, while loading all models into VRAM simultaneously is not feasible.
+- A single authentication point, request history, and TUI observability are required.
 
-### 1.3. Цели
+### 1.3. Goals
 
-- Г1. Минимизировать число операций swap-моделей в VRAM при потоке смешанных запросов.
-- Г2. Предоставить клиентам OpenAI-совместимый API без изменений их кода.
-- Г3. Дать оператору TUI-наблюдаемость в реальном времени (запросы, серверы, лог).
-- Г4. Обеспечить устойчивость к временным сбоям бэкендов (retry + failover).
-- Г5. Быть кроссплатформенным (Windows 10/11, Linux, macOS) и распространяться одним бинарником.
+- G1. Minimize the number of model swap operations in VRAM under a mixed-request stream.
+- G2. Provide clients with an OpenAI-compatible API without code changes on their side.
+- G3. Give the operator real-time TUI observability (requests, servers, log).
+- G4. Maintain resilience to transient backend failures (retry + failover).
+- G5. Be cross-platform (Windows 10/11, Linux, macOS) and distributed as a single binary.
 
-### 1.4. Термины и сокращения
+### 1.4. Terms and Abbreviations
 
-| Термин                  | Расшифровка                                                                 |
-|-------------------------|------------------------------------------------------------------------------|
-| LLM                     | Large Language Model                                                         |
-| Backend / бэкенд        | LLM-сервер за прокси (LM Studio, Ollama)                                     |
-| Model affinity          | Стратегия маршрутизации с предпочтением сервера, где модель уже загружена    |
-| Model swap              | Выгрузка текущей модели и загрузка другой в VRAM                             |
-| In-flight               | Запрос, отправленный на бэкенд, ответ по которому ещё не получен полностью   |
-| OpenAI API              | REST-контракт `POST /v1/chat/completions` и др., стандартизованный OpenAI    |
-| SSE                     | Server-Sent Events; формат стриминга OpenAI (`data: {...}\n\n`, `data: [DONE]`) |
-| TUI                     | Text User Interface (на базе Bubble Tea)                                     |
-| IPC                     | Inter-process communication; здесь — WebSocket между daemon и TUI            |
-| Daemon                  | Серверный процесс ProxyLM.GO (`proxylm serve`)                                  |
-| Client (клиент)         | Внешний потребитель API прокси, идентифицируемый по API-ключу                |
-| Discovery               | Периодический опрос моделей у бэкендов                                       |
-| Healthy / unhealthy     | Состояние бэкенда по результатам discovery / неудачных запросов              |
-| FR / NFR / INV          | Functional / Non-Functional Requirement / Invariant — ID требований          |
-| Goroutine               | Лёгкий поток выполнения Go; модель параллелизма ProxyLM.GO                      |
-| Channel                 | Типизированный канал передачи сообщений между goroutine'ами                  |
-| `context.Context`       | Стандартный механизм cancellation/deadline propagation в Go                  |
-
----
-
-## 2. Стейкхолдеры и роли пользователей
-
-| Роль                | Описание                                                                                  | Канал доступа                              |
-|---------------------|-------------------------------------------------------------------------------------------|---------------------------------------------|
-| Клиентский сервис   | Потребитель LLM-функций; шлёт запросы в OpenAI-совместимом формате                         | HTTP API (`/v1/*`) с Bearer api-key         |
-| Оператор / админ    | Человек, наблюдающий за нагрузкой и ошибками; запускает / останавливает daemon            | TUI (через WebSocket `/admin/stream`), CLI  |
-| Интегратор / DevOps | Устанавливает, конфигурирует, разворачивает прокси                                        | CLI (`proxylm serve`, `proxylm service …`)  |
-
-ProxyLM.GO **не** предполагает экспозицию во внешний интернет в MVP — рассчитан на доверенную внутреннюю сеть.
+| Term                    | Definition                                                                          |
+|-------------------------|-------------------------------------------------------------------------------------|
+| LLM                     | Large Language Model                                                                |
+| Backend                 | LLM server behind the proxy (LM Studio, Ollama)                                     |
+| Model affinity          | Routing strategy preferring the server where the model is already loaded            |
+| Model swap              | Evicting the current model and loading another into VRAM                            |
+| In-flight               | A request sent to the backend whose response has not yet been fully received        |
+| OpenAI API              | REST contract `POST /v1/chat/completions` etc., standardized by OpenAI              |
+| SSE                     | Server-Sent Events; OpenAI streaming format (`data: {...}\n\n`, `data: [DONE]`)     |
+| TUI                     | Text User Interface (Bubble Tea-based)                                              |
+| IPC                     | Inter-process communication; here — WebSocket between daemon and TUI                |
+| Daemon                  | ProxyLM.GO server process (`proxylm serve`)                                         |
+| Client                  | External API consumer identified by API key                                         |
+| Discovery               | Periodic polling of models from backends                                            |
+| Healthy / unhealthy     | Backend state based on discovery results / failed requests                          |
+| FR / NFR / INV          | Functional / Non-Functional Requirement / Invariant — requirement IDs               |
+| Goroutine               | Go lightweight thread; ProxyLM.GO concurrency model                                 |
+| Channel                 | Typed message-passing channel between goroutines                                    |
+| `context.Context`       | Standard cancellation/deadline propagation mechanism in Go                          |
 
 ---
 
-## 3. Функциональные требования (FR)
+## 2. Stakeholders and User Roles
 
-Каждое требование сформулировано как проверяемое утверждение. Слово «ДОЛЖЕН» означает обязательность.
+| Role                | Description                                                                                 | Access channel                              |
+|---------------------|---------------------------------------------------------------------------------------------|---------------------------------------------|
+| Client service      | LLM functionality consumer; sends requests in OpenAI-compatible format                      | HTTP API (`/v1/*`) with Bearer api-key      |
+| Operator / admin    | Person monitoring load and errors; starts / stops the daemon                               | TUI (via WebSocket `/admin/stream`), CLI    |
+| Integrator / DevOps | Installs, configures, and deploys the proxy                                                 | CLI (`proxylm serve`, `proxylm service …`)  |
+
+ProxyLM.GO is **not** intended for exposure to the public internet in MVP — it is designed for a trusted internal network.
+
+---
+
+## 3. Functional Requirements (FR)
+
+Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 
 ### 3.1. HTTP API
 
-| ID    | Требование |
-|-------|------------|
-| FR-1  | Прокси ДОЛЖЕН принимать HTTP-запросы по путям `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`, `GET /v1/models`, `GET /healthz`. |
-| FR-2  | Прокси ДОЛЖЕН требовать заголовок `Authorization: Bearer <key>` для всех путей под `/v1/*` и `/admin/*`, кроме `GET /healthz`. |
-| FR-3  | Прокси ДОЛЖЕН проверять предъявленный ключ против списка `auth.api_keys` (для `/v1/*`) или против `auth.admin_key` (для `/admin/*`). При несовпадении — `401 Unauthorized`. |
-| FR-4  | Прокси ДОЛЖЕН логировать и сохранять в истории **имя клиента** (`auth.api_keys[].name`), а не сам ключ. |
-| FR-5  | Прокси ДОЛЖЕН возвращать `404 model_not_found`, если запрошенная `model` отсутствует на всех healthy-серверах. |
-| FR-6  | Прокси ДОЛЖЕН поддерживать поле запроса `stream: true` и проксировать ответ как `text/event-stream` без буферизации полного тела. |
-| FR-7  | Прокси ДОЛЖЕН возвращать `GET /v1/models` с агрегированным списком уникальных моделей, известных по всем healthy-серверам. |
-| FR-8  | Прокси ДОЛЖЕН возвращать `GET /healthz` без аутентификации с телом `{"status": "ok"}` и кодом 200, если daemon работоспособен. |
-| FR-9  | Прокси ДОЛЖЕН передавать неизвестные ему поля тела запроса на бэкенд без модификации (passthrough). |
+| ID    | Requirement |
+|-------|-------------|
+| FR-1  | The proxy MUST accept HTTP requests on paths `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`, `GET /v1/models`, `GET /healthz`. |
+| FR-2  | The proxy MUST require the header `Authorization: Bearer <key>` for all paths under `/v1/*` and `/admin/*`, except `GET /healthz`. |
+| FR-3  | The proxy MUST validate the presented key against `auth.api_keys` (for `/v1/*`) or against `auth.admin_key` (for `/admin/*`). On mismatch — `401 Unauthorized`. |
+| FR-4  | The proxy MUST log and store in history the **client name** (`auth.api_keys[].name`), not the key itself. |
+| FR-5  | The proxy MUST return `404 model_not_found` if the requested `model` is absent from all healthy servers. |
+| FR-6  | The proxy MUST support the request field `stream: true` and proxy the response as `text/event-stream` without buffering the full body. |
+| FR-7  | The proxy MUST return `GET /v1/models` with an aggregated list of unique models known across all healthy servers. |
+| FR-8  | The proxy MUST return `GET /healthz` without authentication with body `{"status": "ok"}` and code 200 when the daemon is operational. |
+| FR-9  | The proxy MUST forward unknown request body fields to the backend without modification (passthrough). |
 
-### 3.2. Планировщик (model-aware queue)
+### 3.2. Scheduler (model-aware queue)
 
-| ID     | Требование |
-|--------|------------|
-| FR-10  | Для каждого сконфигурированного бэкенда прокси ДОЛЖЕН поддерживать **отдельную in-memory очередь** запросов (`pending`). |
-| FR-11  | На каждом бэкенде ДОЛЖНО одновременно выполняться **не более одного** запроса (in-flight ≤ 1). См. INV-1. |
-| FR-12  | При выборе следующего запроса воркер ДОЛЖЕН предпочесть запрос для текущей модели сервера; при отсутствии таких — взять самый старый из очереди (FIFO). См. INV-2, INV-3. |
-| FR-13  | Прокси ДОЛЖЕН обновлять `current_model` сервера значением модели последнего успешно обработанного запроса (или текущего in-flight). |
-| FR-14  | Очередь и состояние воркеров — **только in-memory**. При рестарте daemon'а допускается потеря очереди (см. NFR-3, INV-7). |
+| ID     | Requirement |
+|--------|-------------|
+| FR-10  | For each configured backend the proxy MUST maintain a separate **in-memory request queue** (`pending`). |
+| FR-11  | At most **one** request MUST execute simultaneously on each backend (in-flight ≤ 1). See INV-1. |
+| FR-12  | When selecting the next request, the worker MUST prefer a request for the server's current model; if no such request exists — take the oldest from the queue (FIFO). See INV-2, INV-3. |
+| FR-13  | The proxy MUST update the server's `current_model` with the model of the last successfully processed (or current in-flight) request. |
+| FR-14  | Queue and worker state — **in-memory only**. Queue loss on daemon restart is acceptable (see NFR-3, INV-7). |
 
-### 3.3. Маршрутизация
+### 3.3. Routing
 
-| ID     | Требование |
-|--------|------------|
-| FR-15  | Стратегия маршрутизации по умолчанию — `model_affinity_least_busy`. Алгоритм: (1) сервер, у которого `current_model == requested_model`; (2) сервер с наименьшей длиной очереди `pending`; (3) tiebreak по имени сервера в алфавитном порядке. |
-| FR-16  | Прокси ДОЛЖЕН поддерживать переключение стратегии через `routing.strategy` (`model_affinity_least_busy`, `least_busy`, `round_robin`, `deferred_model_then_capable`, `preserve_model_coverage`). Для `deferred_model_then_capable` сервер не назначается при приёме: запрос помещается в общую очередь и назначается только при освобождении сервера; приоритет выбора — (1) первый запрос с `model == current_model` на совместимом сервере, (2) первый совместимый запрос в FIFO-порядке. Для `preserve_model_coverage` — то же холодное распределение по `priority`, но при выборе следующего job на освобождающемся сервере: (1) если HEAD очереди под `current_model` — берётся HEAD; (2) если HEAD под другую модель и у другого healthy-сервера `current_model` совпадает — берётся HEAD (swap безопасен); (3) если этот сервер — единственный держатель `current_model` — ищется job под `current_model` в очереди; если такого нет, берётся HEAD (swap неизбежен). Реализация `round_robin` и чистого `least_busy` — в MVP допустима, но не критична (см. v0.2.0). |
-| FR-17  | Прокси ДОЛЖЕН исключать `unhealthy` бэкенды из списка кандидатов до восстановления. |
+| ID     | Requirement |
+|--------|-------------|
+| FR-15  | The default routing strategy is `model_affinity_least_busy`. Algorithm: (1) server where `current_model == requested_model`; (2) server with the shortest `pending` queue; (3) tiebreak by server name in alphabetical order. |
+| FR-16  | The proxy MUST support switching strategy via `routing.strategy` (`model_affinity_least_busy`, `least_busy`, `round_robin`, `deferred_model_then_capable`, `preserve_model_coverage`). For `deferred_model_then_capable` no server is assigned at accept time: the request is placed in a shared queue and assigned only when a server becomes free; selection priority — (1) first request with `model == current_model` on a compatible server, (2) first compatible FIFO request. For `preserve_model_coverage` — same cold distribution by `priority`, but when selecting the next job on a freeing server: (1) if HEAD of the queue is under `current_model` — take HEAD; (2) if HEAD is for a different model and another healthy server has `current_model` matching — take HEAD (swap is safe); (3) if this server is the sole holder of `current_model` — search for a job under `current_model` in the queue; if none exists, take HEAD (swap is unavoidable). Implementation of `round_robin` and pure `least_busy` — acceptable in MVP but not critical (see v0.2.0). |
+| FR-17  | The proxy MUST exclude `unhealthy` backends from the candidate list until they recover. |
 
 ### 3.4. Retry & Failover
 
-| ID     | Требование |
-|--------|------------|
-| FR-18  | При ошибке от бэкенда (статусы 5xx, network reset, timeout) прокси ДОЛЖЕН ретраить запрос с экспоненциальным backoff: `initial_backoff_ms`, `2x`, `4x`, …, ограничение `max_backoff_ms`. Backoff применяется между попытками, независимо от того, на каком сервере состоится следующая. |
-| FR-19  | Общее число попыток у одного запроса не превышает `retry.max_attempts` (default 3, **включая первую**). См. INV-5. |
-| FR-20  | После неудачной попытки на сервере X следующая попытка ДОЛЖНА уйти на любой другой healthy-сервер с этой моделью (rolling exclusion size 1: исключается только X, и только на одну следующую попытку — затем X снова доступен). Если X — единственный совместимый healthy-сервер, исключение игнорируется и попытка идёт снова на X (single-server degradation). Отдельной настройки `failover` НЕТ — поведение всегда такое. |
-| FR-21  | Если ошибка возникла **до отправки первого SSE-чанка клиенту**, ретрай разрешён. Если уже отправлен хотя бы один чанк — ретрай и переключение сервера ЗАПРЕЩЕНЫ, прокси завершает SSE-стрим и фиксирует запрос как `failed`. См. INV-6. |
-| FR-22  | Прокси ДОЛЖЕН помечать сервер `unhealthy` при `discovery.unhealthy_after_failed_polls` подряд неудачных опросах discovery (default 3). |
-| FR-23  | Ошибки 4xx (кроме 429) от бэкенда **не** ретраятся — пробрасываются клиенту как есть. |
+| ID     | Requirement |
+|--------|-------------|
+| FR-18  | On backend error (5xx, network reset, timeout) the proxy MUST retry the request with exponential backoff: `initial_backoff_ms`, `2x`, `4x`, …, capped at `max_backoff_ms`. Backoff applies between attempts regardless of which server handles the next attempt. |
+| FR-19  | The total number of attempts for a single request MUST NOT exceed `retry.max_attempts` (default 3, **including the first**). See INV-5. |
+| FR-20  | After a failed attempt on server X the next attempt MUST go to any other healthy server with this model (rolling exclusion size 1: only X is excluded, and only for the one next attempt — after that X is available again). If X is the only compatible healthy server, the exclusion is ignored and the attempt goes to X again (single-server degradation). There is no separate `failover` setting — this behavior is always active. |
+| FR-21  | If the error occurred **before the first SSE chunk was sent to the client**, retry is permitted. If at least one chunk has already been sent — retry and server switching are PROHIBITED; the proxy terminates the SSE stream and marks the request as `failed`. See INV-6. |
+| FR-22  | The proxy MUST mark a server `unhealthy` after `discovery.unhealthy_after_failed_polls` consecutive failed discovery polls (default 3). |
+| FR-23  | Backend 4xx errors (except 429) are **not** retried — they are forwarded to the client as-is. |
 
-### 3.5. Discovery моделей
+### 3.5. Model Discovery
 
-| ID     | Требование |
-|--------|------------|
-| FR-24  | Прокси ДОЛЖЕН периодически (`discovery.interval_seconds`, default 30) опрашивать `GET <backend>/v1/models` каждого сервера и обновлять `ModelMap`. |
-| FR-25  | Если в `backends[].models` явно указан непустой список — discovery для этого сервера НЕ выполняется; используется заданный список. |
-| FR-26  | Сервер, недоступный `unhealthy_after_failed_polls` циклов подряд, помечается `unhealthy`. После одного успешного опроса — снова `healthy`. |
-| FR-27  | На старте daemon ДОЛЖЕН выполнить первый цикл discovery до начала приёма HTTP-запросов (или принимать запросы и отвечать `503` до завершения первого цикла — выбор реализации, но поведение задокументировать). |
+| ID     | Requirement |
+|--------|-------------|
+| FR-24  | The proxy MUST periodically (`discovery.interval_seconds`, default 30) poll `GET <backend>/v1/models` on each server and update `ModelMap`. |
+| FR-25  | If `backends[].models` explicitly specifies a non-empty list — discovery for that server is NOT performed; the specified list is used. |
+| FR-26  | A server unreachable for `unhealthy_after_failed_polls` consecutive cycles is marked `unhealthy`. After one successful poll — back to `healthy`. |
+| FR-27  | On startup the daemon MUST complete the first discovery cycle before accepting HTTP requests (or accept requests and return `503` until the first cycle completes — implementation choice, but behavior must be documented). |
 
-### 3.6. История запросов (SQLite)
+### 3.6. Request History (SQLite)
 
-| ID     | Требование |
-|--------|------------|
-| FR-28  | Каждый запрос ДОЛЖЕН быть записан в SQLite-таблицу `requests` со схемой из `ARCHITECTURE.md` §9. |
-| FR-29  | Поле `status` ДОЛЖНО принимать значения `queued`, `running`, `completed`, `failed` (см. диаграмму состояний §5.1). |
-| FR-30  | Запись о запросе создаётся при приёме (`queued`) и обновляется при переходах состояний; финальный апдейт пишет `queue_wait_ms`, `duration_ms` (`server_proc_ms`), `input_tokens`, `output_tokens`, `error`. |
-| FR-31  | Прокси ДОЛЖЕН периодически (на старте + раз в сутки) удалять записи старше `storage.history_retention_days` (default 30). |
-| FR-32  | Запись ДОЛЖНА содержать `client_name`, но НЕ содержать сам ключ или тело запроса/ответа (только метаданные + ошибку, если есть). |
+| ID     | Requirement |
+|--------|-------------|
+| FR-28  | Each request MUST be recorded in the SQLite `requests` table with the schema from `ARCHITECTURE.md` §9. |
+| FR-29  | The `status` field MUST take values `queued`, `running`, `completed`, `failed` (see state diagram §5.1). |
+| FR-30  | A request record is created on receipt (`queued`) and updated on status transitions; the final update writes `queue_wait_ms`, `duration_ms` (`server_proc_ms`), `input_tokens`, `output_tokens`, `error`. |
+| FR-31  | The proxy MUST periodically (on startup + once a day) delete records older than `storage.history_retention_days` (default 30). |
+| FR-32  | A record MUST contain `client_name` but MUST NOT contain the key itself or the request/response body (metadata and error only). |
 
 ### 3.7. TUI / IPC
 
-| ID     | Требование |
-|--------|------------|
-| FR-33  | Daemon ДОЛЖЕН поднимать WebSocket-эндпоинт `GET /admin/stream`, защищённый `auth.admin_key`. |
-| FR-34  | Сервер при подключении клиента ДОЛЖЕН отправить `state_snapshot` (полный снапшот серверов, очередей, последних N записей), затем — `state_diff` при изменениях. |
-| FR-35  | Сервер ДОЛЖЕН транслировать строки лога как сообщения `log_line` (push), не требуя polling от клиента. |
-| FR-36  | TUI ДОЛЖЕН отображать таблицу запросов с автоматическим скрытием `completed`/`failed` записей через `tui.show_completed_minutes` (default 30). Записи при этом остаются в SQLite. |
-| FR-37  | TUI ДОЛЖЕН поддерживать хоткеи: `F5` — refresh снапшота, `F10` / `q` — выход, `/` — поиск по таблице. |
-| FR-38  | TUI ДОЛЖЕН корректно работать в Windows Terminal, cmd.exe, PowerShell и стандартных Linux-терминалах (xterm-256color). |
-| FR-39  | TUI ДОЛЖЕН отображать время (поля `Queued`/`Started`/`Completed at` в таблице, метки времени в логе) в локальной зоне ОС. Daemon хранит/передаёт время в UTC; преобразование происходит на стороне TUI. |
-| FR-40  | TUI ДОЛЖЕН отображать каждый сервер в HeaderBar на отдельной строке (multi-line). Высота шапки растёт пропорционально числу серверов, log-панель пропорционально уменьшается. |
-| FR-41  | Daemon ДОЛЖЕН собирать все наблюдения завершённых запросов по парам `(server_name, model)` в памяти и вычислять параметры линейной модели `loaded·t_load + b·k_in + c·k_out ≈ t_all` (3×3 нормальные уравнения; fallback 2×2 если нет reload-точек или 3×3 сингулярна). Минимум для валидной оценки — 3 наблюдения (`perfMinSamples = 3`). Поля `perf_ok`, `t_load_ms`, `tok_in_per_sec`, `tok_out_per_sec` публикуются в `ServerState`; TUI ДОЛЖЕН показывать их в строке HeaderBar текущей модели сервера в формате `t_load · ↓tok_in/s · ↑tok_out/s`. Если `perf_ok = false` или `current_model` пусто — строка метрик пустая. Поля `tokens_per_sec` и `ttft_ms` **удалены** (введено в v0.7.0). |
+| ID     | Requirement |
+|--------|-------------|
+| FR-33  | The daemon MUST expose the WebSocket endpoint `GET /admin/stream`, protected by `auth.admin_key`. |
+| FR-34  | The server MUST send a `state_snapshot` (full snapshot of servers, queues, and the last N records) on client connection, then `state_diff` on changes. |
+| FR-35  | The server MUST push log lines as `log_line` messages without requiring polling from the client. |
+| FR-36  | The TUI MUST display a request table with automatic hiding of `completed`/`failed` records after `tui.show_completed_minutes` (default 30). Records remain in SQLite. |
+| FR-37  | The TUI MUST support hotkeys: `F5` — refresh snapshot, `F10` / `q` — quit, `/` — table search. |
+| FR-38  | The TUI MUST work correctly in Windows Terminal, cmd.exe, PowerShell, and standard Linux terminals (xterm-256color). |
+| FR-39  | The TUI MUST display timestamps (`Queued`/`Started`/`Completed at` columns in the table, log timestamps) in the OS local timezone. The daemon stores/transmits time in UTC; conversion happens on the TUI side. |
+| FR-40  | The TUI MUST display each server in the HeaderBar on a separate line (multi-line). Header height grows proportionally to the number of servers; the log pane shrinks proportionally. |
+| FR-41  | The daemon MUST collect all observations from completed requests per `(server_name, model)` pair in memory and compute the linear model parameters `loaded·t_load + b·k_in + c·k_out ≈ t_all` (3×3 normal equations; 2×2 fallback if no reload observations or 3×3 is singular). Minimum for a valid estimate — 3 observations (`perfMinSamples = 3`). Fields `perf_ok`, `t_load_ms`, `tok_in_per_sec`, `tok_out_per_sec` are published in `ServerState`; the TUI MUST show them in the HeaderBar server line in the format `t_load · ↓tok_in/s · ↑tok_out/s`. If `perf_ok = false` or `current_model` is empty — the metrics line is empty. Fields `tokens_per_sec` and `ttft_ms` are **removed** (introduced in v0.7.0). |
 
-### 3.8. CLI / запуск
+### 3.8. CLI / Launch
 
-| ID     | Требование |
-|--------|------------|
-| FR-39  | Прокси ДОЛЖЕН предоставлять CLI `proxylm` с подкомандами: `serve`, `tui`, `config init`, `config validate`, `service install|uninstall|start|stop|status`, `version`. |
-| FR-40  | `proxylm serve` ДОЛЖЕН принимать `--config PATH` (default — `config.yaml` рядом с бинарником), `--host`, `--port`. CLI-аргументы переопределяют YAML. Если конфиг по умолчанию отсутствует — daemon ДОЛЖЕН создать его из встроенного шаблона и продолжить запуск. |
-| FR-41  | `proxylm config init` ДОЛЖЕН создавать `config.example.yaml` рядом с текущим каталогом (или по `--out`). |
-| FR-42  | `proxylm config validate` ДОЛЖЕН парсить и валидировать конфиг через типизированную модель, при ошибке — печатать понятное сообщение и завершаться кодом ≥ 1. |
-| FR-43  | `proxylm tui --connect ws://host:port --token <admin_key>` ДОЛЖЕН подключаться к запущенному daemon'у. |
+| ID     | Requirement |
+|--------|-------------|
+| FR-39  | The proxy MUST provide the `proxylm` CLI with subcommands: `serve`, `tui`, `config init`, `config validate`, `service install|uninstall|start|stop|status`, `version`. |
+| FR-40  | `proxylm serve` MUST accept `--config PATH` (default — `config.yaml` alongside the binary), `--host`, `--port`. CLI arguments override YAML. If the default config is absent — the daemon MUST create it from the embedded template and continue starting. |
+| FR-41  | `proxylm config init` MUST create `config.example.yaml` in the current directory (or per `--out`). |
+| FR-42  | `proxylm config validate` MUST parse and validate the config via the typed model; on error — print a clear message and exit with code ≥ 1. |
+| FR-43  | `proxylm tui --connect ws://host:port --token <admin_key>` MUST connect to a running daemon. |
 
-### 3.9. Метрики производительности (введено в v0.7.0)
+### 3.9. Performance Metrics (introduced in v0.7.0)
 
-| ID     | Требование |
-|--------|------------|
-| FR-44  | Daemon ДОЛЖЕН фиксировать факт смены модели (`model_reloaded`) при каждом dispatch: флаг равен `true` если `server.CurrentModel` на момент взятия задачи отличается от `job.Model`. Флаг ДОЛЖЕН храниться в `RequestRecord.ModelReloaded`, записываться в поле `model_reloaded` таблицы `requests` (INTEGER NOT NULL DEFAULT 0) и публиковаться в `RequestState.model_reloaded` через IPC. |
-| FR-45  | TUI ДОЛЖЕН отображать колонку **RM** (Reload Model) в таблице запросов — между колонками `Server` и `Queued`. Значение: глиф `✓` если `model_reloaded = true`, `—` иначе. |
-| FR-46  | TUI ДОЛЖЕН поддерживать интерактивную шапку (`paneHeader`): клавиша `Tab` циклически переключает фокус между `paneHeader`, `paneRequests`, `paneLog`. В `paneHeader` клавиши `↑`/`↓` выбирают сервер (маркер `▸`, рамка `StyleBorderActive`); `Enter` открывает server-detail modal с таблицей per-model статистики (`Model | Reqs | Load | t_load | ↓tok/s | ↑tok/s`). Mouse wheel в области шапки также должен менять выбранный сервер. |
-| FR-47  | Глиф pending-строк в таблице запросов ДОЛЖЕН быть однобайтовым одноячеечным символом `…` (U+2026) вместо emoji `⏳` (U+23F3, 2 ячейки) — для корректного выравнивания колонок в терминалах с шириной символа по числу code point'ов. |
-
----
-
-## 4. Нефункциональные требования (NFR)
-
-| ID     | Категория          | Требование |
-|--------|--------------------|------------|
-| NFR-1  | Производительность | Прокси-обработка (приём, маршрутизация, постановка в очередь, без учёта времени бэкенда) ДОЛЖНА выдерживать **≥ 100 RPS** на ядре с минимальной нагрузкой бэкендов (бенчмарк с mock-бэкендом, отвечающим мгновенно). |
-| NFR-2  | Производительность | Streaming-проксирование ДОЛЖНО передавать SSE-чанки клиенту с задержкой ≤ 50 мс относительно получения от бэкенда (на одном хосте). |
-| NFR-3  | Надёжность         | Допустима потеря содержимого in-memory очереди при рестарте daemon'а. Клиенту в этот момент возвращается ошибка соединения (он повторяет на своей стороне). Persistence очереди — out of scope. |
-| NFR-4  | Надёжность         | Daemon ДОЛЖЕН обрабатывать SIGINT/SIGTERM (на Linux) и Ctrl+C (на Windows): отказывает в новых запросах, ждёт завершения текущих in-flight до `shutdown_grace_seconds` (по умолчанию 30 с), затем принудительно завершает. На Windows/Linux/macOS установленная служба корректно реагирует на stop-сигнал службы (см. интеграцию `kardianos/service`). |
-| NFR-5  | Кроссплатформенность | Поддержка Windows 10/11, Linux (kernel ≥ 5.x, x86_64 / arm64), macOS (10.15+, x86_64 / arm64). Go ≥ 1.22. Сборка — **единый бинарник без рантайма и без CGO**, кросс-компиляция через `GOOS=... GOARCH=... go build`. |
-| NFR-6  | Поддерживаемость   | Логи в JSON-формате (`log/slog`) с полями `ts`, `level`, `logger`, `event`, `request_id` (где применимо), `client`, `server`, `model`. |
-| NFR-7  | Поддерживаемость   | Версия пакета задаётся в одном месте — через `-ldflags "-X main.version=<ver>"` при сборке; CLI `proxylm version` печатает её. |
-| NFR-8  | Безопасность       | API-ключи и admin-ключ передаются только через `Authorization: Bearer`. Ключи в логи, в TUI и в БД **не пишутся** — только `client_name`. |
-| NFR-9  | Безопасность       | Конфиг-файл с ключами по умолчанию читается с правами текущего пользователя; рекомендации по правам — в README (вне SRS). |
-| NFR-10 | Совместимость API  | Запросы и ответы соответствуют OpenAI API v1 на уровне обязательных полей. Лишние поля проксируются без модификации (FR-9). |
-| NFR-11 | Тестируемость      | Покрытие unit-тестами модулей `internal/core/scheduler.go`, `internal/core/router.go`, `internal/core/retry.go` ≥ 80% строк (`go test -cover`). |
-| NFR-12 | Документированность | Все публичные эндпоинты описаны в `docs/API.md`; формат сообщений `/admin/stream` — там же. |
+| ID     | Requirement |
+|--------|-------------|
+| FR-44  | The daemon MUST record the model-switch event (`model_reloaded`) at every dispatch: the flag is `true` if `server.CurrentModel` at the time the job is taken differs from `job.Model`. The flag MUST be stored in `RequestRecord.ModelReloaded`, written to the `model_reloaded` column of the `requests` table (INTEGER NOT NULL DEFAULT 0), and published in `RequestState.model_reloaded` via IPC. |
+| FR-45  | The TUI MUST display the **RM** (Reload Model) column in the request table — between the `Server` and `Queued` columns. Value: glyph `✓` if `model_reloaded = true`, `—` otherwise. |
+| FR-46  | The TUI MUST support an interactive header (`paneHeader`): the `Tab` key cycles focus between `paneHeader`, `paneRequests`, `paneLog`. In `paneHeader`, `↑`/`↓` select a server (marker `▸`, border `StyleBorderActive`); `Enter` opens the server-detail modal with a per-model statistics table (`Model | Reqs | Load | t_load | ↓tok/s | ↑tok/s`). Mouse wheel in the header area MUST also change the selected server. |
+| FR-47  | The pending-row glyph in the request table MUST be the single-cell character `…` (U+2026) instead of the emoji `⏳` (U+23F3, 2 cells) — for correct column alignment in terminals where character width equals code-point count. |
 
 ---
 
-## 5. Структуры данных и их жизненный цикл
+## 4. Non-Functional Requirements (NFR)
+
+| ID     | Category           | Requirement |
+|--------|--------------------|-------------|
+| NFR-1  | Performance        | Proxy processing (accept, route, enqueue, excluding backend time) MUST sustain **≥ 100 RPS** on a single core with minimal backend load (benchmark with a mock backend responding instantly). |
+| NFR-2  | Performance        | Streaming proxying MUST forward SSE chunks to the client with latency ≤ 50 ms relative to receipt from the backend (on a single host). |
+| NFR-3  | Reliability        | Loss of in-memory queue contents on daemon restart is acceptable. At that moment the client receives a connection error (it retries on its side). Queue persistence is out of scope. |
+| NFR-4  | Reliability        | The daemon MUST handle SIGINT/SIGTERM (on Linux) and Ctrl+C (on Windows): refuse new requests, wait for current in-flight requests to complete up to `shutdown_grace_seconds` (default 30 s), then force-terminate. On Windows/Linux/macOS, the installed service correctly responds to the service stop signal (see `kardianos/service` integration). |
+| NFR-5  | Portability        | Support Windows 10/11, Linux (kernel ≥ 5.x, x86_64 / arm64), macOS (10.15+, x86_64 / arm64). Go ≥ 1.22. Build — **single binary with no runtime and no CGO**, cross-compiled via `GOOS=... GOARCH=... go build`. |
+| NFR-6  | Maintainability    | Logs in JSON format (`log/slog`) with fields `ts`, `level`, `logger`, `event`, `request_id` (where applicable), `client`, `server`, `model`. |
+| NFR-7  | Maintainability    | Package version is set in one place — via `-ldflags "-X main.version=<ver>"` at build time; CLI `proxylm version` prints it. |
+| NFR-8  | Security           | API keys and the admin key are passed only via `Authorization: Bearer`. Keys MUST NOT be written to logs, TUI, or the database — only `client_name`. |
+| NFR-9  | Security           | The config file containing keys is read with the current user's permissions by default; permission recommendations are in the README (outside SRS). |
+| NFR-10 | API compatibility  | Requests and responses conform to OpenAI API v1 for mandatory fields. Extra fields are proxied without modification (FR-9). |
+| NFR-11 | Testability        | Unit-test coverage of `internal/core/scheduler.go`, `internal/core/router.go`, `internal/core/retry.go` ≥ 80% lines (`go test -cover`). |
+| NFR-12 | Documentation      | All public endpoints are described in `docs/API.md`; the `/admin/stream` message format — there as well. |
+
+---
+
+## 5. Data Structures and Lifecycle
 
 ### 5.1. RequestRecord
 
-Поля (минимум):
+Fields (minimum):
 
-| Поле           | Тип             | Описание                                              |
-|----------------|------------------|-------------------------------------------------------|
-| `request_id`   | UUID             | генерируется при приёме                                |
-| `client_name`  | str              | имя ключа из `auth.api_keys`                           |
-| `model`        | str              | значение из тела запроса                               |
-| `server`       | str \| None      | присваивается роутером                                 |
-| `status`       | enum             | `queued` / `running` / `completed` / `failed`           |
-| `received_at`  | datetime         | момент входа в HTTP-хендлер                             |
-| `started_at`   | datetime \| None | момент отправки на бэкенд (первая попытка)             |
-| `first_chunk_at` | datetime \| None | момент первого SSE-чанка (для `stream=true`)         |
-| `completed_at` | datetime \| None | момент финализации                                      |
-| `queue_wait_ms`| int \| None      | `started_at − received_at` в мс                         |
-| `duration_ms`  | int \| None      | `completed_at − started_at` в мс                        |
-| `server_proc_ms` | int \| None    | алиас/дубль `duration_ms` для UI-метрики LLM            |
-| `ttft_ms`      | int \| None      | `first_chunk_at − started_at` в мс для stream           |
-| `input_tokens` | int \| None      | из `usage` ответа или fallback                         |
-| `output_tokens`| int \| None      | из `usage` ответа / подсчёт по SSE                      |
-| `attempts`     | int              | сумма попыток по всем серверам                          |
-| `error`        | str \| None      | сообщение при `failed`                                  |
-| `stream`       | bool             | признак streaming-запроса                               |
-| `model_reloaded` | bool           | `true` если dispatch инициировал смену модели на сервере (введено в v0.7.0) |
+| Field           | Type             | Description                                              |
+|-----------------|------------------|----------------------------------------------------------|
+| `request_id`    | UUID             | generated on receipt                                     |
+| `client_name`   | str              | key name from `auth.api_keys`                            |
+| `model`         | str              | value from the request body                              |
+| `server`        | str \| None      | assigned by the router                                   |
+| `status`        | enum             | `queued` / `running` / `completed` / `failed`            |
+| `received_at`   | datetime         | moment of entry into the HTTP handler                    |
+| `started_at`    | datetime \| None | moment of dispatch to backend (first attempt)            |
+| `first_chunk_at` | datetime \| None | moment of first SSE chunk (for `stream=true`)           |
+| `completed_at`  | datetime \| None | moment of finalization                                   |
+| `queue_wait_ms` | int \| None      | `started_at − received_at` in ms                         |
+| `duration_ms`   | int \| None      | `completed_at − started_at` in ms                        |
+| `server_proc_ms` | int \| None     | alias/duplicate of `duration_ms` for UI LLM metric      |
+| `ttft_ms`       | int \| None      | `first_chunk_at − started_at` in ms for stream          |
+| `input_tokens`  | int \| None      | from response `usage` or fallback                        |
+| `output_tokens` | int \| None      | from response `usage` / SSE count                        |
+| `attempts`      | int              | total attempts across all servers                        |
+| `error`         | str \| None      | message when `failed`                                    |
+| `stream`        | bool             | streaming request flag                                   |
+| `model_reloaded` | bool           | `true` if dispatch triggered a model switch on the server (introduced in v0.7.0) |
 
-#### Диаграмма состояний `RequestRecord`
+#### `RequestRecord` State Diagram
 
 ```
                     +--------+
-                    |  new   |   (внутренний переход после auth/валидации)
+                    |  new   |   (internal transition after auth/validation)
                     +---+----+
                         |
                         v
@@ -227,8 +227,8 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
       | queued |-------------->| running |-------->| completed |
       +---+----+               +---+-----+         +-----------+
           ^                        |
-          |  retry (другой сервер,  | error & attempts left
-          |  если есть; иначе тот же)
+          |  retry (another server, | error & attempts left
+          |  if available; else same)
           +------------------------+
                                    |
                                    | error & total attempts == max_attempts
@@ -238,264 +238,263 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
                               +--------+
 ```
 
-Допустимые переходы:
-- `new → queued` (после успешной авторизации и валидации модели)
-- `queued → running` (воркер взял запрос)
-- `running → completed` (бэкенд отдал полный ответ; для streaming — после `[DONE]` или закрытия SSE на стороне бэкенда)
-- `running → queued` (ретрай: backoff между попытками; реализация может удерживать запись в `running` со счётчиком `attempts` — допустимо, если это задокументировано)
-- `running → failed` (общий лимит `retry.max_attempts` исчерпан)
-- `running → running` (rolling exclusion: смена `server` с инкрементом `attempts`)
+Allowed transitions:
+- `new → queued` (after successful authorization and model validation)
+- `queued → running` (worker picks up the request)
+- `running → completed` (backend returned a complete response; for streaming — after `[DONE]` or clean SSE close from the backend)
+- `running → queued` (retry: backoff between attempts; implementation may keep the record in `running` with an `attempts` counter — acceptable if documented)
+- `running → failed` (total `retry.max_attempts` exhausted)
+- `running → running` (rolling exclusion: server change with `attempts` increment)
 
-Терминальные: `completed`, `failed`. Записи остаются в SQLite до `history_retention_days`.
+Terminal states: `completed`, `failed`. Records remain in SQLite until `history_retention_days`.
 
 ### 5.2. ServerInfo
 
-| Поле                  | Тип            | Описание                                       |
-|-----------------------|----------------|------------------------------------------------|
-| `name`                | str            | из конфига                                     |
-| `url`                 | str            | базовый URL                                    |
-| `type`                | enum           | `openai` (в MVP только это значение)            |
-| `healthy`             | bool           | флаг                                           |
-| `current_model`       | str \| None    | модель последнего обработанного / in-flight    |
-| `pending`             | []Request      | in-memory очередь (slice под mutex)             |
-| `in_flight`           | Request \| None| активный запрос (≤ 1)                           |
-| `failed_polls_streak` | int            | счётчик подряд неудачных discovery-опросов     |
-| `models`              | set[str]       | известные модели (из discovery или конфига)    |
+| Field                 | Type            | Description                                       |
+|-----------------------|-----------------|---------------------------------------------------|
+| `name`                | str             | from config                                       |
+| `url`                 | str             | base URL                                          |
+| `type`                | enum            | `openai` (only this value in MVP)                 |
+| `healthy`             | bool            | flag                                              |
+| `current_model`       | str \| None     | model of the last processed / in-flight request   |
+| `pending`             | []Request       | in-memory queue (slice under mutex)               |
+| `in_flight`           | Request \| None | active request (≤ 1)                              |
+| `failed_polls_streak` | int             | counter of consecutive failed discovery polls     |
+| `models`              | set[str]        | known models (from discovery or config)           |
 
-Жизненный цикл: создаётся при старте daemon'а из конфига. `healthy` переключается при discovery-промахах и при подряд идущих неудачных запросах (политика — на усмотрение реализации, минимум: discovery достаточен).
+Lifecycle: created on daemon startup from config. `healthy` toggles on discovery misses and on consecutive failed requests (policy — implementation choice; minimum: discovery is sufficient).
 
 ### 5.3. ModelMap
 
-`map[server_name string]map[model_id string]struct{}`. Обновляется discovery-циклом или из явной конфигурации `backends[].models`. Используется роутером и эндпоинтом `GET /v1/models` (агрегация).
+`map[server_name string]map[model_id string]struct{}`. Updated by the discovery cycle or from explicit `backends[].models` config. Used by the router and the `GET /v1/models` endpoint (aggregation).
 
 ---
 
-## 6. Инварианты планировщика
+## 6. Scheduler Invariants
 
-Эти свойства ДОЛЖНЫ выполняться всегда. Тест-кейсы для них — обязательная часть unit-тестов (`internal/core/scheduler_test.go`).
+These properties MUST always hold. Test cases for them are a required part of unit tests (`internal/core/scheduler_test.go`).
 
-### INV-1. На одном сервере одновременно ≤ 1 in-flight запроса
+### INV-1. At most 1 in-flight request per server at any time
 
-**Тест 1.1.**
-- **Given:** сервер `srv1`, очередь из 5 запросов с разными моделями.
-- **When:** воркер обрабатывает их по очереди.
-- **Then:** в любой момент времени `srv1.in_flight is None` либо ровно один объект Request; никогда не два.
+**Test 1.1.**
+- **Given:** server `srv1`, queue of 5 requests with different models.
+- **When:** the worker processes them sequentially.
+- **Then:** at any point in time `srv1.in_flight is None` or exactly one Request object; never two.
 
-### INV-2. Drain текущей модели перед переключением
+### INV-2. Drain current model before switching
 
-Если в `pending` есть запрос для модели M, и `current_model == M` (или текущий in-flight использует M), то следующим обработанным ДОЛЖЕН стать **один из запросов для M**, а не для другой модели.
+If `pending` contains a request for model M and `current_model == M` (or the current in-flight uses M), then the next request processed MUST be **one of the requests for M**, not for a different model.
 
-**Тест 2.1.**
-- **Given:** `current_model = "qwen2.5:14b"`, очередь: `[A_qwen, B_llama, C_qwen, D_llama]` в порядке поступления.
-- **When:** воркер дернул `pick_next_request` четыре раза подряд.
-- **Then:** порядок выбора — `A_qwen → C_qwen → B_llama → D_llama` (сначала все qwen, потом FIFO для оставшихся).
+**Test 2.1.**
+- **Given:** `current_model = "qwen2.5:14b"`, queue: `[A_qwen, B_llama, C_qwen, D_llama]` in arrival order.
+- **When:** the worker calls `pick_next_request` four times in a row.
+- **Then:** selection order — `A_qwen → C_qwen → B_llama → D_llama` (all qwen first, then FIFO for the rest).
 
-**Тест 2.2.**
-- **Given:** `current_model = None`, очередь: `[A_qwen]`. Параллельно через 1 мс приходит `B_qwen`, через 2 мс — `C_llama`.
-- **When:** воркер берёт `A_qwen` (in-flight); пока `A` выполняется, очередь становится `[B_qwen, C_llama]`.
-- **Then:** после `A` выбирается `B_qwen`, потом `C_llama`. Между `A` и `B` модель не переключается.
+**Test 2.2.**
+- **Given:** `current_model = None`, queue: `[A_qwen]`. Concurrently, `B_qwen` arrives 1 ms later, `C_llama` 2 ms later.
+- **When:** the worker takes `A_qwen` (in-flight); while `A` executes, the queue becomes `[B_qwen, C_llama]`.
+- **Then:** after `A`, `B_qwen` is selected, then `C_llama`. No model switch between `A` and `B`.
 
-### INV-3. FIFO внутри одной модели на одном сервере
+### INV-3. FIFO within the same model on the same server
 
-**Тест 3.1.**
-- **Given:** очередь `[X1_M, X2_M, X3_M]` (все на модель M).
-- **When:** воркер обработал три запроса.
-- **Then:** порядок завершения соответствует порядку поступления (`X1 → X2 → X3`).
+**Test 3.1.**
+- **Given:** queue `[X1_M, X2_M, X3_M]` (all for model M).
+- **When:** the worker processes three requests.
+- **Then:** completion order matches arrival order (`X1 → X2 → X3`).
 
-### INV-4. Completed только после полного ответа
+### INV-4. Completed only after a full response
 
-Запрос помечается `completed` исключительно после полного получения ответа от бэкенда. Для streaming — после получения `data: [DONE]` или штатного закрытия SSE-соединения бэкендом. Полученная ошибка посреди стрима → `failed` (см. INV-6).
+A request is marked `completed` exclusively after receiving the complete response from the backend. For streaming — after receiving `data: [DONE]` or clean SSE connection close by the backend. An error mid-stream → `failed` (see INV-6).
 
-**Тест 4.1.**
-- **Given:** mock-бэкенд начал стримить `data: {chunk1}`, затем закрыл соединение **до** `[DONE]`.
-- **When:** прокси обнаруживает обрыв.
-- **Then:** запись имеет `status == "failed"`, `error` содержит описание обрыва. Клиент получил уже отправленные чанки + завершение SSE с error-маркером (см. API.md §1.6).
+**Test 4.1.**
+- **Given:** mock backend started streaming `data: {chunk1}`, then closed the connection **before** `[DONE]`.
+- **When:** the proxy detects the disconnection.
+- **Then:** the record has `status == "failed"`, `error` contains a description of the disconnection. The client has received the already-sent chunks + SSE termination with an error marker (see API.md §1.6).
 
-### INV-5. Счётчик попыток не превышает лимит и две подряд попытки идут на разные серверы
+### INV-5. Attempt counter does not exceed the limit, and two consecutive attempts go to different servers
 
-(а) Общее число попыток у одного запроса ≤ `retry.max_attempts`.
+(a) Total number of attempts for a single request ≤ `retry.max_attempts`.
 
-(б) Если у двух подряд попыток |compatible healthy servers| ≥ 2, они ДОЛЖНЫ выполниться на разных серверах. Это и есть «rolling exclusion size 1»: после неудачи на X следующая попытка не идёт на X. Через одну попытку X снова доступен.
+(b) If two consecutive attempts have |compatible healthy servers| ≥ 2, they MUST execute on different servers. This is "rolling exclusion size 1": after a failure on X the next attempt does not go to X. One attempt later, X is available again.
 
-(в) Если совместимый сервер единственный — все попытки идут на нём (single-server degradation). Это не нарушение (б): набор кандидатов пустой после исключения, и исключение снимается.
+(c) If there is only one compatible server — all attempts go to it (single-server degradation). This is not a violation of (b): the candidate set is empty after exclusion, so the exclusion is lifted.
 
-**Тест 5.1.**
-- **Given:** `max_attempts = 3`, два healthy-сервера с моделью M (`srv1`, `srv2`). `srv1` всегда возвращает 502, `srv2` — 200.
-- **When:** клиент шлёт один запрос.
-- **Then:** попытка 1 на `srv1` падает → попытка 2 на `srv2` (rolling exclusion) даёт 200. `RequestRecord.attempts == 2`.
+**Test 5.1.**
+- **Given:** `max_attempts = 3`, two healthy servers with model M (`srv1`, `srv2`). `srv1` always returns 502, `srv2` — 200.
+- **When:** client sends one request.
+- **Then:** attempt 1 on `srv1` fails → attempt 2 on `srv2` (rolling exclusion) returns 200. `RequestRecord.attempts == 2`.
 
-**Тест 5.2.**
-- **Given:** `max_attempts = 4`, два сервера, оба отвечают 502.
-- **When:** запрос обработан.
-- **Then:** попытки чередуются `srv1 → srv2 → srv1 → srv2` (или начиная с `srv2`, в зависимости от роутера). Никаких двух подряд на одном сервере. После исчерпания — `502/503`, `status = failed`.
+**Test 5.2.**
+- **Given:** `max_attempts = 4`, two servers, both return 502.
+- **When:** request is processed.
+- **Then:** attempts alternate `srv1 → srv2 → srv1 → srv2` (or starting from `srv2`, depending on the router). No two consecutive attempts on the same server. After exhaustion — `502/503`, `status = failed`.
 
-**Тест 5.3 (single-server degradation).**
-- **Given:** `max_attempts = 3`, один healthy-сервер с моделью M, всегда 502.
-- **When:** запрос обработан.
-- **Then:** 3 попытки подряд на этом единственном сервере; ошибки возвращены клиенту. (б) не применяется, так как |healthy| = 1.
+**Test 5.3 (single-server degradation).**
+- **Given:** `max_attempts = 3`, one healthy server with model M, always 502.
+- **When:** request is processed.
+- **Then:** 3 consecutive attempts on this single server; errors returned to client. (b) does not apply since |healthy| = 1.
 
-### INV-6. Невозможность ретрая после первого SSE-чанка
+### INV-6. No retry after the first SSE chunk
 
-Если прокси уже отправил клиенту ≥ 1 SSE-чанка и далее получил ошибку от бэкенда — ретрай и переключение сервера ЗАПРЕЩЕНЫ; стрим завершается, запись `failed`.
+If the proxy has already sent the client ≥ 1 SSE chunk and then receives an error from the backend — retry and server switching are PROHIBITED; the stream is terminated, record `failed`.
 
-**Тест 6.1.**
-- **Given:** mock-бэкенд отдал 2 SSE-чанка, затем оборвал соединение.
-- **When:** прокси обрабатывает обрыв.
-- **Then:** клиенту отправлен SSE-чанк с error-объектом и завершение стрима; никаких попыток на других серверах не предпринималось; в логе — соответствующая запись.
+**Test 6.1.**
+- **Given:** mock backend sent 2 SSE chunks, then dropped the connection.
+- **When:** the proxy handles the disconnection.
+- **Then:** an SSE chunk with an error object and stream termination are sent to the client; no attempts on other servers were made; corresponding log entry is present.
 
-### INV-7. Потеря очереди допустима только при рестарте
+### INV-7. Queue loss is only acceptable on restart
 
-При штатной работе (без рестарта процесса) ни один запрос из `pending` не должен быть «забыт» планировщиком: либо обработан, либо помечен `failed`.
+During normal operation (without a process restart) no request from `pending` must be "forgotten" by the scheduler: it is either processed or marked `failed`.
 
-**Тест 7.1.**
-- **Given:** очередь из 100 запросов; mock-бэкенд отвечает мгновенно.
-- **When:** все запросы прошли через воркер.
-- **Then:** в SQLite ровно 100 записей в терминальных состояниях; ни одной в `queued`/`running`.
+**Test 7.1.**
+- **Given:** queue of 100 requests; mock backend responds instantly.
+- **When:** all requests pass through the worker.
+- **Then:** exactly 100 records in SQLite in terminal states; none in `queued`/`running`.
 
-### INV-8. Routing использует только healthy-серверы
+### INV-8. Routing uses only healthy servers
 
-**Тест 8.1.**
-- **Given:** два сервера; `srv1` помечен `unhealthy`. Оба объявляют модель M.
-- **When:** клиент шлёт запрос на M.
-- **Then:** запрос попадает в очередь `srv2`. Если `srv2` тоже unhealthy — `503 Service Unavailable`.
-
----
-
-## 7. Acceptance-критерии MVP (v0.1.0)
-
-MVP считается готовым, когда выполнены **все** пункты ниже:
-
-| ID    | Критерий | Способ проверки |
-|-------|----------|------------------|
-| AC-1  | `proxylm config init` создаёт валидный `config.example.yaml`. | CLI + diff с эталоном |
-| AC-2  | `proxylm config validate` отвергает невалидный конфиг с ненулевым кодом и понятным сообщением. | CLI + 3 негативных кейса |
-| AC-3  | `proxylm serve` поднимается за < 5 с и принимает HTTP-запросы. | manual |
-| AC-4  | `POST /v1/chat/completions` (non-streaming) с валидным ключом и существующей моделью возвращает 200 с OpenAI-совместимым телом. | integration test |
-| AC-5  | `POST /v1/chat/completions` со `stream: true` отдаёт SSE-чанки в реальном времени; финальный `[DONE]` присутствует. | integration test |
-| AC-6  | `GET /v1/models` агрегирует модели со всех healthy-серверов. | integration test |
-| AC-7  | Без заголовка `Authorization` или с неверным ключом — `401`. | integration test |
-| AC-8  | Запрос на несуществующую модель — `404` с телом `{"error": {"code": "model_not_found", ...}}`. | integration test |
-| AC-9  | Сценарий drain: 10 запросов модели A + 5 модели B, два сервера с обеими моделями — модель A на выбранном сервере не переключается до опустошения её под-очереди. Проверяется логами и историей. | integration test |
-| AC-10 | Rolling failover: `srv1` возвращает 502 на первой попытке → вторая попытка идёт на `srv2` без расхода всех `max_attempts` на `srv1`. | integration test |
-| AC-11 | Streaming: ошибка после первого чанка не вызывает ретрая; запись `failed`. | integration test |
-| AC-12 | TUI подключается по WebSocket с admin-ключом и показывает живую таблицу запросов и серверов. | manual |
-| AC-13 | Завершённые запросы исчезают из таблицы TUI через `tui.show_completed_minutes`, но остаются в SQLite. | manual + SQL-запрос |
-| AC-14 | История чистится по `history_retention_days` (тест с подменой времени). | unit test |
-| AC-15 | `Ctrl+C` на daemon'е завершает процесс не более чем за `shutdown_grace_seconds`; in-flight запросы либо успевают, либо клиент получает ошибку. | manual |
-| AC-16 | NFR-1: бенчмарк выдаёт ≥ 100 RPS прокси-обработки (mock-бэкенд). | bench script |
-| AC-17 | Первый запуск `proxylm serve` без существующего `config.yaml` рядом с бинарником создаёт его из встроенного шаблона и продолжает запуск. | manual |
-| AC-18 | `proxylm service install` регистрирует службу под Windows (Service Manager) и Linux (systemd unit); `service start/stop` управляет её жизненным циклом. | manual |
-| AC-19 | Сборка `GOOS=linux GOARCH=arm64 go build` на Windows-хосте успешно создаёт бинарник без CGO-toolchain. | manual |
-| AC-20 | После минимум 3 завершённых запросов к одной модели на одном сервере `ServerState.perf_ok = true`; `tok_out_per_sec > 0`; TUI показывает метрику в строке шапки. (введено в v0.7.0) | integration test |
-| AC-21 | Колонка RM в таблице TUI: строка с `model_reloaded=true` показывает `✓`, строка без reload — `—`. (введено в v0.7.0) | manual + SQL-запрос |
-| AC-22 | `Tab` в TUI переключает фокус Header → Requests → Log → Header; в paneHeader `↑`/`↓` меняют выбранный сервер; `Enter` открывает server-detail modal с таблицей per-model. (введено в v0.7.0) | manual |
-| AC-23 | Таблица запросов: колонки выровнены в терминале без сдвига при наличии pending-строк (глиф `…` занимает ровно одну ячейку). (введено в v0.7.0) | manual |
-| AC-24 | Поле `model_reloaded` присутствует в таблице `requests` SQLite (проверяется `.schema requests`); значение `1` для запросов со сменой модели, `0` для остальных. (введено в v0.7.0) | SQL-запрос |
+**Test 8.1.**
+- **Given:** two servers; `srv1` is marked `unhealthy`. Both advertise model M.
+- **When:** client sends a request for M.
+- **Then:** request is queued to `srv2`. If `srv2` is also unhealthy — `503 Service Unavailable`.
 
 ---
 
-## 8. Out of Scope для MVP
+## 7. MVP Acceptance Criteria (v0.1.0)
 
-В версии 0.1.0 явно **не** реализуются:
+MVP is considered complete when **all** items below are satisfied:
 
-- Web UI (HTML-интерфейс).
-- Метрики Prometheus / `GET /metrics`.
-- Native Ollama API endpoints (`/api/generate`, `/api/chat`) — только OpenAI-shim.
-- Persistence in-memory очереди при рестарте.
-- Квоты и приоритеты по клиентам.
-- Rate limiting (`429`-ответы; код 429 зарезервирован для будущего).
-- Поддержка tools / function calling сверх простого passthrough полей запроса/ответа.
-- Embedding rate limiting / batch API специальной формы.
-- Шифрование TLS на стороне прокси (рекомендуется reverse-proxy nginx/caddy перед ProxyLM.GO).
-- Поддержка кластерного режима (несколько инстансов ProxyLM.GO с общим состоянием).
-- Аутентификация по mTLS / OAuth2.
-- Подсчёт стоимости запросов в денежных единицах.
-- Канареечный деплой / hot reload конфигурации (требует рестарта).
+| ID    | Criterion | Verification method |
+|-------|-----------|---------------------|
+| AC-1  | `proxylm config init` creates a valid `config.example.yaml`. | CLI + diff against reference |
+| AC-2  | `proxylm config validate` rejects invalid config with non-zero exit code and a clear message. | CLI + 3 negative cases |
+| AC-3  | `proxylm serve` starts in < 5 s and accepts HTTP requests. | manual |
+| AC-4  | `POST /v1/chat/completions` (non-streaming) with a valid key and existing model returns 200 with an OpenAI-compatible body. | integration test |
+| AC-5  | `POST /v1/chat/completions` with `stream: true` delivers SSE chunks in real time; final `[DONE]` is present. | integration test |
+| AC-6  | `GET /v1/models` aggregates models from all healthy servers. | integration test |
+| AC-7  | Without `Authorization` header or with an invalid key — `401`. | integration test |
+| AC-8  | Request for a non-existent model — `404` with body `{"error": {"code": "model_not_found", ...}}`. | integration test |
+| AC-9  | Drain scenario: 10 requests for model A + 5 for model B, two servers with both models — model A on the selected server is not switched until its sub-queue is empty. Verified by logs and history. | integration test |
+| AC-10 | Rolling failover: `srv1` returns 502 on first attempt → second attempt goes to `srv2` without consuming all `max_attempts` on `srv1`. | integration test |
+| AC-11 | Streaming: error after first chunk does not trigger retry; record `failed`. | integration test |
+| AC-12 | TUI connects via WebSocket with admin key and shows a live request and server table. | manual |
+| AC-13 | Completed requests disappear from TUI table after `tui.show_completed_minutes` but remain in SQLite. | manual + SQL query |
+| AC-14 | History is cleaned up per `history_retention_days` (test with mocked time). | unit test |
+| AC-15 | `Ctrl+C` on the daemon terminates the process within `shutdown_grace_seconds`; in-flight requests either complete or the client receives an error. | manual |
+| AC-16 | NFR-1: benchmark shows ≥ 100 RPS proxy processing (mock backend). | bench script |
+| AC-17 | First `proxylm serve` launch without an existing `config.yaml` alongside the binary creates it from the embedded template and continues startup. | manual |
+| AC-18 | `proxylm service install` registers the service on Windows (Service Manager) and Linux (systemd unit); `service start/stop` manages its lifecycle. | manual |
+| AC-19 | Build `GOOS=linux GOARCH=arm64 go build` on a Windows host successfully produces a binary without CGO toolchain. | manual |
+| AC-20 | After at least 3 completed requests to one model on one server, `ServerState.perf_ok = true`; `tok_out_per_sec > 0`; TUI shows the metric in the header line. (introduced in v0.7.0) | integration test |
+| AC-21 | RM column in TUI table: a row with `model_reloaded=true` shows `✓`, a row without reload shows `—`. (introduced in v0.7.0) | manual + SQL query |
+| AC-22 | `Tab` in TUI cycles focus Header → Requests → Log → Header; in paneHeader `↑`/`↓` change the selected server; `Enter` opens the server-detail modal with per-model table. (introduced in v0.7.0) | manual |
+| AC-23 | Request table: columns are aligned in the terminal without shifting when pending rows are present (glyph `…` occupies exactly one cell). (introduced in v0.7.0) | manual |
+| AC-24 | Field `model_reloaded` is present in the SQLite `requests` table (verified by `.schema requests`); value `1` for requests with model switch, `0` for others. (introduced in v0.7.0) | SQL query |
 
 ---
 
-## 9. Риски и допущения
+## 8. Out of Scope for MVP
 
-### 9.1. Допущения
+The following are explicitly **not** implemented in version 0.1.0:
 
-| ID    | Допущение | Если нарушится |
-|-------|-----------|-----------------|
-| A-1   | Бэкенд-серверы доступны при старте daemon'а (или становятся доступными в течение ≤ N циклов discovery). | Запросы получат 503/503 до восстановления. |
-| A-2   | LM Studio в режиме сервера держит **одну** активную модель; смена модели — через первый запрос с другим `model`. | Алгоритм планировщика остаётся валидным; INV-2 продолжает работать. |
-| A-3   | Ollama OpenAI-shim (`/v1/*`) корректно отвечает на `/v1/models` и `/v1/chat/completions`. | Поддержка native `/api/*` — out of scope; пользователь обязан использовать OpenAI-shim. |
-| A-4   | Сеть между прокси и бэкендом стабильна; большие потери пакетов трактуются как отказ сервера. | Failover должен это компенсировать. |
-| A-5   | Клиенты ретраят запросы при 5xx со своей стороны (поскольку прокси уже исчерпает свои попытки). | Часть запросов при отказе всех бэкендов завершится ошибкой у клиента. |
-| A-6   | `usage` в финальном SSE-чанке от бэкенда присутствует **достаточно часто**, чтобы статистика токенов была полезной. | При отсутствии — поля `input_tokens`/`output_tokens` остаются `NULL` (см. U-1 в §9.3); fallback-подсчёт токенов отложен до v0.2. |
+- Web UI (HTML interface).
+- Prometheus metrics / `GET /metrics`.
+- Native Ollama API endpoints (`/api/generate`, `/api/chat`) — OpenAI shim only.
+- In-memory queue persistence across restarts.
+- Per-client quotas and priorities.
+- Rate limiting (`429` responses; code 429 is reserved for the future).
+- Tools / function calling support beyond simple passthrough of request/response fields.
+- Embedding rate limiting / special-form batch API.
+- TLS encryption on the proxy side (a reverse proxy nginx/caddy in front of ProxyLM.GO is recommended).
+- Cluster mode (multiple ProxyLM.GO instances with shared state).
+- mTLS / OAuth2 authentication.
+- Request cost tracking in monetary units.
+- Canary deployment / hot config reload (requires restart).
 
-### 9.2. Риски
+---
 
-| ID    | Риск | Митигация |
+## 9. Risks and Assumptions
+
+### 9.1. Assumptions
+
+| ID    | Assumption | If violated |
+|-------|------------|-------------|
+| A-1   | Backend servers are reachable at daemon startup (or become reachable within ≤ N discovery cycles). | Requests will receive 503 until recovery. |
+| A-2   | LM Studio in server mode holds **one** active model at a time; model switch occurs via the first request with a different `model`. | The scheduler algorithm remains valid; INV-2 continues to hold. |
+| A-3   | The Ollama OpenAI shim (`/v1/*`) correctly responds to `/v1/models` and `/v1/chat/completions`. | Native `/api/*` support is out of scope; users must use the OpenAI shim. |
+| A-4   | The network between the proxy and backend is stable; significant packet loss is treated as a server failure. | Failover should compensate. |
+| A-5   | Clients retry requests on 5xx from their side (since the proxy will have exhausted its own attempts). | Some requests will fail at the client when all backends are down. |
+| A-6   | `usage` in the final SSE chunk from the backend is present **often enough** for token statistics to be useful. | If absent — `input_tokens`/`output_tokens` remain `NULL` (see U-1 in §9.3); fallback token counting deferred to v0.2. |
+
+### 9.2. Risks
+
+| ID    | Risk | Mitigation |
 |-------|------|------------|
-| R-1   | Голод модели B при бесконечном потоке модели A (см. ARCHITECTURE §3). | Документировать как осознанный выбор; в v0.2 — опциональный `max_consecutive_requests_per_model`. |
-| R-2   | LM Studio долго грузит большую модель в VRAM → таймаут запроса. | `backends[].timeout_seconds` (default 600) + рекомендация в README. |
-| R-3   | Несовпадение списка моделей между discovery и реальностью (модель удалили на хосте между опросами). | Запрос вернёт 404 от бэкенда → стандартный путь ошибки + следующий цикл discovery исправит ModelMap. |
-| R-4   | Конкурентный доступ к `current_model` между воркером и роутером. | Воркер обновляет `current_model` под `sync.Mutex` сервера; роутер читает значение под тем же mutex (или `atomic.Pointer[string]`); eventual consistency допустима для эвристики. |
-| R-5   | Размер очереди не ограничен — DoS со стороны клиента. | Out of scope MVP; зафиксировать в v0.2 (`max_queue_size_per_server`). |
-| R-6   | Утечка ключей в логи при отладке. | Маскирование в `internal/api/auth.go`; покрыть unit-тестом. |
-| R-7   | `modernc.org/sqlite` медленнее, чем CGO-вариант, под высокой нагрузкой на историю. | Запись истории асинхронная (через канал), batch-инсерты; в v0.2 — оценить переход на CGO с условной сборкой. |
+| R-1   | Starvation of model B under an infinite stream of model A requests (see ARCHITECTURE §3). | Document as a deliberate trade-off; in v0.2 — optional `max_consecutive_requests_per_model`. |
+| R-2   | LM Studio takes a long time to load a large model into VRAM → request timeout. | `backends[].timeout_seconds` (default 600) + recommendation in README. |
+| R-3   | Mismatch between discovery model list and reality (model deleted on host between polls). | Request will get 404 from backend → standard error path + next discovery cycle corrects ModelMap. |
+| R-4   | Concurrent access to `current_model` between the worker and the router. | Worker updates `current_model` under the server's `sync.Mutex`; router reads the value under the same mutex (or `atomic.Pointer[string]`); eventual consistency is acceptable for heuristics. |
+| R-5   | Queue size is unbounded — DoS from a client. | Out of scope for MVP; to be addressed in v0.2 (`max_queue_size_per_server`). |
+| R-6   | Key leakage into logs during debugging. | Masking in `internal/api/auth.go`; covered by unit test. |
+| R-7   | `modernc.org/sqlite` is slower than the CGO variant under high history write load. | Async history writing (via channel), batch inserts; in v0.2 — evaluate switching to CGO with conditional build. |
 
-### 9.3. Закрытые вопросы (зафиксированные решения)
+### 9.3. Closed Questions (Confirmed Decisions)
 
-Все вопросы, ранее помеченные как «требует уточнения», подтверждены заказчиком и считаются окончательными для MVP.
+All questions previously marked "requires clarification" have been confirmed and are considered final for MVP.
 
-- **U-1.** Подсчёт токенов при отсутствии `usage` в ответе бэкенда — оставлять `NULL`. Fallback-подсчёт **отложен на v0.2**.
-- **U-2.** `GET /v1/models` отдаёт модели **только с healthy-серверов**.
-- **U-3.** `proxylm serve` при недоступности всех бэкендов на старте — **запускается** и отвечает `503` для запросов, пока discovery не найдёт хотя бы один healthy сервер.
-- **U-4.** При обрыве SSE посреди стрима — отправлять `event: error` с `data: {"error": {"code": "stream_aborted", "message": "..."}}`, затем `data: [DONE]` (см. API.md §1.6).
-- **U-5.** Поддерживается **один** admin-ключ (`auth.admin_key`).
-- **U-6.** При `503` прокси возвращает заголовок `Retry-After: 1` (секунда).
-- **U-7.** Конфиг и БД лежат **рядом с бинарником** (portable). При отсутствии `config.yaml` daemon создаёт его из встроенного шаблона и продолжает запуск. Путь можно переопределить флагом `--config`.
+- **U-1.** Token counting when `usage` is absent in the backend response — leave `NULL`. Fallback counting **deferred to v0.2**.
+- **U-2.** `GET /v1/models` returns models **from healthy servers only**.
+- **U-3.** `proxylm serve` when all backends are unavailable at startup — **starts** and returns `503` for requests until discovery finds at least one healthy server.
+- **U-4.** On mid-stream SSE disconnection — send `event: error` with `data: {"error": {"code": "stream_aborted", "message": "..."}}`, then `data: [DONE]` (see API.md §1.6).
+- **U-5.** Exactly **one** admin key is supported (`auth.admin_key`).
+- **U-6.** On `503` the proxy returns the header `Retry-After: 1` (second).
+- **U-7.** Config and database reside **alongside the binary** (portable). If `config.yaml` is absent, the daemon creates it from the embedded template and continues startup. Path can be overridden with `--config`.
 
-Дополнительно зафиксировано по поведению планировщика:
+Additionally confirmed regarding scheduler behavior:
 
-- **K-1 (current_model semantics).** Используется **eventual consistency**: `current_model` сервера обновляется *после* успешного завершения in-flight запроса. Роутер читает значение без блокировок (`atomic.Pointer[string]` или snapshot под RLock). Промежуток между «запрос взят воркером» и «`current_model` обновился» допустим — это эвристика для роутера, не строгий инвариант. Риск R-4 принят.
+- **K-1 (current_model semantics).** **Eventual consistency** is used: `current_model` on the server is updated *after* the in-flight request completes successfully. The router reads the value without locks (`atomic.Pointer[string]` or snapshot under RLock). The window between "request taken by worker" and "`current_model` updated" is acceptable — this is a heuristic for the router, not a strict invariant. Risk R-4 is accepted.
 
 ---
 
-## 10. План версий
+## 10. Version Plan
 
 ### v0.1.0 — MVP
 
-Полностью реализованы FR-1 … FR-43, NFR-1 … NFR-12, INV-1 … INV-8, AC-1 … AC-19.
+Fully implements FR-1 … FR-43, NFR-1 … NFR-12, INV-1 … INV-8, AC-1 … AC-19.
 
-### v0.7.0 — метрики регрессии + UX TUI
+### v0.7.0 — regression metrics + TUI UX
 
-Добавлены FR-44 … FR-47, AC-20 … AC-24:
+Added FR-44 … FR-47, AC-20 … AC-24:
 
-- Линейная регрессия производительности `(server, model)`: `t_load`, `tok_in_per_sec`, `tok_out_per_sec` в IPC и TUI-шапке.
-- Колонка RM (Reload Model) в таблице запросов; поле `model_reloaded` в БД и IPC.
-- Интерактивная шапка (`paneHeader`): Tab-навигация, `↑`/`↓` по серверам, server-detail modal.
-- Исправлен глиф очереди: `…` (U+2026) вместо `⏳` для корректного выравнивания.
+- Linear performance regression `(server, model)`: `t_load`, `tok_in_per_sec`, `tok_out_per_sec` in IPC and TUI header.
+- RM (Reload Model) column in request table; `model_reloaded` field in DB and IPC.
+- Interactive header (`paneHeader`): Tab navigation, `↑`/`↓` server selection, server-detail modal.
+- Queue glyph fix: `…` (U+2026) instead of `⏳` for correct column alignment.
 
-### v0.2.0 — первый патч (что добавляем в первую очередь)
+### v0.2.0 — first patch (first priorities)
 
-- `max_consecutive_requests_per_model` — защита от голода (R-1).
-- `max_queue_size_per_server` — backpressure / DoS-mitigation (R-5).
-- Опциональный fallback-подсчёт токенов (U-1).
-- Нативные Ollama endpoints (`/api/generate`, `/api/chat`) — passthrough.
-- Метрики Prometheus (`/metrics`).
-- 429 rate limiting per-client (на базе ключа).
-- Hot-reload конфига для добавления/удаления бэкендов без рестарта.
-- Persistence очереди (опциональный режим, через тот же SQLite).
-- Опциональная сборка с CGO-SQLite (`mattn/go-sqlite3`) под флагом сборки — для high-throughput инсталляций (R-7).
+- `max_consecutive_requests_per_model` — starvation protection (R-1).
+- `max_queue_size_per_server` — backpressure / DoS mitigation (R-5).
+- Optional fallback token counting (U-1).
+- Native Ollama endpoints (`/api/generate`, `/api/chat`) — passthrough.
+- Prometheus metrics (`/metrics`).
+- Per-client 429 rate limiting (key-based).
+- Hot config reload for adding/removing backends without restart.
+- Queue persistence (optional mode, via the same SQLite).
+- Optional CGO-SQLite build (`mattn/go-sqlite3`) under build tag — for high-throughput installations (R-7).
 
-### v0.3.0+ — обсуждается
+### v0.3.0+ — under discussion
 
 - Web UI.
-- Кластерный режим.
-- Квоты в денежных единицах.
+- Cluster mode.
+- Per-client quotas in monetary units.
 - mTLS / OAuth2.
-- **Model aliasing / fallback-маппинг.** Конфиг-параметр уровня `compat.model_aliases`
-  (или отдельная секция) с правилами вида `from: <model> → to: [<candidate1>, <candidate2>, …]`.
-  При получении запроса с моделью, которой нет ни на одном healthy-сервере, прокси
-  «подменяет» её на одну из совместимых по списку и шлёт дальше; в логах и истории
-  фиксируется обе модели (`requested_model` vs `actual_model`). Use-case: клиенту
-  достаточно семейства моделей (например, любой 20B+ instruct), и он не хочет
-  падать с 404, когда конкретная инсталляция не задеплоена. Сейчас (v0.3.0) при
-  отсутствии модели возвращается `ErrNoServer` / 503 — это сознательный выбор
-  до реализации aliasing'а.
+- **Model aliasing / fallback mapping.** Config parameter at the `compat.model_aliases` level
+  (or a separate section) with rules of the form `from: <model> → to: [<candidate1>, <candidate2>, …]`.
+  When a request arrives for a model absent from all healthy servers, the proxy
+  "substitutes" it with one of the compatible candidates and forwards; both models
+  (`requested_model` vs `actual_model`) are recorded in logs and history. Use case: the client
+  only needs a model family (e.g., any 20B+ instruct) and does not want to fail with 404
+  when a specific installation is not deployed. Currently (v0.3.0) the absence of a model
+  returns `ErrNoServer` / 503 — this is a deliberate choice until aliasing is implemented.

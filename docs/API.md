@@ -1,67 +1,67 @@
 # ProxyLM.GO — API Specification
 
-Версия документа: 0.7.0
-Связанные документы: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`SRS.md`](./SRS.md)
+Document version: 0.7.0
+Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`SRS.md`](./SRS.md)
 
-Документ описывает три группы API:
+This document describes three API groups:
 
-1. **Внешний API** — OpenAI-совместимый, для клиентских сервисов.
-2. **Admin / IPC API** — WebSocket-канал для TUI и любых административных клиентов.
-3. **Внутренние backend-вызовы** — что и как прокси шлёт на LM Studio / Ollama.
+1. **External API** — OpenAI-compatible, for client services.
+2. **Admin / IPC API** — WebSocket channel for TUI and any administrative clients.
+3. **Internal backend calls** — what and how the proxy sends to LM Studio / Ollama.
 
-Вся передача — UTF-8 JSON, если не указано иное. Все timestamps — ISO 8601 в UTC, если не указано иное.
+All data transfer is UTF-8 JSON unless otherwise noted. All timestamps are ISO 8601 in UTC unless otherwise noted.
 
 ---
 
-## 1. Внешний API (OpenAI-совместимый)
+## 1. External API (OpenAI-compatible)
 
-Базовый префикс: `/v1`. Хост и порт — из `proxy.host` / `proxy.port` (default `0.0.0.0:8080`).
+Base prefix: `/v1`. Host and port — from `proxy.host` / `proxy.port` (default `0.0.0.0:8080`).
 
-### 1.1. Общие требования
+### 1.1. General requirements
 
-- Все эндпоинты под `/v1/*` требуют заголовок `Authorization: Bearer <api_key>`. Ключ ищется в `auth.api_keys[].key`. При несовпадении — `401`.
-- Заголовок `Content-Type: application/json` обязателен для POST-запросов.
-- Прокси добавляет в логи и историю поле `client_name`, соответствующее `auth.api_keys[].name`. Сам ключ нигде не логируется.
-- Неизвестные поля тела запроса передаются на бэкенд без модификации (FR-9).
-- На все ответы прокси добавляет заголовок `X-Request-Id: <uuid>` (тот же, что в `RequestRecord.request_id`).
+- All endpoints under `/v1/*` require the header `Authorization: Bearer <api_key>`. The key is looked up in `auth.api_keys[].key`. On mismatch — `401`.
+- The header `Content-Type: application/json` is required for POST requests.
+- The proxy adds the field `client_name`, corresponding to `auth.api_keys[].name`, to logs and history. The key itself is never logged.
+- Unknown request body fields are forwarded to the backend without modification (FR-9).
+- The proxy adds the header `X-Request-Id: <uuid>` to all responses (the same value as in `RequestRecord.request_id`).
 
 ### 1.2. `POST /v1/chat/completions`
 
-#### Запрос
+#### Request
 
-| Параметр | HTTP-уровень |
-|----------|--------------|
-| Метод    | `POST`       |
-| Путь     | `/v1/chat/completions` |
-| Заголовки | `Authorization: Bearer <key>`, `Content-Type: application/json`, `Accept: application/json` (для non-streaming) или `Accept: text/event-stream` (для streaming) |
+| Parameter | HTTP level |
+|-----------|------------|
+| Method    | `POST`     |
+| Path      | `/v1/chat/completions` |
+| Headers   | `Authorization: Bearer <key>`, `Content-Type: application/json`, `Accept: application/json` (for non-streaming) or `Accept: text/event-stream` (for streaming) |
 
-JSON-схема тела (важные поля):
+JSON body schema (key fields):
 
-| Поле           | Тип                | Обяз. | Описание |
-|----------------|--------------------|-------|----------|
-| `model`        | string             | да    | Идентификатор модели (например, `qwen2.5:14b`) |
-| `messages`     | array of message   | да    | Массив `{role: "system" \| "user" \| "assistant" \| "tool", content: string \| array}` |
-| `stream`       | boolean            | нет   | `true` → SSE-ответ. Default `false`. |
-| `max_tokens`   | integer            | нет   | Лимит сгенерированных токенов |
-| `temperature`  | number (0..2)      | нет   | |
-| `top_p`        | number (0..1)      | нет   | |
-| `stop`         | string \| string[] | нет   | Стоп-последовательности |
-| `presence_penalty`  | number        | нет   | passthrough |
-| `frequency_penalty` | number        | нет   | passthrough |
-| `tools`        | array              | нет   | passthrough (поддержка функций — на стороне бэкенда) |
-| `tool_choice`  | string \| object   | нет   | passthrough |
-| `response_format` | object          | нет   | passthrough или compat-нормализация (см. ниже) |
-| `seed`         | integer            | нет   | passthrough |
-| `user`         | string             | нет   | passthrough |
+| Field          | Type               | Req. | Description |
+|----------------|--------------------|------|-------------|
+| `model`        | string             | yes  | Model identifier (e.g., `qwen2.5:14b`) |
+| `messages`     | array of message   | yes  | Array of `{role: "system" \| "user" \| "assistant" \| "tool", content: string \| array}` |
+| `stream`       | boolean            | no   | `true` → SSE response. Default `false`. |
+| `max_tokens`   | integer            | no   | Generated token limit |
+| `temperature`  | number (0..2)      | no   | |
+| `top_p`        | number (0..1)      | no   | |
+| `stop`         | string \| string[] | no   | Stop sequences |
+| `presence_penalty`  | number        | no   | passthrough |
+| `frequency_penalty` | number        | no   | passthrough |
+| `tools`        | array              | no   | passthrough (function support — on the backend side) |
+| `tool_choice`  | string \| object   | no   | passthrough |
+| `response_format` | object          | no   | passthrough or compat normalization (see below) |
+| `seed`         | integer            | no   | passthrough |
+| `user`         | string             | no   | passthrough |
 
-Пример:
+Example:
 
 ```json
 {
   "model": "qwen2.5:14b",
   "messages": [
-    {"role": "system", "content": "Ты — ассистент."},
-    {"role": "user", "content": "Привет."}
+    {"role": "system", "content": "You are an assistant."},
+    {"role": "user", "content": "Hello."}
   ],
   "max_tokens": 256,
   "temperature": 0.7,
@@ -69,9 +69,9 @@ JSON-схема тела (важные поля):
 }
 ```
 
-#### Ответ (non-streaming)
+#### Response (non-streaming)
 
-Код `200 OK`. Заголовки: `Content-Type: application/json`, `X-Request-Id: <uuid>`.
+Code `200 OK`. Headers: `Content-Type: application/json`, `X-Request-Id: <uuid>`.
 
 ```json
 {
@@ -82,7 +82,7 @@ JSON-схема тела (важные поля):
   "choices": [
     {
       "index": 0,
-      "message": {"role": "assistant", "content": "Привет! Чем помочь?"},
+      "message": {"role": "assistant", "content": "Hello! How can I help?"},
       "finish_reason": "stop"
     }
   ],
@@ -94,20 +94,20 @@ JSON-схема тела (важные поля):
 }
 ```
 
-Прокси возвращает тело бэкенда с минимальной нормализацией (поле `model` — то же, что в запросе клиента).
+The proxy returns the backend body with minimal normalization (the `model` field matches what the client sent in the request).
 
-#### Ответ (streaming, `stream: true`)
+#### Response (streaming, `stream: true`)
 
-Код `200 OK`. Заголовки: `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Request-Id: <uuid>`, `Transfer-Encoding: chunked`.
+Code `200 OK`. Headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Request-Id: <uuid>`, `Transfer-Encoding: chunked`.
 
-Тело — последовательность SSE-чанков. Формат:
+Body — a sequence of SSE chunks. Format:
 
 ```
 data: {"id":"chatcmpl-<id>","object":"chat.completion.chunk","created":1730000000,"model":"qwen2.5:14b","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
 
-data: {"id":"chatcmpl-<id>","object":"chat.completion.chunk","created":1730000000,"model":"qwen2.5:14b","choices":[{"index":0,"delta":{"content":"Прив"},"finish_reason":null}]}
+data: {"id":"chatcmpl-<id>","object":"chat.completion.chunk","created":1730000000,"model":"qwen2.5:14b","choices":[{"index":0,"delta":{"content":"Hell"},"finish_reason":null}]}
 
-data: {"id":"chatcmpl-<id>","object":"chat.completion.chunk","created":1730000000,"model":"qwen2.5:14b","choices":[{"index":0,"delta":{"content":"ет!"},"finish_reason":null}]}
+data: {"id":"chatcmpl-<id>","object":"chat.completion.chunk","created":1730000000,"model":"qwen2.5:14b","choices":[{"index":0,"delta":{"content":"o!"},"finish_reason":null}]}
 
 data: {"id":"chatcmpl-<id>","object":"chat.completion.chunk","created":1730000000,"model":"qwen2.5:14b","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":23,"completion_tokens":7,"total_tokens":30}}
 
@@ -115,43 +115,43 @@ data: [DONE]
 
 ```
 
-Каждое сообщение завершается двумя `\n`. Финальный маркер — литерал `data: [DONE]`. Прокси:
+Each message ends with two `\n`. The final marker is the literal `data: [DONE]`. The proxy:
 
-- Не буферизует тело — пересылает чанки по мере получения (через `http.ResponseWriter` + `http.Flusher`).
-- Считает `output_tokens` по числу `delta.content` (или берёт `usage` из последнего чанка).
-- При получении ошибки **до первого** проксированного чанка — может ретраить (FR-21).
-- При получении ошибки **после первого** проксированного чанка — ретрай запрещён, см. §1.6 (stream_aborted).
+- Does not buffer the body — forwards chunks as they arrive (via `http.ResponseWriter` + `http.Flusher`).
+- Counts `output_tokens` by the number of `delta.content` chunks (or takes `usage` from the last chunk).
+- On error **before the first** proxied chunk — may retry (FR-21).
+- On error **after the first** proxied chunk — retry is forbidden, see §1.6 (stream_aborted).
 
-#### Совместимость `response_format` (`compat.response_format_mode`)
+#### `response_format` compatibility (`compat.response_format_mode`)
 
-- `passthrough` (default): поле уходит на backend без изменений.
-- `normalize_json_object`: если `response_format.type == "json_object"`, прокси отправляет upstream-совместимый `response_format` c `type: "json_schema"` и минимальной permissive-схемой объекта.
-- `strict_reject`: если `response_format.type` задан и не равен `json_schema` или `text`, прокси возвращает `400 invalid_request` до постановки в очередь.
+- `passthrough` (default): the field is forwarded to the backend unchanged.
+- `normalize_json_object`: if `response_format.type == "json_object"`, the proxy sends an upstream-compatible `response_format` with `type: "json_schema"` and a minimal permissive object schema.
+- `strict_reject`: if `response_format.type` is set and is not `json_schema` or `text`, the proxy returns `400 invalid_request` before queuing.
 
 ### 1.3. `POST /v1/completions`
 
-Контракт идентичен `POST /v1/chat/completions`, но тело запроса содержит `prompt: string | string[]` вместо `messages`. Поля `stream`, `max_tokens`, `temperature`, `top_p`, `stop` поддерживаются. Ответ — OpenAI-формат `text_completion` / `text_completion.chunk`.
+The contract is identical to `POST /v1/chat/completions`, but the request body contains `prompt: string | string[]` instead of `messages`. Fields `stream`, `max_tokens`, `temperature`, `top_p`, `stop` are supported. Response — OpenAI format `text_completion` / `text_completion.chunk`.
 
 ### 1.4. `POST /v1/embeddings`
 
-#### Запрос
+#### Request
 
 ```json
 {
   "model": "nomic-embed-text",
-  "input": "строка или массив строк"
+  "input": "string or array of strings"
 }
 ```
 
-| Поле       | Тип                  | Обяз. |
-|------------|----------------------|-------|
-| `model`    | string               | да    |
-| `input`    | string \| string[]   | да    |
-| `encoding_format` | string (`float` \| `base64`) | нет |
-| `dimensions` | integer            | нет   |
-| `user`     | string               | нет   |
+| Field       | Type                 | Req. |
+|-------------|----------------------|------|
+| `model`     | string               | yes  |
+| `input`     | string \| string[]   | yes  |
+| `encoding_format` | string (`float` \| `base64`) | no |
+| `dimensions` | integer             | no   |
+| `user`      | string               | no   |
 
-#### Ответ
+#### Response
 
 ```json
 {
@@ -164,18 +164,18 @@ data: [DONE]
 }
 ```
 
-Streaming для embeddings не поддерживается.
+Streaming for embeddings is not supported.
 
 ### 1.5. `GET /v1/models`
 
-#### Запрос
+#### Request
 
 ```
 GET /v1/models HTTP/1.1
 Authorization: Bearer <key>
 ```
 
-#### Ответ
+#### Response
 
 ```json
 {
@@ -187,31 +187,31 @@ Authorization: Bearer <key>
 }
 ```
 
-Поле `served_by` — расширение OpenAI-схемы; клиент может его игнорировать. Список агрегируется по `ModelMap` healthy-серверов (см. SRS, FR-7, U-2).
+The `served_by` field is an extension of the OpenAI schema; clients may ignore it. The list is aggregated from the `ModelMap` of healthy servers (see SRS, FR-7, U-2).
 
 ### 1.6. `GET /healthz`
 
-#### Запрос
+#### Request
 
 ```
 GET /healthz HTTP/1.1
 ```
 
-Без заголовка `Authorization`.
+No `Authorization` header required.
 
-#### Ответ
+#### Response
 
-Код `200 OK`. Тело:
+Code `200 OK`. Body:
 
 ```json
 {"status": "ok", "version": "0.1.0", "uptime_seconds": 12345}
 ```
 
-Если daemon в режиме graceful shutdown — `503` c телом `{"status": "shutting_down"}`.
+If the daemon is in graceful shutdown mode — `503` with body `{"status": "shutting_down"}`.
 
-### 1.7. Коды ошибок и формат тела ошибки
+### 1.7. Error codes and error body format
 
-Тело ошибки — OpenAI-совместимое:
+Error body — OpenAI-compatible:
 
 ```json
 {
@@ -224,25 +224,25 @@ GET /healthz HTTP/1.1
 }
 ```
 
-Поля `type` и `code` — машинно-читаемые. `param` присутствует, если ошибка касается конкретного поля запроса.
+Fields `type` and `code` are machine-readable. `param` is present when the error relates to a specific request field.
 
-| HTTP | `code`                  | Когда                                                                  | Ретраить клиенту? |
-|------|-------------------------|-------------------------------------------------------------------------|-------------------|
-| 400  | `invalid_request`        | Невалидное тело JSON, отсутствует обязательное поле                    | нет               |
-| 401  | `unauthorized`           | Нет/неверный `Authorization: Bearer`                                    | нет               |
-| 404  | `model_not_found`        | Модель отсутствует на всех healthy-серверах                            | нет               |
-| 408  | `request_timeout`        | Истёк `backends[].timeout_seconds`                                      | да                |
-| 429  | `rate_limited`           | **Зарезервировано**, в MVP не возвращается                              | да                |
-| 500  | `internal_error`         | Внутренняя ошибка прокси (баг)                                          | да                |
-| 502  | `backend_error`          | Бэкенд вернул не-2xx, попытки исчерпаны, failover не помог              | да                |
-| 503  | `service_unavailable`    | Все серверы с этой моделью `unhealthy`; daemon в shutdown'е             | да (с `Retry-After`) |
-| 504  | `backend_timeout`        | Совокупный таймаут с учётом ретраев превышен                            | да                |
+| HTTP | `code`                  | When                                                                   | Client retry? |
+|------|-------------------------|------------------------------------------------------------------------|---------------|
+| 400  | `invalid_request`        | Invalid JSON body, missing required field                             | no            |
+| 401  | `unauthorized`           | Missing/invalid `Authorization: Bearer`                               | no            |
+| 404  | `model_not_found`        | Model absent from all healthy servers                                 | no            |
+| 408  | `request_timeout`        | `backends[].timeout_seconds` exceeded                                 | yes           |
+| 429  | `rate_limited`           | **Reserved**, not returned in MVP                                     | yes           |
+| 500  | `internal_error`         | Internal proxy error (bug)                                            | yes           |
+| 502  | `backend_error`          | Backend returned non-2xx, retries exhausted, failover did not help    | yes           |
+| 503  | `service_unavailable`    | All servers with this model are `unhealthy`; daemon is shutting down  | yes (with `Retry-After`) |
+| 504  | `backend_timeout`        | Cumulative timeout including retries exceeded                         | yes           |
 
-При 503 прокси добавляет `Retry-After: 1` (секунды).
+On 503 the proxy adds `Retry-After: 1` (seconds).
 
-#### Streaming-ошибка после первого чанка (`stream_aborted`)
+#### Streaming error after first chunk (`stream_aborted`)
 
-Если прокси уже отправил клиенту хотя бы один SSE-чанк и далее получил ошибку от бэкенда — он **не** меняет HTTP-код (он уже 200). Вместо этого:
+If the proxy has already sent the client at least one SSE chunk and then receives an error from the backend — it does **not** change the HTTP status code (already 200). Instead:
 
 ```
 data: {"error":{"message":"Backend connection lost mid-stream","type":"backend_error","code":"stream_aborted"}}
@@ -251,7 +251,7 @@ data: [DONE]
 
 ```
 
-Клиент должен обнаружить наличие `error` в SSE-чанке. Запись в истории — `failed`.
+The client must detect the presence of `error` in an SSE chunk. History record — `failed`.
 
 ---
 
@@ -259,7 +259,7 @@ data: [DONE]
 
 ### 2.1. `GET /admin/stream` — WebSocket
 
-#### Подключение
+#### Connection
 
 ```
 GET /admin/stream HTTP/1.1
@@ -271,18 +271,18 @@ Sec-WebSocket-Version: 13
 Sec-WebSocket-Key: ...
 ```
 
-`<admin_key>` — `auth.admin_key`. Несовпадение → `401`, без апгрейда.
+`<admin_key>` — `auth.admin_key`. Mismatch → `401`, no upgrade.
 
-`/admin/stream` доступен на том же listener'е, что и `/v1/*` (`proxy.host:proxy.port`).
-Отдельный listener для IPC не предусмотрен.
+`/admin/stream` is available on the same listener as `/v1/*` (`proxy.host:proxy.port`).
+No separate listener for IPC is provided.
 
-### 2.2. Сообщения сервер → клиент
+### 2.2. Server → client messages
 
-Все сообщения — JSON-фреймы (`text` opcode), в формате `{"type": "<тип>", ...}`.
+All messages are JSON frames (`text` opcode), in the format `{"type": "<type>", ...}`.
 
 #### `state_snapshot`
 
-Отправляется один раз сразу после подключения. Содержит полное состояние.
+Sent once immediately after connection. Contains the full state.
 
 ```json
 {
@@ -356,48 +356,48 @@ Sec-WebSocket-Key: ...
 }
 ```
 
-##### Поля `ServerState` (v0.7.0)
+##### `ServerState` fields (v0.7.0)
 
-| Поле | Тип | Описание |
-|------|-----|----------|
-| `name` | string | имя сервера из конфига |
-| `url` | string | базовый URL |
-| `healthy` | bool | статус по discovery |
-| `current_model` | string \| `""` | загруженная / in-flight модель |
-| `queue_size` | int | число запросов в `pending` |
-| `models` | string[] | известные модели сервера |
-| `perf_samples` | int | число наблюдений в регрессии для `current_model` |
-| `perf_ok` | bool | `true` если регрессия рассчитана (≥ 3 наблюдений, `X^T X` не сингулярна) |
-| `t_load_ms` | float64 | оценка времени загрузки модели (мс); 0 если нет reload-точек или `perf_ok=false` |
-| `tok_in_per_sec` | float64 | пропускная способность по prompt-токенам (tok/s); 0 если нет данных |
-| `tok_out_per_sec` | float64 | пропускная способность по completion-токенам (tok/s); 0 если нет данных |
-| `per_model_stats` | `ModelStats[]` | статистика по всем моделям сервера, sorted by `samples DESC` |
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | server name from config |
+| `url` | string | base URL |
+| `healthy` | bool | status from discovery |
+| `current_model` | string \| `""` | loaded / in-flight model |
+| `queue_size` | int | number of requests in `pending` |
+| `models` | string[] | known models of the server |
+| `perf_samples` | int | number of observations in the regression for `current_model` |
+| `perf_ok` | bool | `true` if regression is computed (≥ 3 observations, `X^T X` is non-singular) |
+| `t_load_ms` | float64 | estimated model load time (ms); 0 if no reload observations or `perf_ok=false` |
+| `tok_in_per_sec` | float64 | prompt-token throughput (tok/s); 0 if no data |
+| `tok_out_per_sec` | float64 | completion-token throughput (tok/s); 0 if no data |
+| `per_model_stats` | `ModelStats[]` | statistics for all models of the server, sorted by `samples DESC` |
 
-> Поля `tokens_per_sec` и `ttft_ms` **удалены в v0.7.0**. Замена: `tok_out_per_sec` и `t_load_ms` из регрессии.
+> Fields `tokens_per_sec` and `ttft_ms` **removed in v0.7.0**. Replaced by: `tok_out_per_sec` and `t_load_ms` from regression.
 
-##### Структура `ModelStats`
+##### `ModelStats` structure
 
-| Поле | Тип | Описание |
-|------|-----|----------|
-| `model` | string | идентификатор модели |
-| `samples` | int | общее число наблюдений для пары (server, model) |
-| `loaded` | int | из них — с флагом model_reload (смена модели перед запросом) |
-| `ok` | bool | регрессия валидна |
-| `t_load_ms` | float64 | оценка времени загрузки (мс); 0 если нет данных |
-| `tok_in_per_sec` | float64 | пропускная способность prompt-токенов (tok/s) |
-| `tok_out_per_sec` | float64 | пропускная способность completion-токенов (tok/s) |
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string | model identifier |
+| `samples` | int | total number of observations for the (server, model) pair |
+| `loaded` | int | of those — with the model_reload flag (model switch before request) |
+| `ok` | bool | regression is valid |
+| `t_load_ms` | float64 | estimated load time (ms); 0 if no data |
+| `tok_in_per_sec` | float64 | prompt-token throughput (tok/s) |
+| `tok_out_per_sec` | float64 | completion-token throughput (tok/s) |
 
-##### Поля `RequestState`
+##### `RequestState` fields
 
-Дополнительное поле, добавленное в v0.7.0:
+Additional field added in v0.7.0:
 
-| Поле | Тип | Описание |
-|------|-----|----------|
-| `model_reloaded` | bool | `true` если в начале dispatch этого запроса `current_model` сервера отличалась от запрошенной модели (т.е. произошла смена модели) |
+| Field | Type | Description |
+|-------|------|-------------|
+| `model_reloaded` | bool | `true` if at the start of dispatching this request `current_model` on the server differed from the requested model (i.e., a model switch occurred) |
 
 #### `state_diff`
 
-Отправляется по факту изменений. Содержит частичные обновления.
+Sent when changes occur. Contains partial updates.
 
 ```json
 {
@@ -429,12 +429,12 @@ Sec-WebSocket-Key: ...
 }
 ```
 
-`requests_removed` содержит массив `request_id`, которые клиент должен убрать из таблицы (например, после `tui.show_completed_minutes`).
-`requests_upserted` использует тот же формат полей запроса, что и `state_snapshot.requests`; допускаются частичные апдейты.
+`requests_removed` contains an array of `request_id` values the client should remove from the table (e.g., after `tui.show_completed_minutes`).
+`requests_upserted` uses the same request field format as `state_snapshot.requests`; partial updates are allowed.
 
 #### `log_line`
 
-Push строки лога.
+Push of a single log line.
 
 ```json
 {
@@ -448,11 +448,11 @@ Push строки лога.
 }
 ```
 
-### 2.3. Сообщения клиент → серверу
+### 2.3. Client → server messages
 
 #### `subscribe`
 
-Опциональная подписка на подмножество событий. Если не отправлена — клиент получает всё.
+Optional subscription to a subset of events. If not sent — the client receives everything.
 
 ```json
 {
@@ -468,56 +468,56 @@ Push строки лога.
 {"type": "ping", "timestamp": "2026-05-09T14:03:00Z"}
 ```
 
-Ответ: `{"type": "pong", "timestamp": "..."}`. Сервер сам шлёт `ping` каждые 30 с при бездействии.
+Response: `{"type": "pong", "timestamp": "..."}`. The server itself sends `ping` every 30 s when idle.
 
-### 2.4. Закрытие соединения
+### 2.4. Connection close
 
-| Код | Причина |
-|------|---------|
-| 1000 | Штатное закрытие (клиент послал close) |
-| 1008 | Нарушение протокола / неверный JSON |
-| 1011 | Внутренняя ошибка сервера |
-| 4401 | Auth failure при подключении (вместе с HTTP 401 до апгрейда) |
-
----
-
-## 3. Внутренние backend-вызовы
-
-### 3.1. Общие правила
-
-- Прокси использует `*http.Client` (`net/http`, stdlib) с `Timeout = backends[].timeout_seconds` (default 600 секунд). Стриминговые ответы читаются через `resp.Body` (`io.ReadCloser`) по строкам (`bufio.Scanner` или `bufio.Reader.ReadBytes('\n')`).
-- Базовый URL — `backends[].url`.
-- Если `backends[].api_key` не `null`, добавляется `Authorization: Bearer <api_key>` (свой для каждого бэкенда). Этот заголовок **не имеет отношения** к ключу клиента прокси.
-- Заголовок `User-Agent: proxylm/<version>` (где `<version>` берётся из `runtime/debug.BuildInfo` или `-ldflags -X main.version=...`).
-- На каждый бэкенд создаётся отдельный `*http.Client` с настроенным `*http.Transport` (keep-alive, `MaxIdleConnsPerHost`, общий таймаут).
-
-### 3.2. Используемые пути
-
-| Назначение                | Метод | Путь                       | Тело                                    |
-|---------------------------|-------|----------------------------|------------------------------------------|
-| Discovery                 | GET   | `/v1/models`               | —                                        |
-| Chat completion (regular) | POST  | `/v1/chat/completions`     | тело клиента; `response_format` может быть нормализован по `compat.response_format_mode` |
-| Chat completion (stream)  | POST  | `/v1/chat/completions`     | тело + `stream: true`; `response_format` может быть нормализован; ответ через `resp.Body` (chunked reading) |
-| Text completion           | POST  | `/v1/completions`          | passthrough                              |
-| Embeddings                | POST  | `/v1/embeddings`           | passthrough                              |
-
-### 3.3. LM Studio / Ollama специфика
-
-- LM Studio: OpenAI-совместимый API на `http://<host>:1234/v1/*`.
-- Ollama: OpenAI-shim на `http://<host>:11434/v1/*` (нативные `/api/*` — out of scope MVP).
-- Поведение `Ollama` при `model: "..."`, которой нет: 404 — мапится в стандартный путь ошибки прокси.
-
-### 3.4. Обработка ответов
-
-- 2xx — отдаём клиенту (с возможной нормализацией поля `model`).
-- 4xx (кроме 429) — пробрасываем клиенту без ретрая (FR-23).
-- 5xx, network reset, timeout — ретрай по политике (FR-18 ÷ FR-20).
+| Code | Reason |
+|------|--------|
+| 1000 | Normal close (client sent close) |
+| 1008 | Protocol violation / invalid JSON |
+| 1011 | Internal server error |
+| 4401 | Auth failure during connection (along with HTTP 401 before upgrade) |
 
 ---
 
-## 4. Примеры curl
+## 3. Internal Backend Calls
 
-Задаём переменные окружения:
+### 3.1. General rules
+
+- The proxy uses `*http.Client` (`net/http`, stdlib) with `Timeout = backends[].timeout_seconds` (default 600 seconds). Streaming responses are read via `resp.Body` (`io.ReadCloser`) line-by-line (`bufio.Scanner` or `bufio.Reader.ReadBytes('\n')`).
+- Base URL — `backends[].url`.
+- If `backends[].api_key` is not `null`, `Authorization: Bearer <api_key>` is added (individual per backend). This header has **no relation** to the proxy client's key.
+- Header `User-Agent: proxylm/<version>` (where `<version>` comes from `runtime/debug.BuildInfo` or `-ldflags -X main.version=...`).
+- A separate `*http.Client` with a configured `*http.Transport` (keep-alive, `MaxIdleConnsPerHost`, overall timeout) is created for each backend.
+
+### 3.2. Paths used
+
+| Purpose                   | Method | Path                       | Body                                    |
+|---------------------------|--------|----------------------------|-----------------------------------------|
+| Discovery                 | GET    | `/v1/models`               | —                                       |
+| Chat completion (regular) | POST   | `/v1/chat/completions`     | client body; `response_format` may be normalized per `compat.response_format_mode` |
+| Chat completion (stream)  | POST   | `/v1/chat/completions`     | body + `stream: true`; `response_format` may be normalized; response via `resp.Body` (chunked reading) |
+| Text completion           | POST   | `/v1/completions`          | passthrough                             |
+| Embeddings                | POST   | `/v1/embeddings`           | passthrough                             |
+
+### 3.3. LM Studio / Ollama specifics
+
+- LM Studio: OpenAI-compatible API at `http://<host>:1234/v1/*`.
+- Ollama: OpenAI shim at `http://<host>:11434/v1/*` (native `/api/*` — out of scope for MVP).
+- Ollama behavior when `model: "..."` does not exist: 404 — mapped to the standard proxy error path.
+
+### 3.4. Response handling
+
+- 2xx — forward to client (with possible `model` field normalization).
+- 4xx (except 429) — pass through to client without retry (FR-23).
+- 5xx, network reset, timeout — retry per policy (FR-18 ÷ FR-20).
+
+---
+
+## 4. curl Examples
+
+Set environment variables:
 
 ```bash
 export PROXY=http://localhost:8080
@@ -533,7 +533,7 @@ curl -s "$PROXY/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "qwen2.5:14b",
-    "messages": [{"role": "user", "content": "Привет."}],
+    "messages": [{"role": "user", "content": "Hello."}],
     "max_tokens": 64
   }'
 ```
@@ -547,12 +547,12 @@ curl -N "$PROXY/v1/chat/completions" \
   -H "Accept: text/event-stream" \
   -d '{
     "model": "qwen2.5:14b",
-    "messages": [{"role": "user", "content": "Расскажи анекдот."}],
+    "messages": [{"role": "user", "content": "Tell me a joke."}],
     "stream": true
   }'
 ```
 
-`-N` отключает буферизацию curl — иначе SSE-чанки будут видны не сразу.
+`-N` disables curl buffering — otherwise SSE chunks will not appear in real time.
 
 ### 4.3. Completions
 
@@ -569,25 +569,25 @@ curl -s "$PROXY/v1/completions" \
 curl -s "$PROXY/v1/embeddings" \
   -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model": "nomic-embed-text", "input": "Текст для эмбеддинга"}'
+  -d '{"model": "nomic-embed-text", "input": "Text to embed"}'
 ```
 
-### 4.5. Список моделей
+### 4.5. List models
 
 ```bash
 curl -s "$PROXY/v1/models" -H "Authorization: Bearer $KEY"
 ```
 
-### 4.6. Health-check
+### 4.6. Health check
 
 ```bash
 curl -s "$PROXY/healthz"
 ```
 
-### 4.7. Подключение к `/admin/stream` (через `websocat`)
+### 4.7. Connect to `/admin/stream` (via `websocat`)
 
 ```bash
 websocat -H="Authorization: Bearer $ADMIN" "ws://localhost:8080/admin/stream"
 ```
 
-После подключения сразу придёт `state_snapshot`, далее — `state_diff` и `log_line` по мере событий.
+After connecting, `state_snapshot` arrives immediately, followed by `state_diff` and `log_line` as events occur.
