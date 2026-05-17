@@ -33,25 +33,47 @@ The primary design goal is to eliminate redundant model swaps. Each LLM occupies
 
 ## Screenshots
 
+![ProxyLM.GO TUI](docs/img/sh.png)
+
+A text version of the same layout (for code search and offline reading):
+
 ```
-+- ProxyLM.GO v0.9.5 -----------------------------------------------------------------------+
-| Servers: srv1 *(qwen2.5:14b)  srv2 *(idle)  srv3 x(down) | Q:4  Run:2  Done30m:17  Fail:1 |
-+-----------+------------+----------+----------------+---------+--------+-------+-----------+
-| ID        | State      | Recv'd   | Model          | Server  | Done   | Queue | Status    |
-+-----------+------------+----------+----------------+---------+--------+-------+-----------+
-| 0042      | done       | 14:01:02 | qwen2.5:14b    | srv1    |14:01:08| 0.1s  | OK        |
-| 0043      | run        | 14:02:11 | llama3.1:8b    | srv2    |   -    |  -    | ...       |
-| 0044      | queued     | 14:02:15 | llama3.1:8b    | srv2*   |   -    |  -    | ...       |
-| 0045      | queued     | 14:02:20 | qwen2.5:14b    | srv1*   |   -    |  -    | ...       |
-| 0040      | fail       | 13:55:40 | qwen2.5:14b    | srv1    |13:55:55| 0.2s  | ERR(2)    |
-+-----------+------------+----------+----------------+---------+--------+-------+-----------+
-| Log                                                                                        |
-| 14:02:11 INFO  api      accepted req#0043 client=service-b model=llama3.1:8b              |
-| 14:02:11 INFO  router   chose srv2 (model loaded, queue=0)                                |
-| 14:01:02 INFO  api      accepted req#0042 client=service-a model=qwen2.5:14b              |
-+--------------------------------------------------------------------------------------------+
-  F1 Help   F5 Refresh   /Search   F10 Quit
+ProxyLM.GO vX.Y.Z                                                          2026-05-17 14:32:07
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ lmstudio   ● qwen2.5-coder-14b-instruct   850ms · ↓12.3 tok/s · ↑51.8 tok/s                                              │
+│ ollama     ● llama-3.1-8b-instruct-q4_k_m                                                                                │
+│ backup     ✗ idle                                                                                                        │
+│ Queued: 2   Running: 1   Done/30m: 4   Failed: 1   Servers: 2/3 healthy                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Requests                                                                                                                 │
+│   #    Client    Model                        Server     Status       RM Queued   Started  Elapsed I→O tok               │
+│ ▶ a3f2 webclient qwen2.5-coder-14b-instruct   lmstudio   ▶ running    —  14:31:50 14:31:52 15.2s   512→…                 │
+│   7c1e apitest   llama-3.1-8b-instruct-q4_k_m ollama     … queued     —  14:31:55 —        —      —→—                    │
+│   d09b botuser   qwen2.5-coder-14b-instruct   lmstudio   … queued     —  14:32:01 —        —      —→—                    │
+│   55ab cli-app   gemma-2-9b-it-q4_k_m         lmstudio   ✓ completed  ✓  14:01:10 14:01:11 8.4s    256→1024              │
+│   f1e0 tester    mistral-7b-instruct-v0.3     ✗ backup   ✗ failed     —  14:15:22 14:15:23 2.1s    128→—                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Info — Request a3f2                                                                                                      │
+│ ID           8fa3...a3f2     Created      2026-05-17 14:31:50                                                            │
+│ Client       webclient       Started      2026-05-17 14:31:52                                                            │
+│ Model        qwen2.5-coder-14b-instruct    Completed    —                                                                │
+│ Endpoint     /v1/chat/completions          Queue wait   120ms                                                            │
+│ Stream       yes             Prompt tok   512                                                                            │
+│ Server       lmstudio        Output tok   …                                                                              │
+│ Status       running (1/2)   RM           —                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+F1 Help   F5 Refresh   / Filter   Tab Header/Requests/Info   Click — select   q/F10 Quit
 ```
+
+**Column widths** are sized for the typical case:
+
+- `Model` (27 chars) — fits canonical names such as `qwen2.5-coder-14b-instruct` or `llama-3.1-8b-instruct-q4_k_m` without truncating the quantization suffix.
+- `Server` (10 chars) — includes a 2-char `✗ ` prefix for failed-attempt servers, leaving 8 chars for the name.
+- `Status` (12 chars) — covers the longest `✗ completed` plus one space of slack.
+- `Tokens` (11 chars) — `NNN→NNNN` format; in-progress streaming shows `…` instead of the output count.
+- `RM` (2 chars) — single-character "model reloaded" marker (`✓` / `—`) plus separator.
 
 ## Quick Start
 

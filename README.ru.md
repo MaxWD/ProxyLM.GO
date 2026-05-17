@@ -38,7 +38,7 @@ ProxyLM.GO — это посредник между вашими приложе�
               TUI (Bubble Tea)
 ```
 
-Подробности — в [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
+Подробности — в [`docs/ARCHITECTURE.ru.md`](./docs/ARCHITECTURE.ru.md).
 
 ## Установка
 
@@ -108,33 +108,57 @@ curl -H "Authorization: Bearer sk-proxy-replace-me-aaaaa" \
      http://localhost:8080/v1/chat/completions
 ```
 
-Больше примеров (streaming, embeddings, `/v1/models`) — в [`docs/API.md`](./docs/API.md) §4.
+Больше примеров (streaming, embeddings, `/v1/models`) — в [`docs/API.ru.md`](./docs/API.ru.md) §4.
 
 ## TUI
 
+![ProxyLM.GO TUI](docs/img/sh.png)
+
+Текстовая версия того же layout (для поиска по коду и offline-чтения):
+
 ```
-┌─ ProxyLM.GO v0.1.0 ──────────────────────────────────────────────────────────────────────────┐
-│ Servers: srv1 ●(qwen2.5:14b)  srv2 ●(idle)  srv3 ✗(down) │ Q:4  Run:2  Done30m:17  Fail:1   │
-├──────────────────────────────────────────────────────────────────────────────────────────────┤
-│  ID    State       Recv'd      Model           Server     Done       Queue   LLM    I/O tok   Status  │
-│  0042  ✓ done      14:01:02    qwen2.5:14b     srv1       14:01:08   0.1s    6.3s   312/82    OK      │
-│  0043  ▶ run       14:02:11    llama3.1:8b     srv2       —          0.1s    —      400/—     …       │
-│  0044  ⏳ queued   14:02:15    llama3.1:8b     srv2*      —          —       —      —/—       …       │
-│  0045  ⏳ queued   14:02:20    qwen2.5:14b     srv1*      —          —       —      —/—       …       │
-│  0040  ✗ fail      13:55:40    qwen2.5:14b     srv1       13:55:55   0.2s    15.0s  —/—       ERR(2)  │
-├─ Log ────────────────────────────────────────────────────────────────────────────────────────┤
-│ 14:02:11 INFO  api      accepted req#0043 client=service-b model=llama3.1:8b               │
-│ 14:02:11 INFO  router   chose srv2 (model loaded, queue=0)                                  │
-│ 14:01:02 INFO  api      accepted req#0042 client=service-a model=qwen2.5:14b                │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-   F1 Help  F5 Refresh  F10 Quit
+ProxyLM.GO vX.Y.Z                                                          2026-05-17 14:32:07
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ lmstudio   ● qwen2.5-coder-14b-instruct   850ms · ↓12.3 tok/s · ↑51.8 tok/s                                              │
+│ ollama     ● llama-3.1-8b-instruct-q4_k_m                                                                                │
+│ backup     ✗ idle                                                                                                        │
+│ Queued: 2   Running: 1   Done/30m: 4   Failed: 1   Servers: 2/3 healthy                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Requests                                                                                                                 │
+│   #    Client    Model                        Server     Status       RM Queued   Started  Elapsed I→O tok               │
+│ ▶ a3f2 webclient qwen2.5-coder-14b-instruct   lmstudio   ▶ running    —  14:31:50 14:31:52 15.2s   512→…                 │
+│   7c1e apitest   llama-3.1-8b-instruct-q4_k_m ollama     … queued     —  14:31:55 —        —      —→—                    │
+│   d09b botuser   qwen2.5-coder-14b-instruct   lmstudio   … queued     —  14:32:01 —        —      —→—                    │
+│   55ab cli-app   gemma-2-9b-it-q4_k_m         lmstudio   ✓ completed  ✓  14:01:10 14:01:11 8.4s    256→1024              │
+│   f1e0 tester    mistral-7b-instruct-v0.3     ✗ backup   ✗ failed     —  14:15:22 14:15:23 2.1s    128→—                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Info — Request a3f2                                                                                                      │
+│ ID           8fa3...a3f2     Created      2026-05-17 14:31:50                                                            │
+│ Client       webclient       Started      2026-05-17 14:31:52                                                            │
+│ Model        qwen2.5-coder-14b-instruct    Completed    —                                                                │
+│ Endpoint     /v1/chat/completions          Queue wait   120ms                                                            │
+│ Stream       yes             Prompt tok   512                                                                            │
+│ Server       lmstudio        Output tok   …                                                                              │
+│ Status       running (1/2)   RM           —                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+F1 Help   F5 Refresh   / Filter   Tab Header/Requests/Info   Click — выбор   q/F10 Quit
 ```
 
-Хоткеи: `F1` — справка, `F5` — переподключение / refresh снапшота, `F10` или `q` — выход, `/` — поиск по таблице.
+**Ширины колонок** подобраны для типичного случая:
 
-Завершённые запросы скрываются из таблицы через `tui.show_completed_minutes` (default 30) — но остаются в SQLite.
+- `Model` (27 символов) — вмещает канонические имена вроде `qwen2.5-coder-14b-instruct` или `llama-3.1-8b-instruct-q4_k_m` без обрезки квантизационного суффикса.
+- `Server` (10 символов) — включает 2-символьный префикс `✗ ` для упавших серверов, оставляя 8 символов на имя.
+- `Status` (12 символов) — покрывает самую длинную строку `✗ completed` плюс один пробел запаса.
+- `Tokens` (11 символов) — формат `NNN→NNNN`; во время streaming output показывается `…` вместо числа.
+- `RM` (2 символа) — однобитовая отметка «модель грузилась для задачи» (`✓` / `—`) плюс разделитель.
 
-В `cmd.exe` юникод-глифы (`●`, `✓`, `▶`, `⏳`) могут рендериться некорректно. Включи ASCII-fallback:
+Хоткеи: `F1` — справка, `F5` — переподключение / refresh снапшота, `/` — фильтр по таблице, `Tab` — переключение Header/Requests/Info, клик мышкой — выбор строки, `F10` или `q` — выход.
+
+Завершённые запросы скрываются из таблицы через `tui.show_completed_minutes` (по умолчанию 30 минут) — но остаются в SQLite.
+
+В `cmd.exe` юникод-глифы (`●`, `✓`, `▶`, `…`, `↓`, `↑`, `→`) могут рендериться некорректно. Включи ASCII-fallback:
 
 ```
 set PROXYLM_NO_UNICODE=1
@@ -204,15 +228,15 @@ go vet ./...
 golangci-lint run
 ```
 
-Структура каталогов и обзор модулей — [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) §12.
+Структура каталогов и обзор модулей — [`docs/ARCHITECTURE.ru.md`](./docs/ARCHITECTURE.ru.md) §12.
 
 ## Документация
 
-- Архитектура: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)
-- Полное ТЗ (FR / NFR / инварианты / acceptance-критерии): [`docs/SRS.md`](./docs/SRS.md)
-- API-контракт (OpenAI и admin/IPC): [`docs/API.md`](./docs/API.md)
-- Роли и владельцы документов: [`docs/AGENTS.md`](./docs/AGENTS.md)
-- Идеи и задачи на будущее (парковка, не roadmap): [`docs/FUTURE.md`](./docs/FUTURE.md)
+- Архитектура: [`docs/ARCHITECTURE.ru.md`](./docs/ARCHITECTURE.ru.md)
+- Полное ТЗ (FR / NFR / инварианты / acceptance-критерии): [`docs/SRS.ru.md`](./docs/SRS.ru.md)
+- API-контракт (OpenAI и admin/IPC): [`docs/API.ru.md`](./docs/API.ru.md)
+- Роли и владельцы документов: [`docs/AGENTS.ru.md`](./docs/AGENTS.ru.md)
+- Идеи и задачи на будущее (парковка, не roadmap): [`docs/FUTURE.ru.md`](./docs/FUTURE.ru.md)
 
 ## Лицензия
 

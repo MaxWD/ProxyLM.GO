@@ -1,43 +1,43 @@
-# ProxyLM.GO — Архитектура
+# ProxyLM.GO — Architecture
 
-## 1. Назначение
+## 1. Purpose
 
-Прокси-сервер на Go перед локальными LLM-серверами (LM Studio, Ollama). Главная задача — **сериализовать запросы по моделям**, чтобы избежать постоянной выгрузки/загрузки моделей в VRAM.
+A Go proxy server in front of local LLM servers (LM Studio, Ollama). The primary goal is to **serialize requests by model**, preventing constant model eviction and loading into VRAM.
 
-Основные свойства:
-- OpenAI-совместимый API на входе (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`)
-- Поддержка streaming (SSE)
-- Несколько бэкенд-серверов; знает какие модели где есть (авто-обнаружение через `/v1/models`)
-- Маршрутизация: model affinity + least-busy
-- Retry + failover на другой сервер с той же моделью
-- Аутентификация по API-ключам
-- Консольный TUI в стиле btop (отдельный клиент к daemon'у)
-- История запросов в SQLite
-- **Один portable-бинарник:** один и тот же исполняемый файл — и daemon, и TUI-клиент, и инсталлятор службы. Кросс-компиляция под любую OS без CGO.
+Key properties:
+- OpenAI-compatible API on the ingress (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`)
+- Streaming support (SSE)
+- Multiple backend servers; knows which models are where (auto-discovery via `/v1/models`)
+- Routing: model affinity + least-busy
+- Retry + failover to another server with the same model
+- API-key authentication
+- btop-style console TUI (separate client to the daemon)
+- Request history in SQLite
+- **Single portable binary:** the same executable file acts as daemon, TUI client, and service installer. Cross-compiles to any OS without CGO.
 
-## 2. Принципиальная схема
+## 2. System Diagram
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ Клиенты (внутренние сервисы)                             │
+│ Clients (internal services)                              │
 │ service-a, service-b, ...                                │
 └──────────────────────┬───────────────────────────────────┘
-                       │ HTTP, OpenAI-совместимый формат
+                       │ HTTP, OpenAI-compatible format
                        ▼
 ┌──────────────────────────────────────────────────────────┐
 │ ProxyLM.GO Daemon  (net/http + chi + goroutines)         │
 │                                                          │
 │  HTTP API ─► AuthN ─► Router ─► PerServerQueue           │
 │                          │                               │
-│                          │ выбор: какой сервер для       │
-│                          │   этой (model)                │
+│                          │ selection: which server for   │
+│                          │   this (model)                │
 │                          ▼                               │
 │                  ┌──────────────────┐                    │
-│                  │ Worker per server│  ⇐ ключ:           │
-│                  │ "drain current   │     "пока есть     │
-│                  │  model fully,    │     запросы для    │
-│                  │  then switch"    │     модели X — её  │
-│                  └────────┬─────────┘     не отпускаем"  │
+│                  │ Worker per server│  ⇐ key rule:       │
+│                  │ "drain current   │     "while there   │
+│                  │  model fully,    │     are requests   │
+│                  │  then switch"    │     for model X —  │
+│                  └────────┬─────────┘     don't swap it" │
 │                           │                              │
 │                  Backend client (*http.Client)           │
 │                  retry + failover                        │
@@ -50,30 +50,30 @@
                       │ HTTP (OpenAI/Ollama API)
                       ▼
 ┌──────────────────────────────────────────────────────────┐
-│ Backend LLM серверы                                      │
+│ Backend LLM servers                                      │
 │ srv1 (LM Studio), srv2 (Ollama), ...                     │
 └──────────────────────────────────────────────────────────┘
 ```
 
-## 3. Алгоритм планировщика (ядро проекта)
+## 3. Scheduler Algorithm (Core)
 
-Каждый бэкенд-сервер имеет свой воркер-goroutine. В каждый момент на сервере выполняется **один** запрос — это правило избавляет от гонок выгрузки моделей.
+Each backend server has its own worker goroutine. At any moment exactly **one** request executes on a server — this rule eliminates model eviction races.
 
 ```go
-// Per-server state (упрощённо)
+// Per-server state (simplified)
 type Server struct {
     Name         string
     URL          string
-    CurrentModel atomic.Pointer[string] // модель последнего обслуженного / in-flight
+    CurrentModel atomic.Pointer[string] // model of the last served / in-flight request
     mu           sync.Mutex
-    pending      []*Request              // FIFO под mu
-    notify       chan struct{}           // буферизованный 1, сигнал «появилось новое»
-    inFlight     *Request                // не больше одного, под mu
+    pending      []*Request              // FIFO under mu
+    notify       chan struct{}           // buffered 1, signal "new item arrived"
+    inFlight     *Request                // at most one, under mu
     healthy      atomic.Bool
     // ...
 }
 
-// Воркер сервера: одна goroutine на сервер
+// Server worker: one goroutine per server
 func (s *Server) workerLoop(ctx context.Context, dispatch DispatchFn) {
     for {
         next := s.pickNextRequest()
@@ -81,7 +81,7 @@ func (s *Server) workerLoop(ctx context.Context, dispatch DispatchFn) {
             select {
             case <-ctx.Done():
                 return
-            case <-s.notify: // разбудили: enqueue или health-change
+            case <-s.notify: // woken up: enqueue or health-change
                 continue
             }
         }
@@ -89,17 +89,17 @@ func (s *Server) workerLoop(ctx context.Context, dispatch DispatchFn) {
         s.inFlight = next
         s.mu.Unlock()
 
-        dispatch(ctx, next)            // блокирует до завершения (или ошибки + ретраев)
+        dispatch(ctx, next)            // blocks until completion (or error + retries)
 
         cm := next.Model
-        s.CurrentModel.Store(&cm)      // eventual consistency для роутера
+        s.CurrentModel.Store(&cm)      // eventual consistency for the router
         s.mu.Lock()
         s.inFlight = nil
         s.mu.Unlock()
     }
 }
 
-// pickNextRequest — drain текущей модели → FIFO
+// pickNextRequest — drain current model → FIFO
 func (s *Server) pickNextRequest() *Request {
     s.mu.Lock()
     defer s.mu.Unlock()
@@ -121,99 +121,99 @@ func (s *Server) pickNextRequest() *Request {
     return nil
 }
 
-// Enqueue будит воркер неблокирующе
+// Enqueue wakes the worker non-blocking
 func (s *Server) Enqueue(r *Request) {
     s.mu.Lock()
     s.pending = append(s.pending, r)
     s.mu.Unlock()
     select {
     case s.notify <- struct{}{}:
-    default: // канал ёмкости 1 — сигнал уже есть, дублирование не нужно
+    default: // channel capacity 1 — signal already present, no duplication needed
     }
 }
 ```
 
-**Свойства алгоритма:**
-- Запросы для **текущей** модели всегда обслуживаются первыми, даже если приходят, пока сервер занят. → Модель **не выгружается** между ними.
-- Когда очередь для текущей модели пуста, берём следующий запрос FIFO — он триггерит переключение модели.
-- Один in-flight на сервер. На разных серверах запросы идут параллельно (по одной goroutine на сервер + отдельный `*http.Client` на каждый).
-- Голод модели B возможен лишь если поток запросов модели A ровно бесконечен — **по требованию это допустимо**. Опционально позже можно добавить лимит `max_consecutive_requests_per_model`.
+**Algorithm properties:**
+- Requests for the **current** model are always served first, even if they arrive while the server is busy. → The model is **not evicted** between them.
+- When the queue for the current model is empty, the next FIFO request is taken — it triggers a model switch.
+- One in-flight per server. Requests on different servers proceed in parallel (one goroutine per server + separate `*http.Client` for each).
+- Starvation of model B is possible only if the request stream for model A is truly infinite — **this trade-off is intentional**. Optionally, `max_consecutive_requests_per_model` can be added later.
 
-Альтернатива sync.Cond не используется намеренно: канал `notify` с ёмкостью 1 + `select { case <-ctx.Done(); case <-s.notify }` — идиоматичный Go-паттерн, корректно обрабатывает cancellation через `context.Context`.
+The `sync.Cond` alternative is intentionally not used: a `notify` channel with capacity 1 + `select { case <-ctx.Done(); case <-s.notify }` is an idiomatic Go pattern that correctly handles cancellation via `context.Context`.
 
-## 4. Маршрутизация (роутер)
+## 4. Routing (Router)
 
-Когда приходит новый запрос с моделью M:
+When a new request arrives with model M:
 
 ```
 candidates = filter(servers, healthy && M ∈ models_of(server))
 if candidates is empty:
   → 404 Model not found
 sort candidates by:
-  1) prefer сервер, у которого M == current_model (избежать swap)
-  2) prefer сервер с наименьшей длиной pending (least-busy)
-  3) tiebreak: имя сервера (стабильность)
+  1) prefer server where M == current_model (avoid swap)
+  2) prefer server with the shortest pending queue (least-busy)
+  3) tiebreak: server name (stability)
 choose candidates[0]
 ```
 
-Это и есть `model_affinity_least_busy` — стратегия по умолчанию. Реализация — чистая функция от `[]*ServerInfo` и `model`, не блокирует воркеры; читает `CurrentModel` через `atomic.Pointer[string].Load()`.
+This is `model_affinity_least_busy` — the default strategy. Implementation is a pure function of `[]*ServerInfo` and `model`; it does not block workers and reads `CurrentModel` via `atomic.Pointer[string].Load()`.
 
 ## 5. Retry + Failover
 
-При ошибке от бэкенда:
-- Кратковременные ошибки (5xx, таймаут, network reset) → ретрай по экспоненциальному backoff.
-- **Rolling exclusion size 1:** после неудачи на сервере X следующая попытка идёт на любой другой healthy-сервер с этой моделью; X исключается ТОЛЬКО на одну следующую попытку (через шаг он снова доступен). Если X — единственный совместимый, исключение игнорируется и попытка идёт снова на X.
-- Общий cap — `retry.max_attempts` (default 3) попыток на запрос **независимо от их распределения по серверам** (см. INV-5).
-- Отдельной настройки `failover` НЕТ; такое поведение работает всегда.
-- Сервер, на котором подряд накопились отказы, помечается `unhealthy` (через discovery), исключается из роутинга и периодически проверяется health-check'ом.
+On backend error:
+- Transient errors (5xx, timeout, network reset) → retry with exponential backoff.
+- **Rolling exclusion size 1:** after a failure on server X the next attempt goes to any other healthy server with this model; X is excluded ONLY for the one next attempt (after that it is available again). If X is the only compatible server, the exclusion is ignored and the attempt goes to X again.
+- Overall cap — `retry.max_attempts` (default 3) attempts per request **regardless of how they are distributed across servers** (see INV-5).
+- There is no separate `failover` setting; this behavior is always active.
+- A server that accumulates consecutive failures is marked `unhealthy` (via discovery), excluded from routing, and periodically health-checked.
 
-Backoff: `time.Sleep(d)` внутри воркера допустим (воркер — отдельная goroutine, не блокирует ничего, кроме своей очереди); для cancellation — `select { case <-time.After(d); case <-ctx.Done() }`.
+Backoff: `time.Sleep(d)` inside the worker is acceptable (the worker is a separate goroutine, it blocks nothing but its own queue); for cancellation — `select { case <-time.After(d); case <-ctx.Done() }`.
 
-Streaming-нюанс: если ошибка приходит **до первого SSE-чанка** — ретрай безопасен. Если уже отправили часть ответа клиенту — ретрай невозможен (ответ деградирует в конкретную ошибку клиенту).
+Streaming nuance: if the error arrives **before the first SSE chunk** — retry is safe. If part of the response has already been sent to the client — retry is impossible (the response degrades to a specific error to the client).
 
 ## 6. Streaming
 
-- Клиент: `POST /v1/chat/completions` с `stream: true`.
-- Прокси открывает streaming-соединение к бэкенду через обычный `http.Client.Do(req)`; ответ читается из `resp.Body` (`io.ReadCloser`).
-- Чтение по строкам через `bufio.Reader.ReadBytes('\n')`; парсинг SSE-фреймов (префикс `data: `, разделитель — пустая строка).
-- Запись клиенту: `http.ResponseWriter.Write(...)` + `w.(http.Flusher).Flush()` после каждого чанка — без буферизации.
-- Параллельно прокси считает `output_tokens` (по `delta.content` или из `usage` финального чанка) и отправляет события в IPC-publisher для TUI.
-- `input_tokens`: берём из последнего чанка с `usage` (LM Studio/Ollama OpenAI-shim возвращают usage в финальном `[DONE]`-чанке); fallback-подсчёт через библиотеку токенизации — отложен на v0.2 (U-1).
+- Client: `POST /v1/chat/completions` with `stream: true`.
+- The proxy opens a streaming connection to the backend via the standard `http.Client.Do(req)`; the response is read from `resp.Body` (`io.ReadCloser`).
+- Line-by-line reading via `bufio.Reader.ReadBytes('\n')`; SSE frame parsing (prefix `data: `, delimiter — blank line).
+- Writing to the client: `http.ResponseWriter.Write(...)` + `w.(http.Flusher).Flush()` after each chunk — no buffering.
+- In parallel the proxy counts `output_tokens` (from `delta.content` or from the `usage` field of the final chunk) and sends events to the IPC publisher for the TUI.
+- `input_tokens`: taken from the last chunk with `usage` (LM Studio/Ollama OpenAI shim returns usage in the final `[DONE]` chunk); fallback tokenization library — deferred to v0.2 (U-1).
 
 ## 7. Discovery
 
-- Раз в `discovery.interval_seconds` (default 30s) опрашиваем `/v1/models` каждого сервера.
-- Один общий `time.Ticker`, в цикле — fan-out goroutines (по одной на сервер), результат собирается в `ModelMap: map[string]map[string]struct{}`.
-- Используется роутером.
-- При недоступности сервера N циклов подряд → флаг `unhealthy.Store(false)`.
-- Discovery-цикл получает `context.Context`, корректно завершается при shutdown.
+- Every `discovery.interval_seconds` (default 30 s), poll `/v1/models` on each server.
+- One shared `time.Ticker`, then fan-out goroutines (one per server) in a loop; results collected into `ModelMap: map[string]map[string]struct{}`.
+- Used by the router.
+- If a server is unreachable for N consecutive cycles → `unhealthy.Store(false)`.
+- The discovery loop receives a `context.Context` and shuts down cleanly on shutdown.
 
 ## 8. TUI ↔ Daemon (IPC)
 
-Daemon поднимает дополнительный WebSocket-эндпоинт (`/admin/stream`) на основном HTTP-порту (либо отдельном порту, см. конфиг).
+The daemon exposes an additional WebSocket endpoint (`/admin/stream`) on the main HTTP port (or a separate port, see config).
 
-WebSocket-библиотека: `github.com/coder/websocket` (минималистичная, идиоматичная для Go 1.21+, без зависимостей).
+WebSocket library: `github.com/coder/websocket` (minimalist, idiomatic for Go 1.21+, no external dependencies).
 
-TUI (Bubble Tea) подключается через тот же бинарник в режиме `proxylm tui --connect ...`, получает JSON-сообщения двух видов:
-- `state`: снапшот + дифф (запросы, серверы, статистика).
-- `log`: строка лога.
+The TUI (Bubble Tea) connects via the same binary in `proxylm tui --connect ...` mode, receiving JSON messages of two kinds:
+- `state`: snapshot + diff (requests, servers, statistics).
+- `log`: a log line.
 
-Аутентификация: тот же Bearer-механизм, но используется выделенный admin-ключ.
+Authentication: the same Bearer mechanism, but using a dedicated admin key.
 
-Publisher на стороне daemon — отдельная goroutine с входящим `chan Event`; core-модули (scheduler, router, retry) шлют события неблокирующе (с защитой от backpressure: drop при переполнении буфера, в лог — `event_drop`).
+The publisher on the daemon side is a separate goroutine with an incoming `chan Event`; core modules (scheduler, router, retry) send events non-blocking (with backpressure protection: drop on buffer overflow, log `event_drop`).
 
-## 9. БД (SQLite)
+## 9. Database (SQLite)
 
-Драйвер: **`modernc.org/sqlite`** — pure-Go, без CGO. Доступ через стандартный пакет `database/sql` (драйвер регистрируется через `import _ "modernc.org/sqlite"`).
+Driver: **`modernc.org/sqlite`** — pure-Go, no CGO. Access via the standard `database/sql` package (driver registers via `import _ "modernc.org/sqlite"`).
 
-Миграции — `*.sql` файлы под `internal/storage/migrations/`, embedded в бинарник через `//go:embed migrations/*.sql`. Применяются последовательно при первом запуске и при последующих стартах (no-op, если версия совпадает).
+Migrations — `*.sql` files under `internal/storage/migrations/`, embedded in the binary via `//go:embed migrations/*.sql`. Applied sequentially on first run and on subsequent starts (no-op if version matches).
 
 ```sql
 -- 0001_init.sql
 CREATE TABLE IF NOT EXISTS requests (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   request_id      TEXT UNIQUE NOT NULL,        -- UUID
-  client_name     TEXT,                         -- по API-ключу
+  client_name     TEXT,                         -- from API key
   model           TEXT NOT NULL,
   server          TEXT,
   status          TEXT NOT NULL,                -- queued/running/completed/failed
@@ -238,35 +238,35 @@ CREATE TABLE IF NOT EXISTS schema_version (
   applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- 0002_model_reloaded.sql (миграция v0.7.0)
+-- 0002_model_reloaded.sql (migration v0.7.0)
 ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0;
--- Backfill = 0: для старых строк факт reload неизвестен — безопасный дефолт.
+-- Backfill = 0: for old rows the reload fact is unknown — safe default.
 ```
 
-Очередь — **только in-memory** (рестарт = клиенты получат ошибку и сами повторят).
+Queue — **in-memory only** (restart = clients receive an error and retry on their own).
 
-Запись истории — асинхронная: горутина-писатель читает из `chan HistoryEvent`, делает batch-инсерты (или одиночные с PRAGMA `synchronous = NORMAL`).
+History writing — asynchronous: a writer goroutine reads from `chan HistoryEvent`, performs batch inserts (or single inserts with PRAGMA `synchronous = NORMAL`).
 
-## 10. Конфиг
+## 10. Configuration
 
-См. `config.example.yaml`. Секции: `proxy`, `auth`, `routing`, `retry`, `discovery`, `storage`, `tui`, `compat`, `backends`.
+See `config.example.yaml`. Sections: `proxy`, `auth`, `routing`, `retry`, `discovery`, `storage`, `tui`, `compat`, `backends`.
 
-Загрузка: `gopkg.in/yaml.v3` → типизированная Go-структура → ручная валидация (порт > 0, непустые имена ключей, валидные URL'ы бэкендов). При отсутствии файла рядом с бинарником — daemon создаёт его из встроенного шаблона (`//go:embed config.example.yaml`) и логирует предупреждение.
+Loading: `gopkg.in/yaml.v3` → typed Go struct → manual validation (port > 0, non-empty key names, valid backend URLs). If the file is not found alongside the binary — the daemon creates it from the embedded template (`//go:embed config.example.yaml`) and logs a warning.
 
-Путь поиска конфига:
-1. `--config <path>` — явное переопределение.
-2. `<dir(executable)>/config.yaml` — рядом с бинарником (default, portable).
+Config search path:
+1. `--config <path>` — explicit override.
+2. `<dir(executable)>/config.yaml` — alongside the binary (default, portable).
 
-БД: `storage.database_path` (по умолчанию — `./proxylm.db` относительно бинарника).
+Database: `storage.database_path` (default — `./proxylm.db` relative to the binary).
 
-## 11. Команды CLI
+## 11. CLI Commands
 
 ```
 proxylm serve   [--config config.yaml] [--host ...] [--port ...]
 proxylm tui     [--connect ws://host:port] [--token ...] [--config ...]
-proxylm config  init                                # генерирует config.example.yaml
-proxylm config  validate [--config config.yaml]     # проверяет конфиг
-proxylm service install   [--config config.yaml]    # регистрирует в Service Manager / systemd / launchd
+proxylm config  init                                # generates config.example.yaml
+proxylm config  validate [--config config.yaml]     # validates config
+proxylm service install   [--config config.yaml]    # registers with Service Manager / systemd / launchd
 proxylm service uninstall
 proxylm service start
 proxylm service stop
@@ -274,9 +274,9 @@ proxylm service status
 proxylm version
 ```
 
-Все команды реализованы через `spf13/cobra`. `service *` использует `github.com/kardianos/service` — единый API под Windows Service, systemd, launchd, OpenRC, SysV.
+All commands are implemented via `spf13/cobra`. `service *` uses `github.com/kardianos/service` — a unified API for Windows Service, systemd, launchd, OpenRC, SysV.
 
-## 12. Структура кода
+## 12. Code Structure
 
 ```
 ProxyLM.GO/
@@ -286,7 +286,7 @@ ProxyLM.GO/
 ├── README.md
 ├── CLAUDE.md
 ├── config.example.yaml
-├── cmd/                          # cobra-команды (тонкие обёртки)
+├── cmd/                          # cobra commands (thin wrappers)
 │   ├── root.go
 │   ├── serve.go
 │   ├── tui.go
@@ -294,76 +294,76 @@ ProxyLM.GO/
 │   ├── service.go
 │   └── version.go
 ├── internal/
-│   ├── config/                   # YAML парсинг + валидация + автогенерация
+│   ├── config/                   # YAML parsing + validation + auto-generation
 │   ├── logging/                  # log/slog setup (JSON handler, level)
 │   ├── core/
-│   │   ├── models.go             # RequestRecord, ServerInfo, ModelInfo, статусы
-│   │   ├── scheduler.go          # per-server worker (goroutine), drain-then-switch; ставит JobResult.ModelReloaded
-│   │   ├── router.go             # выбор сервера для (model)
-│   │   ├── retry.go              # backoff + failover политика
-│   │   ├── discovery.go          # периодический poll /v1/models
-│   │   ├── perf.go               # PerfTracker: линейная регрессия (server, model) → PerfStats/ModelSummary
+│   │   ├── models.go             # RequestRecord, ServerInfo, ModelInfo, statuses
+│   │   ├── scheduler.go          # per-server worker (goroutine), drain-then-switch; sets JobResult.ModelReloaded
+│   │   ├── router.go             # server selection for (model)
+│   │   ├── retry.go              # backoff + failover policy
+│   │   ├── discovery.go          # periodic poll /v1/models
+│   │   ├── perf.go               # PerfTracker: linear regression (server, model) → PerfStats/ModelSummary
 │   │   └── backends/
-│   │       ├── backend.go        # интерфейс Backend
-│   │       └── openai.go         # клиент к OpenAI-совместимым (LM Studio, Ollama)
+│   │       ├── backend.go        # Backend interface
+│   │       └── openai.go         # client to OpenAI-compatible servers (LM Studio, Ollama)
 │   ├── api/
 │   │   ├── server.go             # net/http + chi, lifecycle, graceful shutdown
-│   │   ├── auth.go               # middleware Bearer
+│   │   ├── auth.go               # Bearer middleware
 │   │   ├── routes_openai.go      # /v1/*
 │   │   ├── routes_admin.go       # /admin/stream (WebSocket)
 │   │   ├── routes_health.go      # /healthz
-│   │   └── streaming.go          # SSE-проксирование + token counting
+│   │   └── streaming.go          # SSE proxying + token counting
 │   ├── storage/
-│   │   ├── db.go                 # подключение, миграции (//go:embed migrations/*.sql)
-│   │   ├── history.go            # запись/чтение requests (async writer)
+│   │   ├── db.go                 # connection, migrations (//go:embed migrations/*.sql)
+│   │   ├── history.go            # write/read requests (async writer)
 │   │   └── migrations/
 │   │       ├── 0001_init.sql
 │   │       └── 0002_model_reloaded.sql  # ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0
 │   ├── ipc/
-│   │   ├── messages.go           # типы JSON-сообщений (state_snapshot/diff/log_line/...)
-│   │   ├── server.go             # publisher на стороне daemon
-│   │   └── client.go             # WebSocket-клиент (используется TUI)
+│   │   ├── messages.go           # JSON message types (state_snapshot/diff/log_line/...)
+│   │   ├── server.go             # publisher on the daemon side
+│   │   └── client.go             # WebSocket client (used by TUI)
 │   ├── tui/
 │   │   ├── app.go                # Bubble Tea Model/Update/View
 │   │   ├── widgets.go            # HeaderBar, RequestTable, LogPane (lipgloss + bubbles)
-│   │   ├── styles.go             # lipgloss-стили
-│   │   └── keys.go               # хоткеи (F5, F10, q, /)
+│   │   ├── styles.go             # lipgloss styles
+│   │   └── keys.go               # hotkeys (F5, F10, q, /)
 │   └── service/
-│       └── service.go            # kardianos/service интеграция
+│       └── service.go            # kardianos/service integration
 ├── scripts/
-│   ├── build.ps1                 # сборка под Windows
-│   ├── build.sh                  # сборка под Linux/macOS
-│   └── build-all.ps1             # кросс-компиляция все цели
+│   ├── build.ps1                 # build for Windows
+│   ├── build.sh                  # build for Linux/macOS
+│   └── build-all.ps1             # cross-compile all targets
 └── test/
     └── integration/
-        └── api_e2e_test.go       # mock backends через httptest.Server
+        └── api_e2e_test.go       # mock backends via httptest.Server
 ```
 
-Тесты пакетов лежат рядом с кодом (Go convention: `scheduler.go` + `scheduler_test.go`).
+Package tests live alongside their code (Go convention: `scheduler.go` + `scheduler_test.go`).
 
-## 13. Стек
+## 13. Stack
 
-| Слой           | Библиотека                                    |
+| Layer          | Library                                       |
 |----------------|-----------------------------------------------|
-| Язык           | Go 1.25+ (минимум диктует `modernc.org/sqlite`) |
+| Language       | Go 1.25+ (minimum dictated by `modernc.org/sqlite`) |
 | HTTP server    | `net/http` (stdlib, Go 1.22 mux) + `github.com/go-chi/chi/v5` |
 | HTTP client    | `net/http` (stdlib) + per-backend `*http.Client` |
 | WebSocket      | `github.com/coder/websocket`                  |
 | TUI            | `github.com/charmbracelet/bubbletea` + `lipgloss` + `bubbles` |
-| SQLite         | `modernc.org/sqlite` (pure-Go, без CGO)       |
-| Конфиг (YAML)  | `gopkg.in/yaml.v3`                            |
+| SQLite         | `modernc.org/sqlite` (pure-Go, no CGO)        |
+| Config (YAML)  | `gopkg.in/yaml.v3`                            |
 | CLI            | `github.com/spf13/cobra`                      |
 | Service install| `github.com/kardianos/service`                |
 | UUID           | `github.com/google/uuid`                      |
-| Логирование    | `log/slog` (stdlib, JSON handler)             |
-| Тесты          | stdlib `testing` + table-driven; integration через `net/http/httptest` |
-| Линт           | `gofmt`, `go vet`, `golangci-lint`            |
+| Logging        | `log/slog` (stdlib, JSON handler)             |
+| Tests          | stdlib `testing` + table-driven; integration via `net/http/httptest` |
+| Lint           | `gofmt`, `go vet`, `golangci-lint`            |
 
-Go ≥ 1.25 фактически требуется к компилятору (минимум диктует `modernc.org/sqlite` ≥ 1.50). Языковые фичи кода не выходят за пределы Go 1.22.
+Go ≥ 1.25 is effectively required by the compiler (minimum dictated by `modernc.org/sqlite` ≥ 1.50). The code itself uses no language features beyond Go 1.22.
 
-Зависимости минимизированы: всё ядро HTTP-server/client — stdlib. Сторонние библиотеки — только там, где stdlib неудобен или отсутствует (WebSocket, TUI, SQLite, CLI, YAML).
+Dependencies are minimized: all core HTTP server/client code is stdlib. Third-party libraries are used only where stdlib is inconvenient or absent (WebSocket, TUI, SQLite, CLI, YAML).
 
-## 14. ASCII-мокап TUI
+## 14. TUI ASCII Mockup
 
 ```
 ┌─ ProxyLM.GO v0.7.0 ──────────────────────────────────────────────────────────────────────────┐
@@ -388,39 +388,39 @@ Go ≥ 1.25 фактически требуется к компилятору (�
    Tab Header/Requests/Log  F5 Refresh  F10 Quit
 ```
 
-Изменения относительно v0.1.0:
+Changes relative to v0.1.0:
 
-- Колонка **RM** (Reload Model) между `Server` и `Queued`: `✓` если запрос был диспатчирован со сменой модели (`model_reloaded = true`), `—` иначе.
-- Глиф очереди `…` (U+2026, один символ-cell) вместо `⏳` (emoji wide-character, 2 ячейки) — исправляет сдвиг колонок в терминалах, которые рисуют emoji в две ячейки ширины.
-- Шапка сервера показывает метрики регрессии: `t_load · ↓tok_in/s · ↑tok_out/s`. Если `PerfOK=false` или модель не загружена — строка пустая; если нет reload-наблюдений — `t_load` заменяется на `—`.
-- Активный сервер в шапке маркируется `▸`.
+- Column **RM** (Reload Model) between `Server` and `Queued`: `✓` if the request was dispatched with a model switch (`model_reloaded = true`), `—` otherwise.
+- Queue glyph `…` (U+2026, single cell character) instead of `⏳` (emoji wide character, 2 cells) — fixes column shifting in terminals that render emoji as two cells wide.
+- Server header shows regression metrics: `t_load · ↓tok_in/s · ↑tok_out/s`. If `PerfOK=false` or model is not loaded — the metrics line is empty; if there are no reload observations — `t_load` is replaced with `—`.
+- Active server in the header is marked with `▸`.
 
-Bubble Tea-архитектура: `Model` хранит снапшот `[]ServerView`, `[]RequestRow`, кольцевой буфер логов. `Update(msg)` обрабатывает три источника:
-1. WebSocket-сообщения (`state_snapshot` / `state_diff` / `log_line`) — через `tea.Cmd` с горутиной-читателем.
-2. Tick для периодических задач (TUI auto-hide completed по `tui.show_completed_minutes`).
-3. Ключевые события (`Tab`, `F5`, `F10`, `q`, `/`, `↑`, `↓`, `Enter`).
+Bubble Tea architecture: `Model` holds a snapshot of `[]ServerView`, `[]RequestRow`, and a circular log buffer. `Update(msg)` handles three sources:
+1. WebSocket messages (`state_snapshot` / `state_diff` / `log_line`) — via `tea.Cmd` with a reader goroutine.
+2. Tick for periodic tasks (TUI auto-hide of completed records per `tui.show_completed_minutes`).
+3. Key events (`Tab`, `F5`, `F10`, `q`, `/`, `↑`, `↓`, `Enter`).
 
-`View()` рендерит весь TUI через `lipgloss`-стили (border, foreground, padding).
+`View()` renders the entire TUI via `lipgloss` styles (border, foreground, padding).
 
-### Интерактивная шапка (paneHeader)
+### Interactive header (paneHeader)
 
-Начиная с v0.7.0, TUI поддерживает три именованных панели: `paneHeader`, `paneRequests`, `paneLog`. `Tab` циклически переключает фокус: Header → Requests → Log → Header.
+Starting with v0.7.0, the TUI supports three named panes: `paneHeader`, `paneRequests`, `paneLog`. `Tab` cycles focus: Header → Requests → Log → Header.
 
-Когда активна `paneHeader`:
-- `↑` / `↓` выбирают сервер в шапке; выбранный получает маркер `▸` и яркую рамку (`StyleBorderActive`).
-- `Enter` открывает server-detail modal с таблицей per-model статистики: `Model | Reqs | Load | t_load | ↓tok/s | ↑tok/s`.
-- Mouse wheel в области шапки также меняет выбранный сервер.
+When `paneHeader` is active:
+- `↑` / `↓` select a server in the header; the selected one gets the `▸` marker and a bright border (`StyleBorderActive`).
+- `Enter` opens the server-detail modal with a per-model statistics table: `Model | Reqs | Load | t_load | ↓tok/s | ↑tok/s`.
+- Mouse wheel in the header area also changes the selected server.
 
-Modal закрывается на `Esc` / повторный `Enter` / `q`.
+The modal closes on `Esc` / repeated `Enter` / `q`.
 
-## 15. Сборка и распространение
+## 15. Build and Distribution
 
-**Однострочная сборка:**
+**One-liner build:**
 ```bash
 go build -ldflags "-s -w -X main.version=$(git describe --tags --always)" -o bin/proxylm .
 ```
 
-**Кросс-компиляция:**
+**Cross-compilation:**
 ```bash
 GOOS=windows GOARCH=amd64 go build -o bin/proxylm-windows-amd64.exe .
 GOOS=linux   GOARCH=amd64 go build -o bin/proxylm-linux-amd64 .
@@ -429,50 +429,50 @@ GOOS=darwin  GOARCH=amd64 go build -o bin/proxylm-darwin-amd64 .
 GOOS=darwin  GOARCH=arm64 go build -o bin/proxylm-darwin-arm64 .
 ```
 
-Поскольку SQLite-драйвер — pure-Go, **CGO_ENABLED=0** допустимо (и предпочтительно для статической компиляции).
+Since the SQLite driver is pure-Go, **CGO_ENABLED=0** is acceptable (and preferred for static compilation).
 
-## 16. Метрики производительности (регрессия)
+## 16. Performance Metrics (Regression)
 
-Модуль `internal/core/perf.go` оценивает производительность сервера по паре `(server_name, model)` методом линейной регрессии. Все наблюдения хранятся в памяти (`[]perfObservation`) — при рестарте daemon'а история обнуляется.
+The module `internal/core/perf.go` estimates server performance per `(server_name, model)` pair using linear regression. All observations are stored in memory (`[]perfObservation`) — when the daemon restarts, the history is reset.
 
-### Модель
+### Model
 
-Для каждого завершённого запроса записывается наблюдение:
+For each completed request an observation is recorded:
 
 ```
 (t_all, k_in, k_out, loaded)
 ```
 
-- `t_all` — полное время выполнения запроса на сервере (мс, поле `duration_ms`).
-- `k_in` — число prompt-токенов (`input_tokens`).
-- `k_out` — число completion-токенов (`output_tokens`).
-- `loaded` ∈ {0, 1} — 1 если в начале dispatch была смена модели (`model_reloaded = true`).
+- `t_all` — total request execution time on the server (ms, field `duration_ms`).
+- `k_in` — number of prompt tokens (`input_tokens`).
+- `k_out` — number of completion tokens (`output_tokens`).
+- `loaded` ∈ {0, 1} — 1 if at the start of dispatch a model switch occurred (`model_reloaded = true`).
 
-Линейная модель:
+Linear model:
 
 ```
 loaded · t_load  +  b · k_in  +  c · k_out  ≈  t_all
 ```
 
-Параметры θ = (t_load, b, c) минимизируют Σ(t_all − fit)². Решение через нормальные уравнения X^T X · θ = X^T y, метод Крамера.
+Parameters θ = (t_load, b, c) minimize Σ(t_all − fit)². Solved via normal equations X^T X · θ = X^T y, Cramer's method.
 
-### Три режима
+### Three modes
 
-| Условие | Размер системы | Результат |
-|---------|----------------|-----------|
-| Минимум `perfMinSamples = 3` наблюдений; хотя бы одно с `loaded=1`; 3×3 не сингулярна | 3×3 | `PerfStats{OK: true, TLoadMs, KInMsTok, KOutMsTok}` |
-| ≥ 3 наблюдений; все с `loaded=0` или 3×3 сингулярна | 2×2 (fallback без `t_load`) | `OK: true`, `TLoadMs = 0` |
-| < 3 наблюдений | — | `OK: false` |
+| Condition | System size | Result |
+|-----------|-------------|--------|
+| Minimum `perfMinSamples = 3` observations; at least one with `loaded=1`; 3×3 non-singular | 3×3 | `PerfStats{OK: true, TLoadMs, KInMsTok, KOutMsTok}` |
+| ≥ 3 observations; all with `loaded=0` or 3×3 singular | 2×2 (fallback without `t_load`) | `OK: true`, `TLoadMs = 0` |
+| < 3 observations | — | `OK: false` |
 
-### Публичные типы
+### Public types
 
 ```go
 type PerfStats struct {
     Samples    int
-    Loaded     int     // число reload-наблюдений
-    TLoadMs    float64 // оценка t_load (0 если нет данных)
-    KInMsTok   float64 // мс/tok для prompt
-    KOutMsTok  float64 // мс/tok для completion
+    Loaded     int     // number of reload observations
+    TLoadMs    float64 // estimated t_load (0 if no data)
+    KInMsTok   float64 // ms/tok for prompt
+    KOutMsTok  float64 // ms/tok for completion
     OK         bool
 }
 
@@ -482,16 +482,16 @@ type ModelSummary struct {
 }
 ```
 
-Метод `ServerSummary(server string) []ModelSummary` возвращает все модели сервера, отсортированные по `Samples DESC` — используется для server-detail modal в TUI.
+Method `ServerSummary(server string) []ModelSummary` returns all models for a server, sorted by `Samples DESC` — used for the server-detail modal in TUI.
 
-В IPC `ServerState` перф-поля (см. `API.md` §2.2) заполняются через `buildSnapshot`: `tok_in_per_sec = 1000 / KInMsTok` (нули и отрицательные → 0), аналогично `tok_out_per_sec`.
+In IPC `ServerState`, perf fields (see `API.md` §2.2) are populated via `buildSnapshot`: `tok_in_per_sec = 1000 / KInMsTok` (zeros and negatives → 0), similarly for `tok_out_per_sec`.
 
-## 17. Нерешённые вопросы / отложено на будущее
+## 17. Open Questions / Deferred
 
-- Метрики Prometheus (`/metrics`).
-- Web UI вместо/помимо TUI.
-- Поддержка native Ollama API endpoints (`/api/generate`).
-- Приоритизация по клиенту (квоты).
-- Persistence очереди при рестарте (отдельно обсуждалось — намеренно не делаем).
-- Опциональная сборка с CGO-SQLite (`mattn/go-sqlite3`) под build tag — для high-throughput инсталляций.
-- Авто-update механизм (скачивание новых релизов с GitHub).
+- Prometheus metrics (`/metrics`).
+- Web UI instead of / in addition to TUI.
+- Native Ollama API endpoints (`/api/generate`).
+- Per-client prioritization (quotas).
+- Queue persistence across restarts (intentionally deferred).
+- Optional CGO-SQLite build (`mattn/go-sqlite3`) under a build tag — for high-throughput installations.
+- Auto-update mechanism (downloading new releases from GitHub).

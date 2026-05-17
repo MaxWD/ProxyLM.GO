@@ -1,87 +1,87 @@
-# ProxyLM.GO — Идеи и задачи на будущее
+# ProxyLM.GO — Future Ideas and Tasks
 
-> **FUTURE-RULE.** Этот файл — парковка идей, а не план работ. Из него **ничего не реализуется автоматически**: ни Claude Code, ни sub-agent'ы, ни tech-writer не должны брать пункты как сигнал к действию. Любая реализация — только по **явному запросу пользователя** («сделай пункт N» или эквивалент). См. также секцию FUTURE-RULE в `CLAUDE.md`.
+> **FUTURE-RULE.** This file is an idea parking lot, not a work plan. **Nothing here is implemented automatically**: neither Claude Code, nor sub-agents, nor the tech-writer should treat items here as a signal to act. Any implementation requires an **explicit user request** ("implement item N" or equivalent). See also the FUTURE-RULE section in `CLAUDE.md`.
 >
-> **Что разрешено tech-writer'у:** при каждом значимом релизе или по запросу ревизировать этот файл — убирать уже реализованное, добавлять новые идеи, выявленные в ходе работы, поддерживать единый формат (название, проблема, решение, приоритет, опционально риски/ограничения). Содержание полностью read-only для остальных ролей.
+> **What the tech-writer is allowed to do:** at each significant release or on request, revise this file — remove already-implemented items, add new ideas that emerged during work, maintain a consistent format (name, problem, solution, priority, optionally risks/constraints). Content is fully read-only for all other roles.
 
-Документ фиксирует функции, которые не вошли в текущие релизы, но вытекают из накопленного опыта разработки. Каждый пункт содержит краткое обоснование и ориентировочный приоритет.
-
----
-
-## 1. Персистентность perf-статистики (приоритет: высокий)
-
-**Проблема:** `PerfTracker` хранит все наблюдения `(server, model)` в RAM. При рестарте daemon'а история обнуляется; регрессия начинается заново с нуля — первые 2–3 запроса не дают метрик.
-
-**Решение:** сохранять `[]perfObservation` в SQLite (новая таблица `perf_observations`), загружать при старте. Ограничить размер хранилища (например, 1000 наблюдений на пару, FIFO).
-
-**Риски:** небольшой overhead на каждый завершённый запрос; нужна миграция 0003.
+This document records features that did not make it into current releases but arise from accumulated development experience. Each item contains a brief rationale and an indicative priority.
 
 ---
 
-## 2. Ridge regression / регуляризация (приоритет: средний)
+## 1. Persistence of perf statistics (priority: high)
 
-**Проблема:** при малом числе наблюдений или когда все `loaded=1` (или все `loaded=0`) матрица `X^T X` может быть почти сингулярной, что приводит к численно нестабильным оценкам. Сейчас fallback — 2×2 без диагностики.
+**Problem:** `PerfTracker` keeps all observations `(server, model)` in RAM. When the daemon restarts, the history is wiped; regression restarts from scratch — the first 2–3 requests yield no metrics.
 
-**Решение:** добавить ridge-регуляризацию: `(X^T X + λI) · θ = X^T y`, где λ — малая константа (например, `1e-4`). Вычислять метрику качества R² и публиковать её в server-detail modal TUI как индикатор `degraded fit` при R² < порога.
+**Solution:** persist `[]perfObservation` in SQLite (new table `perf_observations`), load on startup. Limit storage size (e.g., 1000 observations per pair, FIFO).
 
-**Эффект для пользователя:** operator видит в modal «fit: good / degraded», понимает достоверность оценок.
-
----
-
-## 3. Per-endpoint статистика (приоритет: низкий)
-
-**Проблема:** `PerfTracker` агрегирует по `(server, model)` без учёта типа запроса. `POST /v1/chat/completions` и `POST /v1/embeddings` имеют принципиально разный профиль токен/время; смешение искажает регрессию.
-
-**Решение:** добавить измерение `endpoint` в ключ наблюдения: `(server, model, endpoint)`. Отдельный `ModelSummary` для каждого endpoint; в modal — вкладки или отдельные строки.
+**Risks:** small overhead per completed request; migration 0003 required.
 
 ---
 
-## 4. Persistence in-memory очереди (приоритет: средний)
+## 2. Ridge regression / regularization (priority: medium)
 
-**Проблема:** при рестарте daemon'а все запросы из `pending` теряются — клиенты получают connection error и должны повторять сами. В production-инсталляциях это может вызывать значимые потери.
+**Problem:** with few observations, or when all `loaded=1` (or all `loaded=0`), the matrix `X^T X` may be nearly singular, leading to numerically unstable estimates. The current fallback is 2×2 without diagnostics.
 
-**Решение:** при старте с флагом `--durable-queue` сохранять `pending` в SQLite и восстанавливать при следующем старте. Запросы в статусе `running` при восстановлении переводятся в `queued` (повтор). Реализация требует гарантии идемпотентности на стороне клиента или явного флага `client_supports_retry`.
+**Solution:** add ridge regularization: `(X^T X + λI) · θ = X^T y`, where λ is a small constant (e.g., `1e-4`). Compute the R² quality metric and publish it in the TUI server-detail modal as a `degraded fit` indicator when R² is below threshold.
 
-**Ограничение:** persistence очереди намеренно отложена до v0.2+ (U-3 в SRS.md).
-
----
-
-## 5. Web UI (приоритет: низкий)
-
-**Проблема:** TUI требует терминала; при удалённом мониторинге через браузер TUI неудобен.
-
-**Решение:** минималистичный Web UI на том же WebSocket (`/admin/stream`), без зависимостей на фронтенде (vanilla JS + EventSource или WebSocket). Табличный вид запросов и шапка серверов — аналог TUI.
-
-**Ограничение:** явно в out-of-scope MVP (SRS §8).
+**User-visible effect:** the operator sees "fit: good / degraded" in the modal and understands estimate reliability.
 
 ---
 
-## 6. Аутентифицированный WS-мультиплекс с фильтрацией событий (приоритет: средний)
+## 3. Per-endpoint statistics (priority: low)
 
-**Проблема:** текущий `/admin/stream` отдаёт все события всем подключённым клиентам. При нескольких одновременных TUI-сессиях возможен backpressure и drop событий.
+**Problem:** `PerfTracker` aggregates by `(server, model)` without accounting for request type. `POST /v1/chat/completions` and `POST /v1/embeddings` have fundamentally different token/time profiles; mixing distorts the regression.
 
-**Решение:** расширить протокол `subscribe` (уже частично описан в API.md §2.3): клиент указывает конкретные серверы, уровни логов, диапазон времени. Сервер фильтрует поток до отправки, снижая трафик. Добавить отдельный `multiplexer`-слой с per-connection буфером.
-
----
-
-## 7. Confidence interval и R² в server-detail modal (приоритет: низкий)
-
-**Проблема:** server-detail modal показывает только точечную оценку `t_load / tok/s`. Пользователь не знает, насколько оценка надёжна (мало данных, высокий разброс).
-
-**Решение:** вычислять R² (коэффициент детерминации) и 95% confidence interval для каждого параметра на основе residuals. Показывать в modal рядом с оценкой: `38.5 tok/s [±5.1]  R²=0.94`.
+**Solution:** add an `endpoint` dimension to the observation key: `(server, model, endpoint)`. A separate `ModelSummary` per endpoint; in the modal — tabs or separate rows.
 
 ---
 
-## 8. max_consecutive_requests_per_model — защита от голода (приоритет: средний)
+## 4. In-memory queue persistence (priority: medium)
 
-**Проблема:** при непрерывном потоке запросов модели A другие модели в очереди не получат обслуживания (голод). Сейчас это задокументированный компромисс (R-1 в SRS.md §9.2).
+**Problem:** when the daemon restarts, all requests in `pending` are lost — clients receive a connection error and must retry on their side. In production installations this can cause significant losses.
 
-**Решение:** конфиг-параметр `scheduler.max_consecutive_per_model` (int, default 0 = отключено): после N последовательных запросов модели A воркер принудительно берёт следующий FIFO-запрос, даже если есть ещё запросы для A.
+**Solution:** when started with `--durable-queue`, persist `pending` in SQLite and restore on the next start. Requests in `running` status at restore time are moved back to `queued` (retry). Implementation requires idempotency guarantees on the client side or an explicit `client_supports_retry` flag.
+
+**Constraint:** queue persistence is intentionally deferred to v0.2+ (U-3 in SRS.md).
 
 ---
 
-## 9. Опциональная CGO-сборка SQLite (приоритет: низкий)
+## 5. Web UI (priority: low)
 
-**Проблема:** `modernc.org/sqlite` (pure-Go) заметно медленнее `mattn/go-sqlite3` (CGO) при высоком throughput истории.
+**Problem:** TUI requires a terminal; when monitoring remotely via a browser, TUI is inconvenient.
 
-**Решение:** build tag `sqlite_cgo` подключает `mattn/go-sqlite3` вместо `modernc`; default — по-прежнему pure-Go. Актуально для high-throughput инсталляций (R-7 в SRS.md §9.2).
+**Solution:** a minimalist Web UI on the same WebSocket (`/admin/stream`), with no frontend dependencies (vanilla JS + EventSource or WebSocket). Table view of requests and server header bar — analogous to TUI.
+
+**Constraint:** explicitly out of scope for MVP (SRS §8).
+
+---
+
+## 6. Authenticated WS multiplexing with event filtering (priority: medium)
+
+**Problem:** the current `/admin/stream` delivers all events to all connected clients. With multiple simultaneous TUI sessions, backpressure and event drops are possible.
+
+**Solution:** extend the `subscribe` protocol (already partially described in API.md §2.3): the client specifies concrete servers, log levels, and a time range. The server filters the stream before sending, reducing traffic. Add a separate `multiplexer` layer with a per-connection buffer.
+
+---
+
+## 7. Confidence interval and R² in server-detail modal (priority: low)
+
+**Problem:** the server-detail modal shows only a point estimate for `t_load / tok/s`. The user does not know how reliable the estimate is (few data points, high variance).
+
+**Solution:** compute R² (coefficient of determination) and a 95% confidence interval for each parameter based on residuals. Show in the modal next to the estimate: `38.5 tok/s [±5.1]  R²=0.94`.
+
+---
+
+## 8. max_consecutive_requests_per_model — starvation protection (priority: medium)
+
+**Problem:** with a continuous stream of requests for model A, other models in the queue will not be served (starvation). This is currently a documented trade-off (R-1 in SRS.md §9.2).
+
+**Solution:** config parameter `scheduler.max_consecutive_per_model` (int, default 0 = disabled): after N consecutive requests for model A the worker forcibly picks the next FIFO request, even if there are more requests for A pending.
+
+---
+
+## 9. Optional CGO SQLite build (priority: low)
+
+**Problem:** `modernc.org/sqlite` (pure-Go) is noticeably slower than `mattn/go-sqlite3` (CGO) under high history throughput.
+
+**Solution:** build tag `sqlite_cgo` switches to `mattn/go-sqlite3` instead of `modernc`; default remains pure-Go. Relevant for high-throughput installations (R-7 in SRS.md §9.2).
