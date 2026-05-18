@@ -7,9 +7,13 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// noUnicodeFlag кешируется один раз при старте пакета, чтобы не делать
+// os.Getenv на каждый рендер Glyph*.
+var noUnicodeFlag = os.Getenv("PROXYLM_NO_UNICODE") == "1"
+
 // noUnicode возвращает true, если задана переменная окружения PROXYLM_NO_UNICODE=1.
 func noUnicode() bool {
-	return os.Getenv("PROXYLM_NO_UNICODE") == "1"
+	return noUnicodeFlag
 }
 
 // glyph выбирает unicode-символ или ASCII-fallback в зависимости от noUnicode().
@@ -133,17 +137,16 @@ var (
 	StyleSelected = lipgloss.NewStyle().Background(colorBlue).Foreground(colorWhite)
 	StyleFooter   = lipgloss.NewStyle().Foreground(colorDimmed)
 
-	// Модальное окно деталей запроса.
-	StyleModalBorder = lipgloss.NewStyle().
-				BorderStyle(lipgloss.DoubleBorder()).
-				BorderForeground(colorCyan)
+	// StyleModalTitle — заголовок help overlay (см. renderHelpOverlay).
 	StyleModalTitle = lipgloss.NewStyle().Bold(true).Foreground(colorCyan)
 
-	// Уровни логов.
-	StyleLogInfo  = lipgloss.NewStyle().Foreground(colorWhite)
-	StyleLogWarn  = lipgloss.NewStyle().Foreground(colorYellow)
-	StyleLogError = lipgloss.NewStyle().Foreground(colorBrightRed)
-	StyleLogDebug = lipgloss.NewStyle().Foreground(colorDimmed)
+	// Help overlay.
+	StyleHelpBorder = lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(colorBrightBlue).
+			Padding(1, 2)
+	StyleHelpKey  = lipgloss.NewStyle().Bold(true).Foreground(colorBrightBlue)
+	StyleHelpDesc = lipgloss.NewStyle().Foreground(colorWhite)
 )
 
 // serverPalette — 5 ярких ANSI цветов, стабильно отображаемых в cmd.exe / PowerShell /

@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-05-18
+
+### Added
+
+- **TUI auto-reconnect**: when the WebSocket connection to the daemon drops, the client now retries indefinitely with exponential backoff (1s → 2s → 4s → … cap 30s) instead of exiting. Title shows `connecting…` / `reconnecting…` / live version. Exit only via `q` / `F10` / Ctrl-C.
+- **TUI F1 help overlay**: new `renderHelpOverlay` listing all hotkeys; F1 / Esc / q close it. Previously F1 was declared in keymap and footer but had no handler.
+- **TUI F5 refresh**: pressing F5 now sends a `request_snapshot` WS frame to the daemon, which replies with a fresh `state_snapshot`. Previously F5 was advertised in footer but did nothing.
+- **TUI loading pane**: while waiting for the first snapshot after connect, the request pane shows `Waiting for daemon…` instead of empty borders.
+- **TUI auth-error wrap**: `ipc.IsAuthError` detects 401/403 in dial errors; CLI surfaces `authentication failed — check --token: …` instead of a raw WS error.
+- **api**: new `X-Request-Id` response-header middleware on `/v1/*`. Generates a UUIDv4 when the client does not supply one; reuses a valid client-supplied value.
+- **core/discovery**: new `InitialHealthcheck(ctx)` — synchronous poll of every backend at daemon start, independent of `discovery.enabled`. Servers with explicit `backends[].models` skip the network probe and start healthy immediately.
+- **ipc**: new `request_snapshot` client→server frame (Hub responds with `state_snapshot`). Documented in `docs/API.md` §2.3.
+
+### Fixed
+
+- **ipc/server**: `closeAll` on daemon shutdown leaked writer goroutines because `c.closed` was never closed. Added `sync.Once` per client and explicit `close(c.closed)` in `closeAll`.
+- **core/router**: `rrIdx` for the `round_robin` strategy was a plain `int` mutated without a lock — a real data race under parallel `/v1/*` traffic. Replaced with `atomic.Int64`.
+- **api/routes_openai**: added `defer r.Body.Close()` so the request body is always drained on early-return; prevents connection-pool exhaustion under load.
+- **ipc/server**: WebSocket `Close` was reachable from both reader and writer goroutines. Wrapped in `sync.Once` to remove the double-close path.
+- **core/scheduler**: `failPending` now wraps the send on `j.done` in `select { case … : default: }` — symmetric with `failServerQueue`. Removes a theoretical deadlock at shutdown when a job is mid-dispatch.
+- **core/scheduler**: worker inner-loop now checks `ctx.Err()` between dispatches. Graceful shutdown no longer stalls proportionally to queue depth (NFR-4).
+- **storage**: SQLite `busy_timeout` raised from 5000ms to 10000ms to give a margin over the 5s context timeout under concurrent WAL writes.
+- **core/perf**: `PerfTracker.bySlot[key]` was unbounded. Capped at 1000 observations per `(server, model)` with FIFO drop — closes a slow memory leak in long-running daemons.
+- **tui**: `View()` no longer mutates `m.selectedServerIdx` — clamp moved out of View, respecting Bubble Tea's read-only View contract.
+- **tui**: `pageDown` / `pageUp` clamp `selectedIdx` against `visibleRequests()` immediately; eliminates a transient `selectedIdx = -1` window before the next tick.
+- **tui**: `calcColWidths` now uses the terminal width — at width ≥ 100 the `model` and `tokens` columns shrink proportionally instead of silently overflowing the viewport.
+- **tui**: footer is now responsive — at width < 80 it switches to `F1 Help · q Quit`. Prevents lipgloss truncation.
+- **tui**: `json.Unmarshal` errors on envelope are surfaced in the footer via `m.lastParseError` instead of silently dropped.
+- **tui**: `m.ctx` is propagated into `waitForMessage` instead of `context.Background()`. The reader goroutine now unblocks when the parent context is canceled.
+- **tui**: 60s read-timeout on WebSocket reads defends against "silent" connection loss (NAT timeouts) — previously TUI could freeze indefinitely.
+- **tui/styles**: `noUnicode()` no longer calls `os.Getenv` on every glyph render; cached as a package-level var.
+- **test/integration**: replaced `time.Sleep(50ms)` synchronization in `TestE2E_ChatCompletions` with a polling loop (cap 2s, step 5ms) — eliminates flakiness on slow CI runners.
+
+### Removed
+
+- **ipc/messages**: dead message types `state_diff`, `log_line`, `ping` and the `LogLinePayload` struct. The daemon never emitted these; the documentation now reflects reality. The `state_snapshot` + `request_snapshot` pair is the entire wire protocol in v0.9.6.
+- **api/docs**: `subscribe` and `ping` from `docs/API.md` §2.3 (never implemented).
+- **tui**: `applyServerUpdate` (used only by the now-removed `TypeStateDiff` case), `flashEntry.model` field (write-only), styles `StyleModalBorder` / `StyleLogInfo` / `StyleLogWarn` / `StyleLogError` / `StyleLogDebug` (from previously-removed modal and LogPane).
+- **core/scheduler**: `Job.Endpoint` / `Job.ClientName` / `Job.Stream` fields — the scheduler never read them; the same data lives in `RequestRecord`.
+- **api/auth**: `ctxIsAdmin` context key — written by middleware, never read by any handler.
+- **storage**: unused method `(*DB).Path()`.
+- **test**: empty `test/unit/` directory.
+
+### Changed
+
+- **docs/API.md** & **docs/API.ru.md**: §2.2 `state_snapshot` rewritten to match the actual wire format (Envelope `{type, time, payload}`; field names `id` / `created_at` / `prompt_tokens` / `attempt` / `queue_depth` instead of the older `request_id` / `received_at` / `input_tokens` / `attempts` / `queue_size`). Document version → 0.9.6.
+- **docs/SRS.md** & **docs/SRS.ru.md**: FR-46 / AC-22 rewritten to describe the real TUI layout (`paneHeader → paneRequests → paneInfo`, no modal). FR-37 expanded with the actual hotkey set. Added FR-48 (auto-reconnect), FR-49 (initial healthcheck), FR-50 (X-Request-Id middleware), FR-51 (F5 protocol) and matching AC-25..AC-28. Document version → 0.9.6.
+- **docs/ARCHITECTURE.md** & **docs/ARCHITECTURE.ru.md**: TUI section updated (`paneLog` → `paneInfo`, ASCII mockup refreshed, F1 overlay described). Discovery section mentions initial healthcheck. IPC section reflects the trimmed wire protocol.
+- **README.md** & **README.ru.md**: structurally aligned (EN/RU sections and order now match per BILINGUAL-RULE).
+- **config.example.yaml**: default routing strategy bumped to `preserve_model_coverage` — better behavior for installations with overlapping model coverage across backends.
+- **docs/img/**: removed an obsolete unused screenshot file.
+
 ## [0.9.5] - 2026-05-16
 
 ### Fixed
@@ -39,7 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.6...HEAD
+[0.9.6]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/MaxWD/ProxyLM.GO/releases/tag/v0.9.3

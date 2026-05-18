@@ -1,7 +1,7 @@
 # ProxyLM.GO — Software Requirements Specification (SRS)
 
-Версия документа: 0.9.3
-Базовая линия: ProxyLM.GO v0.9.3 (первый публичный релиз)
+Версия документа: 0.9.6
+Базовая линия: ProxyLM.GO v0.9.6
 Связанные документы: [`ARCHITECTURE.ru.md`](./ARCHITECTURE.ru.md), [`API.ru.md`](./API.ru.md), [`AGENTS.ru.md`](./AGENTS.ru.md)
 
 ---
@@ -138,10 +138,10 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 | ID     | Требование |
 |--------|------------|
 | FR-33  | Daemon ДОЛЖЕН поднимать WebSocket-эндпоинт `GET /admin/stream`, защищённый `auth.admin_key`. |
-| FR-34  | Сервер при подключении клиента ДОЛЖЕН отправить `state_snapshot` (полный снапшот серверов, очередей, последних N записей), затем — `state_diff` при изменениях. |
-| FR-35  | Сервер ДОЛЖЕН транслировать строки лога как сообщения `log_line` (push), не требуя polling от клиента. |
+| FR-34  | Сервер при подключении клиента ДОЛЖЕН немедленно отправить `state_snapshot` (полный снапшот серверов, очередей, последних N записей). Инкрементальный push `state_diff` — out of scope для v0.9.3 (см. FUTURE.md). |
+| FR-35  | Push строк лога (`log_line`-сообщения) — out of scope для v0.9.3. TUI использует F5 / `request_snapshot` для обновления вида (см. FR-51). |
 | FR-36  | TUI ДОЛЖЕН отображать таблицу запросов с автоматическим скрытием `completed`/`failed` записей через `tui.show_completed_minutes` (default 30). Записи при этом остаются в SQLite. |
-| FR-37  | TUI ДОЛЖЕН поддерживать хоткеи: `F5` — refresh снапшота, `F10` / `q` — выход, `/` — поиск по таблице. |
+| FR-37  | TUI ДОЛЖЕН поддерживать хоткеи: `F1` — help-overlay, `F5` — refresh снапшота (отправляет `request_snapshot` через WebSocket), `F10` / `q` — выход, `/` — поиск по таблице, `Tab` — цикл фокуса, `↑`/`↓` — навигация в активной панели, `Enter` — выбор/подтверждение, `Esc` — закрыть overlay/modal. |
 | FR-38  | TUI ДОЛЖЕН корректно работать в Windows Terminal, cmd.exe, PowerShell и стандартных Linux-терминалах (xterm-256color). |
 | FR-39  | TUI ДОЛЖЕН отображать время (поля `Queued`/`Started`/`Completed at` в таблице, метки времени в логе) в локальной зоне ОС. Daemon хранит/передаёт время в UTC; преобразование происходит на стороне TUI. |
 | FR-40  | TUI ДОЛЖЕН отображать каждый сервер в HeaderBar на отдельной строке (multi-line). Высота шапки растёт пропорционально числу серверов, log-панель пропорционально уменьшается. |
@@ -163,8 +163,12 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 |--------|------------|
 | FR-44  | Daemon ДОЛЖЕН фиксировать факт смены модели (`model_reloaded`) при каждом dispatch: флаг равен `true` если `server.CurrentModel` на момент взятия задачи отличается от `job.Model`. Флаг ДОЛЖЕН храниться в `RequestRecord.ModelReloaded`, записываться в поле `model_reloaded` таблицы `requests` (INTEGER NOT NULL DEFAULT 0) и публиковаться в `RequestState.model_reloaded` через IPC. |
 | FR-45  | TUI ДОЛЖЕН отображать колонку **RM** (Reload Model) в таблице запросов — между колонками `Server` и `Queued`. Значение: глиф `✓` если `model_reloaded = true`, `—` иначе. |
-| FR-46  | TUI ДОЛЖЕН поддерживать интерактивную шапку (`paneHeader`): клавиша `Tab` циклически переключает фокус между `paneHeader`, `paneRequests`, `paneLog`. В `paneHeader` клавиши `↑`/`↓` выбирают сервер (маркер `▸`, рамка `StyleBorderActive`); `Enter` открывает server-detail modal с таблицей per-model статистики (`Model | Reqs | Load | t_load | ↓tok/s | ↑tok/s`). Mouse wheel в области шапки также должен менять выбранный сервер. |
+| FR-46  | TUI ДОЛЖЕН поддерживать три именованных панели: `paneHeader`, `paneRequests`, `paneInfo`. `Tab` циклически переключает фокус: `paneHeader → paneRequests → paneInfo → paneHeader`. В `paneHeader` клавиши `↑`/`↓` выбирают сервер (маркер `▸`, рамка `StyleBorderActive`); `Enter` показывает детали сервера в `paneInfo` (правая нижняя информационная панель, не modal). В `paneRequests` `↑`/`↓` навигируют по списку запросов; `Enter` показывает детали запроса в `paneInfo`. Mouse wheel в области шапки также должен менять выбранный сервер. |
 | FR-47  | Глиф pending-строк в таблице запросов ДОЛЖЕН быть однобайтовым одноячеечным символом `…` (U+2026) вместо emoji `⏳` (U+23F3, 2 ячейки) — для корректного выравнивания колонок в терминалах с шириной символа по числу code point'ов. |
+| FR-48  | TUI ДОЛЖЕН автоматически переподключаться при разрыве WebSocket-соединения по алгоритму бесконечного экспоненциального backoff (1 с, 2 с, 4 с, …, cap 30 с). В заголовке ДОЛЖНО показываться `connecting…` при первой попытке, `reconnecting…` — при последующих, `live` — при успешном подключении. Выход — только через `q` / `F10` / Ctrl-C. |
+| FR-49  | При старте daemon ДОЛЖЕН выполнить один синхронный health-check poll (`GET /v1/models`) для каждого backend-сервера, независимо от `discovery.enabled`. Серверы с явно указанным непустым списком `backends[].models` считаются healthy сразу без poll'а. |
+| FR-50  | Каждый ответ `/v1/*` ДОЛЖЕН содержать заголовок `X-Request-Id` (UUIDv4). Если входящий запрос клиента уже несёт валидный `X-Request-Id` — это значение переиспользуется; иначе генерируется новый UUIDv4. Заголовок внедряется middleware до вызова хендлера. |
+| FR-51  | Для запроса свежего снапшота TUI ДОЛЖЕН отправить `{"type": "request_snapshot", "time": "<RFC3339>"}` через WebSocket. Daemon ДОЛЖЕН ответить тем же `state_snapshot`-конвертом, что и при начальном подключении. |
 
 ---
 
@@ -388,9 +392,13 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 | AC-19 | Сборка `GOOS=linux GOARCH=arm64 go build` на Windows-хосте успешно создаёт бинарник без CGO-toolchain. | manual |
 | AC-20 | После минимум 3 завершённых запросов к одной модели на одном сервере `ServerState.perf_ok = true`; `tok_out_per_sec > 0`; TUI показывает метрику в строке шапки. | integration test |
 | AC-21 | Колонка RM в таблице TUI: строка с `model_reloaded=true` показывает `✓`, строка без reload — `—`. | manual + SQL-запрос |
-| AC-22 | `Tab` в TUI переключает фокус Header → Requests → Log → Header; в paneHeader `↑`/`↓` меняют выбранный сервер; `Enter` открывает server-detail modal с таблицей per-model. | manual |
+| AC-22 | `Tab` в TUI циклически переключает фокус Header → Requests → Info → Header; в `paneHeader` `↑`/`↓` меняют выбранный сервер; `Enter` показывает детали сервера в `paneInfo`; в `paneRequests` `Enter` показывает детали запроса в `paneInfo`. | manual |
 | AC-23 | Таблица запросов: колонки выровнены в терминале без сдвига при наличии pending-строк (глиф `…` занимает ровно одну ячейку). | manual |
 | AC-24 | Поле `model_reloaded` присутствует в таблице `requests` SQLite (проверяется `.schema requests`); значение `1` для запросов со сменой модели, `0` для остальных. | SQL-запрос |
+| AC-25 | TUI не завершается при разрыве WebSocket-соединения; после рестарта daemon'а (≤ 30 с) TUI автоматически снова показывает live-данные без каких-либо действий пользователя. | manual |
+| AC-26 | При `discovery.enabled=false` и явно указанных списках моделей у всех бэкендов daemon принимает `/v1/chat/completions` сразу после старта (без бесконечных 503). | integration test |
+| AC-27 | Ответ на `POST /v1/chat/completions` содержит заголовок `X-Request-Id` со значением UUIDv4. | integration test |
+| AC-28 | Нажатие `F5` в TUI вызывает отправку WS-фрейма `request_snapshot` и получение `state_snapshot` в следующем тике. | manual |
 
 ---
 
@@ -462,10 +470,10 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 ### Базовая линия: v0.9.3 (первый публичный релиз)
 
 Полностью реализованы:
-- FR-1 … FR-47 (HTTP API, планировщик, маршрутизация, retry, discovery, история, TUI/IPC, CLI, метрики производительности)
+- FR-1 … FR-51 (HTTP API, планировщик, маршрутизация, retry, discovery, история, TUI/IPC, CLI, метрики производительности, авто-переподключение, initial healthcheck, X-Request-Id middleware, F5-протокол)
 - NFR-1 … NFR-12
 - INV-1 … INV-8
-- AC-1 … AC-24
+- AC-1 … AC-28
 
 ### Будущие доработки
 

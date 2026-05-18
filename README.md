@@ -192,7 +192,9 @@ The TUI is a separate process that connects to the running daemon over WebSocket
 ./proxylm tui --connect ws://localhost:8080 --token <admin_key>
 ```
 
-Hotkeys: `F1` help, `F5` reconnect/refresh snapshot, `/` search, `F10` or `q` quit.
+Hotkeys: `F1` help overlay, `F5` refresh snapshot (sends `request_snapshot` via WebSocket), `/` search, `Tab` cycle panes (Header / Requests / Info), `F10` or `q` quit.
+
+If the WebSocket connection drops, the TUI reconnects automatically with exponential backoff (1 s → 30 s cap). The title bar shows `connecting…` / `reconnecting…` / `live`.
 
 Completed requests are hidden from the table after `tui.show_completed_minutes` (default 30) but remain in SQLite.
 

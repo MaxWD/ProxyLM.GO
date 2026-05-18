@@ -13,7 +13,7 @@ type ctxKey int
 
 const (
 	ctxClientName ctxKey = iota
-	ctxIsAdmin
+	ctxRequestID
 )
 
 // AuthRegistry — таблица соответствия "api-key → client name" + admin_key.
@@ -66,14 +66,21 @@ func (r *AuthRegistry) AdminAuth(next http.Handler) http.Handler {
 			writeJSONError(w, http.StatusUnauthorized, "admin auth required")
 			return
 		}
-		ctx := context.WithValue(req.Context(), ctxIsAdmin, true)
-		next.ServeHTTP(w, req.WithContext(ctx))
+		next.ServeHTTP(w, req)
 	})
 }
 
 // ClientFromContext извлекает имя клиента, ранее положенное ClientAuth.
 func ClientFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(ctxClientName).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// RequestIDFromContext извлекает request_id из контекста.
+func RequestIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxRequestID).(string); ok {
 		return v
 	}
 	return ""

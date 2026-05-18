@@ -1,7 +1,7 @@
 # ProxyLM.GO — Software Requirements Specification (SRS)
 
-Document version: 0.9.3
-Baseline: ProxyLM.GO v0.9.3 (first public release)
+Document version: 0.9.6
+Baseline: ProxyLM.GO v0.9.6
 Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`API.md`](./API.md), [`AGENTS.md`](./AGENTS.md)
 
 ---
@@ -138,10 +138,10 @@ Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 | ID     | Requirement |
 |--------|-------------|
 | FR-33  | The daemon MUST expose the WebSocket endpoint `GET /admin/stream`, protected by `auth.admin_key`. |
-| FR-34  | The server MUST send a `state_snapshot` (full snapshot of servers, queues, and the last N records) on client connection, then `state_diff` on changes. |
-| FR-35  | The server MUST push log lines as `log_line` messages without requiring polling from the client. |
+| FR-34  | The server MUST send a `state_snapshot` (full snapshot of servers, queues, and the last N records) immediately on client connection. Incremental `state_diff` push is out of scope for v0.9.3 (see FUTURE.md). |
+| FR-35  | Log-line push (`log_line` messages) is out of scope for v0.9.3. The TUI uses F5 / `request_snapshot` to refresh the view (see FR-51). |
 | FR-36  | The TUI MUST display a request table with automatic hiding of `completed`/`failed` records after `tui.show_completed_minutes` (default 30). Records remain in SQLite. |
-| FR-37  | The TUI MUST support hotkeys: `F5` — refresh snapshot, `F10` / `q` — quit, `/` — table search. |
+| FR-37  | The TUI MUST support hotkeys: `F1` — help overlay, `F5` — refresh snapshot (sends `request_snapshot` via WebSocket), `F10` / `q` — quit, `/` — table search, `Tab` — cycle focus, `↑`/`↓` — navigation in active pane, `Enter` — select/confirm, `Esc` — close overlay/modal. |
 | FR-38  | The TUI MUST work correctly in Windows Terminal, cmd.exe, PowerShell, and standard Linux terminals (xterm-256color). |
 | FR-39  | The TUI MUST display timestamps (`Queued`/`Started`/`Completed at` columns in the table, log timestamps) in the OS local timezone. The daemon stores/transmits time in UTC; conversion happens on the TUI side. |
 | FR-40  | The TUI MUST display each server in the HeaderBar on a separate line (multi-line). Header height grows proportionally to the number of servers; the log pane shrinks proportionally. |
@@ -163,8 +163,12 @@ Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 |--------|-------------|
 | FR-44  | The daemon MUST record the model-switch event (`model_reloaded`) at every dispatch: the flag is `true` if `server.CurrentModel` at the time the job is taken differs from `job.Model`. The flag MUST be stored in `RequestRecord.ModelReloaded`, written to the `model_reloaded` column of the `requests` table (INTEGER NOT NULL DEFAULT 0), and published in `RequestState.model_reloaded` via IPC. |
 | FR-45  | The TUI MUST display the **RM** (Reload Model) column in the request table — between the `Server` and `Queued` columns. Value: glyph `✓` if `model_reloaded = true`, `—` otherwise. |
-| FR-46  | The TUI MUST support an interactive header (`paneHeader`): the `Tab` key cycles focus between `paneHeader`, `paneRequests`, `paneLog`. In `paneHeader`, `↑`/`↓` select a server (marker `▸`, border `StyleBorderActive`); `Enter` opens the server-detail modal with a per-model statistics table (`Model | Reqs | Load | t_load | ↓tok/s | ↑tok/s`). Mouse wheel in the header area MUST also change the selected server. |
+| FR-46  | The TUI MUST support three named panes: `paneHeader`, `paneRequests`, `paneInfo`. `Tab` cycles focus: `paneHeader → paneRequests → paneInfo → paneHeader`. In `paneHeader`, `↑`/`↓` select a server (marker `▸`, border `StyleBorderActive`); `Enter` shows server details in `paneInfo` (the lower-right info panel, not a modal). In `paneRequests`, `↑`/`↓` navigate the request list; `Enter` shows request details in `paneInfo`. Mouse wheel in the header area MUST also change the selected server. |
 | FR-47  | The pending-row glyph in the request table MUST be the single-cell character `…` (U+2026) instead of the emoji `⏳` (U+23F3, 2 cells) — for correct column alignment in terminals where character width equals code-point count. |
+| FR-48  | The TUI MUST reconnect automatically on WebSocket disconnection using infinite exponential backoff (1 s, 2 s, 4 s, …, capped at 30 s). The title bar MUST show `connecting…` on the initial attempt, `reconnecting…` on subsequent attempts, and `live` when connected. Exit is only via `q` / `F10` / Ctrl-C. |
+| FR-49  | On daemon startup, a single synchronous health-check poll (`GET /v1/models`) MUST be performed for every backend server, regardless of `discovery.enabled`. Servers with an explicit non-empty `backends[].models` list are considered healthy immediately without a poll. |
+| FR-50  | Every `/v1/*` response MUST include the header `X-Request-Id` (UUIDv4). If the incoming client request already carries a valid `X-Request-Id` header, that value is reused; otherwise a new UUIDv4 is generated. The header is injected by a middleware before the handler executes. |
+| FR-51  | To request a fresh state snapshot the TUI MUST send `{"type": "request_snapshot", "time": "<RFC3339>"}` via WebSocket. The daemon MUST respond with the same `state_snapshot` envelope as on initial connect. |
 
 ---
 
@@ -388,9 +392,13 @@ The baseline is considered complete when **all** items below are satisfied:
 | AC-19 | Build `GOOS=linux GOARCH=arm64 go build` on a Windows host successfully produces a binary without CGO toolchain. | manual |
 | AC-20 | After at least 3 completed requests to one model on one server, `ServerState.perf_ok = true`; `tok_out_per_sec > 0`; TUI shows the metric in the header line. | integration test |
 | AC-21 | RM column in TUI table: a row with `model_reloaded=true` shows `✓`, a row without reload shows `—`. | manual + SQL query |
-| AC-22 | `Tab` in TUI cycles focus Header → Requests → Log → Header; in paneHeader `↑`/`↓` change the selected server; `Enter` opens the server-detail modal with per-model table. | manual |
+| AC-22 | `Tab` in TUI cycles focus Header → Requests → Info → Header; in `paneHeader` `↑`/`↓` change the selected server; `Enter` shows server details in `paneInfo`; in `paneRequests` `Enter` shows request details in `paneInfo`. | manual |
 | AC-23 | Request table: columns are aligned in the terminal without shifting when pending rows are present (glyph `…` occupies exactly one cell). | manual |
 | AC-24 | Field `model_reloaded` is present in the SQLite `requests` table (verified by `.schema requests`); value `1` for requests with model switch, `0` for others. | SQL query |
+| AC-25 | TUI does not exit on WebSocket disconnection; after daemon restart (≤ 30 s) the TUI automatically shows live data again without any user action. | manual |
+| AC-26 | With `discovery.enabled=false` and all backends having explicit `models` lists, the daemon accepts `/v1/chat/completions` immediately after startup (no 503 indefinitely). | integration test |
+| AC-27 | Response to `POST /v1/chat/completions` includes the `X-Request-Id` header with a UUIDv4 value. | integration test |
+| AC-28 | Pressing `F5` in the TUI causes a `request_snapshot` WebSocket frame to be sent and a `state_snapshot` to be received within the next tick. | manual |
 
 ---
 
@@ -462,10 +470,10 @@ Additionally confirmed regarding scheduler behavior:
 ### Current baseline: v0.9.3 (first public release)
 
 Fully implements:
-- FR-1 … FR-47 (HTTP API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics)
+- FR-1 … FR-51 (HTTP API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics, auto-reconnect, initial healthcheck, X-Request-Id middleware, F5 protocol)
 - NFR-1 … NFR-12
 - INV-1 … INV-8
-- AC-1 … AC-24
+- AC-1 … AC-28
 
 ### Future work
 

@@ -1,6 +1,6 @@
 # ProxyLM.GO — API Specification
 
-Версия документа: 0.7.0
+Версия документа: 0.9.6
 Связанные документы: [`ARCHITECTURE.ru.md`](./ARCHITECTURE.ru.md), [`SRS.ru.md`](./SRS.ru.md)
 
 Документ описывает три группы API:
@@ -23,7 +23,7 @@
 - Заголовок `Content-Type: application/json` обязателен для POST-запросов.
 - Прокси добавляет в логи и историю поле `client_name`, соответствующее `auth.api_keys[].name`. Сам ключ нигде не логируется.
 - Неизвестные поля тела запроса передаются на бэкенд без модификации (FR-9).
-- На все ответы прокси добавляет заголовок `X-Request-Id: <uuid>` (тот же, что в `RequestRecord.request_id`).
+- Прокси добавляет заголовок `X-Request-Id: <uuid>` ко всем ответам `/v1/*`. Middleware генерирует UUIDv4, если клиент не передал заголовок; если клиент прислал валидный `X-Request-Id` — он переиспользуется. Значение записывается в `w.Header()` до вызова хендлера.
 
 ### 1.2. `POST /v1/chat/completions`
 
@@ -278,102 +278,104 @@ Sec-WebSocket-Key: ...
 
 ### 2.2. Сообщения сервер → клиент
 
-Все сообщения — JSON-фреймы (`text` opcode), в формате `{"type": "<тип>", ...}`.
+Все сообщения — JSON-фреймы (`text` opcode). Каждый фрейм — `Envelope`:
+
+```json
+{"type": "<тип>", "time": "<RFC3339>", "payload": { ... }}
+```
 
 #### `state_snapshot`
 
-Отправляется один раз сразу после подключения. Содержит полное состояние.
+Отправляется один раз сразу после подключения, а также в ответ на фрейм `request_snapshot` от клиента. Содержит полное состояние.
 
 ```json
 {
   "type": "state_snapshot",
-  "timestamp": "2026-05-09T14:01:02Z",
-  "version": "0.7.0",
-  "servers": [
-    {
-      "name": "srv1",
-      "url": "http://127.0.0.1:1234",
-      "healthy": true,
-      "current_model": "qwen2.5:14b",
-      "queue_size": 2,
-      "models": ["qwen2.5:14b", "llama3.1:8b"],
-      "perf_samples": 12,
-      "perf_ok": true,
-      "t_load_ms": 4200.0,
-      "tok_in_per_sec": 0.0,
-      "tok_out_per_sec": 38.5,
-      "per_model_stats": [
-        {
-          "model": "qwen2.5:14b",
-          "samples": 12,
-          "loaded": 3,
-          "ok": true,
-          "t_load_ms": 4200.0,
-          "tok_in_per_sec": 0.0,
-          "tok_out_per_sec": 38.5
-        },
-        {
-          "model": "llama3.1:8b",
-          "samples": 5,
-          "loaded": 1,
-          "ok": true,
-          "t_load_ms": 1100.0,
-          "tok_in_per_sec": 0.0,
-          "tok_out_per_sec": 72.1
-        }
-      ]
-    }
-  ],
-  "requests": [
-    {
-      "request_id": "0e9c...",
-      "client_name": "service-a",
-      "model": "qwen2.5:14b",
-      "server": "srv1",
-      "status": "completed",
-      "received_at": "2026-05-09T14:01:02Z",
-      "started_at": "2026-05-09T14:01:02Z",
-      "first_chunk_at": null,
-      "completed_at": "2026-05-09T14:01:08Z",
-      "queue_wait_ms": 120,
-      "duration_ms": 6300,
-      "server_proc_ms": 6300,
-      "ttft_ms": null,
-      "input_tokens": 312,
-      "output_tokens": 82,
-      "attempts": 1,
-      "error": null,
-      "stream": false,
-      "model_reloaded": false
-    }
-  ],
-  "stats": {
-    "queued": 0,
-    "running": 1,
-    "completed_30m": 17,
-    "failed_30m": 1
+  "time": "2026-05-09T14:01:02Z",
+  "payload": {
+    "servers": [
+      {
+        "name": "srv1",
+        "url": "http://127.0.0.1:1234",
+        "healthy": true,
+        "in_flight": true,
+        "current_model": "qwen2.5:14b",
+        "queue_depth": 2,
+        "models": ["qwen2.5:14b", "llama3.1:8b"],
+        "perf_samples": 12,
+        "perf_ok": true,
+        "t_load_ms": 4200.0,
+        "tok_in_per_sec": 0.0,
+        "tok_out_per_sec": 38.5,
+        "slow": false,
+        "failure_count": 0,
+        "per_model_stats": [
+          {
+            "model": "qwen2.5:14b",
+            "samples": 12,
+            "loaded": 3,
+            "ok": true,
+            "t_load_ms": 4200.0,
+            "tok_in_per_sec": 0.0,
+            "tok_out_per_sec": 38.5
+          },
+          {
+            "model": "llama3.1:8b",
+            "samples": 5,
+            "loaded": 1,
+            "ok": true,
+            "t_load_ms": 1100.0,
+            "tok_in_per_sec": 0.0,
+            "tok_out_per_sec": 72.1
+          }
+        ]
+      }
+    ],
+    "requests": [
+      {
+        "id": "0e9c...",
+        "client_name": "service-a",
+        "model": "qwen2.5:14b",
+        "endpoint": "/v1/chat/completions",
+        "stream": false,
+        "server_name": "srv1",
+        "status": "completed",
+        "http_status": 200,
+        "prompt_tokens": 312,
+        "output_tokens": 82,
+        "created_at": "2026-05-09T14:01:02Z",
+        "started_at": "2026-05-09T14:01:02Z",
+        "completed_at": "2026-05-09T14:01:08Z",
+        "attempt": 1,
+        "max_attempts": 3,
+        "queue_wait_ms": 120,
+        "model_reloaded": false,
+        "last_failed_server": ""
+      }
+    ]
   }
 }
 ```
 
-##### Поля `ServerState` (v0.7.0)
+##### Поля `ServerState`
 
 | Поле | Тип | Описание |
 |------|-----|----------|
 | `name` | string | имя сервера из конфига |
 | `url` | string | базовый URL |
 | `healthy` | bool | статус по discovery |
-| `current_model` | string \| `""` | загруженная / in-flight модель |
-| `queue_size` | int | число запросов в `pending` |
+| `in_flight` | bool | `true` если на сервере выполняется запрос |
+| `current_model` | string | загруженная / in-flight модель; пустая строка если нет |
+| `queue_depth` | int | число запросов в `pending` |
 | `models` | string[] | известные модели сервера |
-| `perf_samples` | int | число наблюдений в регрессии для `current_model` |
-| `perf_ok` | bool | `true` если регрессия рассчитана (≥ 3 наблюдений, `X^T X` не сингулярна) |
-| `t_load_ms` | float64 | оценка времени загрузки модели (мс); 0 если нет reload-точек или `perf_ok=false` |
-| `tok_in_per_sec` | float64 | пропускная способность по prompt-токенам (tok/s); 0 если нет данных |
-| `tok_out_per_sec` | float64 | пропускная способность по completion-токенам (tok/s); 0 если нет данных |
-| `per_model_stats` | `ModelStats[]` | статистика по всем моделям сервера, sorted by `samples DESC` |
-
-> Поля `tokens_per_sec` и `ttft_ms` **удалены в v0.7.0**. Замена: `tok_out_per_sec` и `t_load_ms` из регрессии.
+| `perf_samples` | int | число наблюдений в регрессии для `current_model`; опускается если 0 |
+| `perf_ok` | bool | `true` если регрессия рассчитана (≥ 3 наблюдений, `X^T X` не сингулярна); опускается если false |
+| `t_load_ms` | float64 | оценка времени загрузки (мс); опускается если 0 |
+| `tok_in_per_sec` | float64 | пропускная способность по prompt-токенам (tok/s); опускается если 0 |
+| `tok_out_per_sec` | float64 | пропускная способность по completion-токенам (tok/s); опускается если 0 |
+| `slow` | bool | последний завершённый запрос занял ≥ 2× от расчётного по регрессии; опускается если false |
+| `failure_count` | int64 | суммарное число упавших попыток на этом сервере с момента старта daemon; опускается если 0 |
+| `per_model_stats` | `ModelStats[]` | статистика по всем моделям сервера, отсортированная по `samples DESC`; опускается если пусто |
 
 ##### Структура `ModelStats`
 
@@ -383,92 +385,45 @@ Sec-WebSocket-Key: ...
 | `samples` | int | общее число наблюдений для пары (server, model) |
 | `loaded` | int | из них — с флагом model_reload (смена модели перед запросом) |
 | `ok` | bool | регрессия валидна |
-| `t_load_ms` | float64 | оценка времени загрузки (мс); 0 если нет данных |
-| `tok_in_per_sec` | float64 | пропускная способность prompt-токенов (tok/s) |
-| `tok_out_per_sec` | float64 | пропускная способность completion-токенов (tok/s) |
+| `t_load_ms` | float64 | оценка времени загрузки (мс); опускается если 0 |
+| `tok_in_per_sec` | float64 | пропускная способность prompt-токенов (tok/s); опускается если 0 |
+| `tok_out_per_sec` | float64 | пропускная способность completion-токенов (tok/s); опускается если 0 |
 
 ##### Поля `RequestState`
 
-Дополнительное поле, добавленное в v0.7.0:
-
 | Поле | Тип | Описание |
 |------|-----|----------|
-| `model_reloaded` | bool | `true` если в начале dispatch этого запроса `current_model` сервера отличалась от запрошенной модели (т.е. произошла смена модели) |
-
-#### `state_diff`
-
-Отправляется по факту изменений. Содержит частичные обновления.
-
-```json
-{
-  "type": "state_diff",
-  "timestamp": "2026-05-09T14:02:11Z",
-  "servers": [
-    {"name": "srv1", "current_model": "llama3.1:8b", "queue_size": 1}
-  ],
-  "requests_upserted": [
-    {
-      "request_id": "1a2b...",
-      "client_name": "service-b",
-      "model": "llama3.1:8b",
-      "server": "srv1",
-      "status": "running",
-      "received_at": "2026-05-09T14:02:11Z",
-      "started_at": "2026-05-09T14:02:11Z",
-      "queue_wait_ms": 95,
-      "duration_ms": null,
-      "server_proc_ms": null,
-      "input_tokens": null,
-      "output_tokens": null,
-      "error": null,
-      "attempts": 1,
-      "model_reloaded": true
-    }
-  ],
-  "requests_removed": []
-}
-```
-
-`requests_removed` содержит массив `request_id`, которые клиент должен убрать из таблицы (например, после `tui.show_completed_minutes`).
-`requests_upserted` использует тот же формат полей запроса, что и `state_snapshot.requests`; допускаются частичные апдейты.
-
-#### `log_line`
-
-Push строки лога.
-
-```json
-{
-  "type": "log_line",
-  "timestamp": "2026-05-09T14:02:11Z",
-  "level": "INFO",
-  "logger": "router",
-  "event": "chose srv2 (model loaded, queue=0)",
-  "request_id": "1a2b...",
-  "context": {"model": "llama3.1:8b", "client": "service-b"}
-}
-```
+| `id` | string | UUID запроса |
+| `client_name` | string | имя из `auth.api_keys` |
+| `model` | string | модель из тела запроса |
+| `endpoint` | string | путь запроса (напр. `/v1/chat/completions`) |
+| `stream` | bool | `true` если streaming-запрос |
+| `server_name` | string | имя назначенного сервера |
+| `status` | string | `queued` / `running` / `completed` / `failed` |
+| `http_status` | int | HTTP-код ответа от бэкенда (0 если ещё не диспатчено) |
+| `prompt_tokens` | int | токенов в prompt |
+| `output_tokens` | int | сгенерированных токенов |
+| `created_at` | string (RFC3339) | момент входа в HTTP-хендлер |
+| `started_at` | string (RFC3339) | момент первого dispatch; опускается если ещё не диспатчено |
+| `completed_at` | string (RFC3339) | момент финализации; опускается если ещё не завершено |
+| `attempt` | int | 1-based номер последней (или текущей) попытки; 0 если ещё не диспатчено |
+| `max_attempts` | int | настроенный `retry.max_attempts` |
+| `queue_wait_ms` | int64 | миллисекунды между `created_at` и `started_at`; 0 если ещё в очереди |
+| `model_reloaded` | bool | `true` если при dispatch произошла смена модели; опускается если false |
+| `last_failed_server` | string | имя сервера, на котором упала предыдущая попытка; пустая строка если ещё не было неудач; опускается если пусто |
+| `error_message` | string | последнее сообщение об ошибке для `failed`-запросов; опускается если пусто |
 
 ### 2.3. Сообщения клиент → серверу
 
-#### `subscribe`
+#### `request_snapshot`
 
-Опциональная подписка на подмножество событий. Если не отправлена — клиент получает всё.
-
-```json
-{
-  "type": "subscribe",
-  "channels": ["state", "log"],
-  "filter": {"levels": ["INFO", "WARNING", "ERROR"]}
-}
-```
-
-#### `ping`
+TUI отправляет этот фрейм, чтобы потребовать у daemon'а актуальный snapshot. Используется при нажатии `F5`.
 
 ```json
-{"type": "ping", "timestamp": "2026-05-09T14:03:00Z"}
+{"type": "request_snapshot", "time": "2026-05-09T14:03:00Z"}
 ```
 
-Ответ: `{"type": "pong", "timestamp": "..."}`. Сервер сам шлёт `ping` каждые 30 с при бездействии.
+Payload не требуется. Daemon отвечает обычным `state_snapshot` (тем же путём, что и при connect).
 
 ### 2.4. Закрытие соединения
 
@@ -590,4 +545,4 @@ curl -s "$PROXY/healthz"
 websocat -H="Authorization: Bearer $ADMIN" "ws://localhost:8080/admin/stream"
 ```
 
-После подключения сразу придёт `state_snapshot`, далее — `state_diff` и `log_line` по мере событий.
+После подключения сразу придёт `state_snapshot`. Нажми `F5` в TUI (или отправь `{"type":"request_snapshot","time":"..."}`) для получения свежего снапшота в любой момент.

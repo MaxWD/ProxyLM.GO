@@ -32,9 +32,17 @@ type Hub struct {
 }
 
 type hubClient struct {
-	conn   *websocket.Conn
-	out    chan []byte
-	closed chan struct{}
+	conn      *websocket.Conn
+	out       chan []byte
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+// closeConn закрывает соединение ровно один раз (sync.Once).
+func (c *hubClient) closeConn(code websocket.StatusCode, reason string) {
+	c.closeOnce.Do(func() {
+		_ = c.conn.Close(code, reason)
+	})
 }
 
 // NewHub создаёт публикатор. snapshotEvery определяет периодичность отправки
@@ -115,12 +123,14 @@ func (h *Hub) Handler() http.HandlerFunc {
 		defer cancel()
 		go client.writer(ctx, h.log)
 
-		// reader: drop incoming messages, но детектим закрытие соединения.
+		// reader: обрабатываем входящие фреймы (request_snapshot), детектим закрытие.
 		for {
-			if _, _, err := conn.Read(ctx); err != nil {
-				_ = conn.Close(websocket.StatusNormalClosure, "")
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				client.closeConn(websocket.StatusNormalClosure, "")
 				return
 			}
+			h.handleClientFrame(ctx, client, data)
 		}
 	}
 }
@@ -136,7 +146,12 @@ func (h *Hub) unregister(c *hubClient) {
 	defer h.mu.Unlock()
 	if _, ok := h.clients[c]; ok {
 		delete(h.clients, c)
-		close(c.closed)
+		// Защита от двойного закрытия: closeAll может уже закрыть c.closed.
+		select {
+		case <-c.closed:
+		default:
+			close(c.closed)
+		}
 	}
 }
 
@@ -154,7 +169,7 @@ func (h *Hub) broadcastSnapshot(ctx context.Context) {
 		case c.out <- data:
 		default:
 			// клиент не успевает — обрываем соединение, writer закроет conn
-			_ = c.conn.Close(websocket.StatusPolicyViolation, "slow consumer")
+			c.closeConn(websocket.StatusPolicyViolation, "slow consumer")
 		}
 	}
 }
@@ -267,7 +282,35 @@ func (h *Hub) closeAll() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for c := range h.clients {
-		_ = c.conn.Close(websocket.StatusGoingAway, "shutdown")
+		c.closeConn(websocket.StatusGoingAway, "shutdown")
+		// Закрываем c.closed, чтобы writer-горутина вышла из select.
+		select {
+		case <-c.closed:
+		default:
+			close(c.closed)
+		}
+	}
+}
+
+// handleClientFrame разбирает входящий фрейм от TUI-клиента и реагирует на него.
+// Сейчас поддерживается только TypeRequestSnapshot (F5): отправляет немедленный
+// snapshot именно этому клиенту через c.out (без broadcast).
+// Неизвестные типы игнорируются с debug-логом.
+func (h *Hub) handleClientFrame(ctx context.Context, c *hubClient, data []byte) {
+	var env Envelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		h.log.Debug("ipc: invalid frame from client", "error", err.Error())
+		return
+	}
+	switch env.Type {
+	case TypeRequestSnapshot:
+		// ctx — это per-connection context из reader-loop'а (`r.Context()` +
+		// WithCancel). Если клиент уже отключился — buildSnapshot отменится
+		// и мы не тратим ресурсы на формирование snapshot'а в никуда.
+		snap := h.buildSnapshot(ctx)
+		h.sendTo(c, snap)
+	default:
+		h.log.Debug("ipc: unknown frame type from client", "type", env.Type)
 	}
 }
 
@@ -296,7 +339,7 @@ func (c *hubClient) writer(ctx context.Context, log *slog.Logger) {
 			cancel()
 			if err != nil {
 				log.Debug("ipc: write failed, closing", "error", err.Error())
-				_ = c.conn.Close(websocket.StatusInternalError, "write failed")
+				c.closeConn(websocket.StatusInternalError, "write failed")
 				return
 			}
 		}

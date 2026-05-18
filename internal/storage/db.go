@@ -52,9 +52,6 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	return &DB{DB: sqlDB, path: path}, nil
 }
 
-// Path возвращает абсолютный путь к файлу БД (для логов и информационных сообщений).
-func (d *DB) Path() string { return d.path }
-
 // Migrate применяет все миграции из migrations/*.sql в лексикографическом порядке.
 // Каждая миграция применяется внутри транзакции и регистрируется в schema_migrations.
 // Идемпотентно: уже применённые миграции пропускаются.
@@ -147,7 +144,7 @@ func buildDSN(path string) string {
 	q := url.Values{}
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", "synchronous(NORMAL)")
-	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "busy_timeout(10000)")
 	q.Add("_pragma", "foreign_keys(ON)")
 	// file:<path>?... — путь форматируем как есть; для Windows '\' допустим.
 	return "file:" + path + "?" + q.Encode()

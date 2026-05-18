@@ -1,5 +1,14 @@
 # ProxyLM.GO
 
+[![CI](https://github.com/MaxWD/ProxyLM.GO/actions/workflows/ci.yml/badge.svg)](https://github.com/MaxWD/ProxyLM.GO/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/MaxWD/ProxyLM.GO?include_prereleases)](https://github.com/MaxWD/ProxyLM.GO/releases)
+[![Go](https://img.shields.io/github/go-mod/go-version/MaxWD/ProxyLM.GO)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+[English](README.md) · **На русском**
+
+---
+
 ProxyLM.GO — это посредник между вашими приложениями и сервисами больших языковых моделей (LLM). Для приложения он выглядит как обычный OpenAI-совместимый сервер, но за его спиной может стоять любое количество фактических серверов — как локальные (LM Studio, Ollama), так и облачные. Главное, чтобы сервер поддерживал OpenAI API. ProxyLM.GO сам решает, к какому из них адресовать каждый запрос.
 
 Главная задача — **выжать максимум из имеющейся инфраструктуры LLM-серверов**: не дать каждому серверу тратить время на постоянное переключение моделей и одновременно равномерно нагружать все доступные серверы, чтобы результат приходил к пользователю как можно быстрее. Каждая LLM-модель занимает много памяти видеокарты; если на одном сервере доступно несколько моделей и приложения дёргают их вперемешку, серверу приходится выгружать одну модель и подгружать другую буквально на каждом запросе — это занимает секунды-минуты, и всё это время пользователи ждут. ProxyLM.GO собирает входящие запросы в очередь и **группирует их по модели**: сначала все запросы к модели A, потом все к модели B — модель загружается один раз и обрабатывает всю очередь, прежде чем её сменят. Если ту же модель умеют несколько серверов, запросы распределяются между ними параллельно и каждый новый запрос уходит к наименее загруженному — простаивающих машин не остаётся, и одна и та же ферма GPU отдаёт результаты заметно быстрее.
@@ -8,15 +17,17 @@ ProxyLM.GO — это посредник между вашими приложе�
 
 ## Возможности
 
-- OpenAI-совместимый API: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/healthz`
-- **Model-affinity queue**: запросы для текущей модели сервера обслуживаются до конца, прежде чем модель будет переключена
-- Несколько backend-серверов, авто-discovery моделей через `/v1/models`, failover на резервный сервер
-- Streaming (SSE) с прозрачным проксированием чанков
-- Bearer-аутентификация по поименованным API-ключам (имя клиента попадает в логи и историю; ключ — нет)
-- История запросов в SQLite, retention 30 дней (настраивается)
-- btop-подобный TUI на Bubble Tea — отдельный процесс через WebSocket к daemon'у
-- Установка как Windows Service / systemd unit / launchd job одной командой (`proxylm service install`)
-- Portable: конфиг и БД лежат рядом с бинарником
+- **Model-affinity queue** — воркер каждого сервера обслуживает все запросы в очереди для текущей модели, прежде чем переключиться; предотвращает лишние swap'ы модели (INV-1..INV-3)
+- **OpenAI-совместимый API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/healthz`
+- **Несколько бэкендов** — маршрутизация на любое число OpenAI-совместимых серверов (LM Studio, Ollama или облако); приоритет на бэкенд настраивается
+- **Авто-discovery** — периодически опрашивает `/v1/models` каждого бэкенда; помечает unhealthy после N неудачных попыток
+- **Retry и failover** — экспоненциальный backoff + rolling exclusion упавшего сервера (INV-5)
+- **SSE streaming** — прозрачное побайтовое проксирование; без буферизации, без retry после отправки первого чанка клиенту (INV-6)
+- **Bearer-аутентификация** — поимённые API-ключи; имя клиента попадает в логи и историю, сам ключ — нет
+- **История запросов в SQLite** — pure-Go, без CGO (`modernc.org/sqlite`); настраиваемый retention
+- **Bubble Tea TUI** — таблица запросов в реальном времени, статус серверов; подключается к daemon'у через WebSocket; авто-переподключение при разрыве
+- **Системная служба** — установка как Windows Service, systemd unit или launchd job одной командой
+- **Portable** — конфиг и БД лежат рядом с бинарником; без установки
 
 ## Архитектура
 
@@ -48,7 +59,7 @@ ProxyLM.GO — это посредник между вашими приложе�
 
 ### Сборка из исходников
 
-Требуется Go 1.22+:
+Требуется Go 1.25.10+. CGO не требуется.
 
 ```
 git clone <repo-url> proxylm.go
@@ -154,7 +165,9 @@ F1 Help   F5 Refresh   / Filter   Tab Header/Requests/Info   Click — выбо�
 - `Tokens` (11 символов) — формат `NNN→NNNN`; во время streaming output показывается `…` вместо числа.
 - `RM` (2 символа) — однобитовая отметка «модель грузилась для задачи» (`✓` / `—`) плюс разделитель.
 
-Хоткеи: `F1` — справка, `F5` — переподключение / refresh снапшота, `/` — фильтр по таблице, `Tab` — переключение Header/Requests/Info, клик мышкой — выбор строки, `F10` или `q` — выход.
+Хоткеи: `F1` — help-overlay, `F5` — refresh снапшота (отправляет `request_snapshot` через WebSocket), `/` — фильтр по таблице, `Tab` — переключение панелей (Header / Requests / Info), `↑`/`↓` — навигация, `Enter` — выбор, `Esc` — закрыть overlay, `F10` или `q` — выход.
+
+При разрыве WS-соединения TUI автоматически переподключается с экспоненциальным backoff (1 с → cap 30 с). Заголовок показывает `connecting…` / `reconnecting…` / `live`.
 
 Завершённые запросы скрываются из таблицы через `tui.show_completed_minutes` (по умолчанию 30 минут) — но остаются в SQLite.
 
@@ -232,16 +245,31 @@ golangci-lint run
 
 ## Документация
 
-- Архитектура: [`docs/ARCHITECTURE.ru.md`](./docs/ARCHITECTURE.ru.md)
-- Полное ТЗ (FR / NFR / инварианты / acceptance-критерии): [`docs/SRS.ru.md`](./docs/SRS.ru.md)
-- API-контракт (OpenAI и admin/IPC): [`docs/API.ru.md`](./docs/API.ru.md)
-- Роли и владельцы документов: [`docs/AGENTS.ru.md`](./docs/AGENTS.ru.md)
-- Идеи и задачи на будущее (парковка, не roadmap): [`docs/FUTURE.ru.md`](./docs/FUTURE.ru.md)
+| Документ | Содержание |
+|---|---|
+| [docs/ARCHITECTURE.ru.md](docs/ARCHITECTURE.ru.md) | Архитектура системы, алгоритм планировщика, retry/failover, streaming, IPC, схема БД, структура кода |
+| [docs/SRS.ru.md](docs/SRS.ru.md) | ТЗ: FR/NFR, инварианты, acceptance-критерии, out-of-scope |
+| [docs/API.ru.md](docs/API.ru.md) | API-контракт: эндпоинты OpenAI v1, admin/IPC WebSocket, формат backend-вызовов |
+| [docs/AGENTS.ru.md](docs/AGENTS.ru.md) | Роли участников и карта владельцев документов |
+
+## Участие в разработке
+
+Приветствуются pull request'ы. Ознакомьтесь с [CONTRIBUTING.md](CONTRIBUTING.md) перед открытием PR.
+
+## Безопасность
+
+Для сообщения об уязвимости см. [SECURITY.md](SECURITY.md).
 
 ## Лицензия
 
-MIT.
+MIT — см. [LICENSE](LICENSE).
 
-## Статус
+## Built With
 
-Pre-1.0 alpha. Архитектурный скелет и документация готовы; реализация ядра в работе. Репозиторий приватный — issue tracker и канал обратной связи согласовываются отдельно.
+- [Bubble Tea](https://github.com/charmbracelet/bubbletea) — TUI-фреймворк
+- [Lip Gloss](https://github.com/charmbracelet/lipgloss) — стилизация терминала
+- [chi](https://github.com/go-chi/chi) — HTTP-роутер
+- [coder/websocket](https://github.com/coder/websocket) — WebSocket (без CGO)
+- [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) — pure-Go SQLite
+- [cobra](https://github.com/spf13/cobra) — CLI-фреймворк
+- [kardianos/service](https://github.com/kardianos/service) — кроссплатформенный менеджер служб

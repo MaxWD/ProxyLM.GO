@@ -17,11 +17,8 @@ import (
 // Run вызывается worker'ом и должен выполнить апстрим-вызов на srv.
 // Поле done — package-private; используется Scheduler.Submit для приёма результата.
 type Job struct {
-	ID         string
-	Model      string
-	Endpoint   string
-	ClientName string
-	Stream     bool
+	ID    string
+	Model string
 
 	// Run — пользовательский handler. Должен вернуть JobResult со статусом
 	// и пометить ResponseStarted=true как только первый байт ушёл клиенту (INV-6).
@@ -366,6 +363,12 @@ func (s *Scheduler) worker(ctx context.Context, srv *ServerInfo) {
 		case <-srv.Notify:
 		}
 		for {
+			// M8: проверяем ctx перед каждой итерацией inner-loop, чтобы при
+			// shutdown не зависать в dispatch'е ещё одного Job.
+			if ctx.Err() != nil {
+				s.failPending(srv, ctx.Err())
+				return
+			}
 			var j *Job
 			switch {
 			case s.pool != nil && s.coverageAware:
@@ -611,7 +614,12 @@ func (s *Scheduler) failPending(srv *ServerInfo, err error) {
 	srv.Queue = nil
 	srv.Unlock()
 	for _, j := range queue {
-		j.done <- JobResult{Err: fmt.Errorf("scheduler stopped: %w", err)}
+		// j.done буферизован (1); guard защищает от отправки в уже прочитанный канал
+		// (симметрично с failServerQueue — H6).
+		select {
+		case j.done <- JobResult{Err: fmt.Errorf("scheduler stopped: %w", err)}:
+		default:
+		}
 	}
 	if s.pool != nil {
 		for _, j := range s.pool.drainAll() {
