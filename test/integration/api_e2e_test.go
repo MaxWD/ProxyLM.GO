@@ -174,11 +174,20 @@ func TestE2E_ChatCompletions_NonStream(t *testing.T) {
 		t.Errorf("model в ответе = %v, want test-model", got["model"])
 	}
 
-	// проверка истории
-	time.Sleep(50 * time.Millisecond) // INSERT после ответа клиенту
-	records, err := history.List(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("history.List: %v", err)
+	// История пишется асинхронно (persistRecord goroutine) — polling до записи
+	// в статусе completed (cap 2s). Заменяет фиксированный time.Sleep, который
+	// был нестабильным на медленных CI-раннерах.
+	var records []*core.RequestRecord
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		records, err = history.List(context.Background(), 10)
+		if err != nil {
+			t.Fatalf("history.List: %v", err)
+		}
+		if len(records) > 0 && records[0].Status == core.StatusCompleted {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	if len(records) == 0 {
 		t.Fatal("в истории должна быть запись")

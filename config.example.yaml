@@ -34,7 +34,7 @@ auth:
 #                                   своей модели, он не свопает её, пока для неё
 #                                   ещё есть задачи в очереди
 routing:
-  strategy: model_affinity_least_busy
+  strategy: preserve_model_coverage
 
 # Retry при ошибках бэкенда
 #

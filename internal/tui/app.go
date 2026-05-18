@@ -25,22 +25,43 @@ const (
 	paneInfo
 )
 
+// connState — состояние WebSocket-соединения с daemon'ом.
+type connState int
+
+const (
+	connStateConnecting   connState = iota // первое подключение
+	connStateLive                          // подключён, данные приходят
+	connStateReconnecting                  // соединение оборвалось, идёт реконнект
+)
+
 // flashEntry tracks when a server's current_model last changed, for 2-second yellow flash.
 type flashEntry struct {
-	model   string
 	flashAt time.Time
 }
 
 // model is the Bubble Tea Model. All state is held here; Update is a pure function.
 type model struct {
 	// connection
-	client *ipc.Client
+	client  *ipc.Client
+	connURL string // адрес daemon'а, для отображения в loading pane
+
+	// ctx/cancel для остановки фоновых горутин при выходе из TUI.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// состояние соединения
+	connStatus   connState
+	reconnecting bool // true — в данный момент происходит реконнект
 
 	// daemon state
-	version   string
-	servers   []ipc.ServerState
-	requests  map[string]ipc.RequestState // keyed by request ID
-	connError string
+	version          string
+	servers          []ipc.ServerState
+	requests         map[string]ipc.RequestState // keyed by request ID
+	snapshotReceived bool                        // true после первого state_snapshot
+	connError        string
+
+	// последняя ошибка парсинга фрейма — показывается в footer
+	lastParseError string
 
 	// UI layout
 	width  int
@@ -77,17 +98,31 @@ type model struct {
 
 	// TTL for completed/failed requests (minutes)
 	ttlMinutes int
+
+	// Help overlay
+	showHelp bool
 }
 
 // Run starts the TUI with an already-dialled WebSocket client.
-// The caller owns the client and closes it after Run returns.
+// addr — адрес daemon'а (для loading pane). The caller owns the client and closes it after Run returns.
 func Run(ctx context.Context, client *ipc.Client) error {
+	return RunWithAddr(ctx, client, "")
+}
+
+// RunWithAddr — как Run, но с явным указанием addr для отображения в loading pane.
+func RunWithAddr(ctx context.Context, client *ipc.Client, addr string) error {
 	ti := textinput.New()
 	ti.Placeholder = "model / client / server / status"
 	ti.CharLimit = 80
 
+	mCtx, mCancel := context.WithCancel(ctx)
+
 	m := &model{
 		client:      client,
+		connURL:     addr,
+		ctx:         mCtx,
+		cancel:      mCancel,
+		connStatus:  connStateConnecting,
 		requests:    make(map[string]ipc.RequestState),
 		flashMap:    make(map[string]flashEntry),
 		filterInput: ti,
@@ -95,7 +130,10 @@ func Run(ctx context.Context, client *ipc.Client) error {
 		activePane:  paneRequests,
 	}
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx), tea.WithMouseCellMotion())
-	if _, err := p.Run(); err != nil {
+	_, err := p.Run()
+	// Отменяем ctx горутин.
+	mCancel()
+	if err != nil {
 		return err
 	}
 	// При обрыве IPC altscreen уничтожает экран и пользователь не видит причину
@@ -115,8 +153,17 @@ type recvMsg struct {
 	err     error
 }
 
+// connLostMsg — соединение оборвалось, идёт реконнект.
+type connLostMsg struct{}
+
+// connRestoredMsg — реконнект успешен, соединение восстановлено.
+type connRestoredMsg struct{}
+
 // tickMsg is sent every second for elapsed-time refresh and flash expiry.
 type tickMsg time.Time
+
+// refreshDoneMsg — визуальный сигнал «refresh sent» отработал (500ms).
+type refreshDoneMsg struct{}
 
 // ---- Init -------------------------------------------------------------------
 
@@ -135,10 +182,20 @@ func tickEvery() tea.Cmd {
 
 // ---- waitForMessage ---------------------------------------------------------
 
+// waitForMessage запускает горутину, которая читает следующий WS-фрейм.
+// Если Recv возвращает ipc.ErrReconnecting — это сигнал для TUI о потере связи.
+// Если ctx отменён — горутина завершается.
 func (m *model) waitForMessage() tea.Cmd {
 	return func() tea.Msg {
-		env, payload, err := m.client.Recv(context.Background())
-		return recvMsg{env: env, payload: payload, err: err}
+		env, payload, err := m.client.Recv(m.ctx)
+		if err != nil {
+			if m.ctx.Err() != nil {
+				// TUI завершается — не нужно ничего делать.
+				return recvMsg{err: m.ctx.Err()}
+			}
+			return recvMsg{err: err}
+		}
+		return recvMsg{env: env, payload: payload}
 	}
 }
 
@@ -168,13 +225,45 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case recvMsg:
 		if msg.err != nil {
+			// ctx отменён — тихо выходим.
+			if m.ctx.Err() != nil {
+				return m, tea.Quit
+			}
+			// Любая другая ошибка после исчерпания reconnect-попыток
+			// (Recv уже пробовал реконнектиться сам).
 			m.connError = msg.err.Error()
 			return m, tea.Quit
 		}
-		m.handleEnvelope(msg.env, msg.payload)
+		// Восстановление после реконнекта.
+		if m.connStatus == connStateReconnecting {
+			m.connStatus = connStateLive
+			m.reconnecting = false
+		} else {
+			m.connStatus = connStateLive
+		}
+		if err := m.handleEnvelope(msg.env, msg.payload); err != nil {
+			// Сохраняем parse-error в footer, не валим TUI.
+			m.lastParseError = err.Error()
+		} else {
+			m.lastParseError = ""
+		}
 		// Diff/snapshot могли убрать выбранную строку — клампим.
 		m.clampSelected()
 		return m, m.waitForMessage()
+
+	case connLostMsg:
+		m.connStatus = connStateReconnecting
+		m.reconnecting = true
+		return m, nil
+
+	case connRestoredMsg:
+		m.connStatus = connStateLive
+		m.reconnecting = false
+		return m, nil
+
+	case refreshDoneMsg:
+		// Сброс визуального flash «refreshing…» если нужен.
+		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -303,27 +392,30 @@ func (m *model) refreshInfoFromHeader() {
 	}
 }
 
-// handleEnvelope processes a decoded WebSocket message.
-func (m *model) handleEnvelope(env ipc.Envelope, payload json.RawMessage) {
+// handleEnvelope processes a decoded WebSocket message. Returns non-nil error
+// only for parse failures (TUI should display but not quit on these).
+func (m *model) handleEnvelope(env ipc.Envelope, payload json.RawMessage) error {
 	switch env.Type {
 	case ipc.TypeHello:
 		var h ipc.HelloPayload
-		if err := json.Unmarshal(payload, &h); err == nil {
-			m.version = h.Version
-			// Если daemon явно передал TTL — применяем; 0 трактуем как «не задано»
-			// (daemon тоже подставляет дефолт 30 при загрузке конфига, так что
-			// 0 здесь означает «старый daemon без поля»). Сохраняем встроенный
-			// fallback 30 минут.
-			if h.ShowCompletedMinutes > 0 {
-				m.ttlMinutes = h.ShowCompletedMinutes
-			}
+		if err := json.Unmarshal(payload, &h); err != nil {
+			return fmt.Errorf("bad envelope (hello): %w", err)
+		}
+		m.version = h.Version
+		// Если daemon явно передал TTL — применяем; 0 трактуем как «не задано»
+		// (daemon тоже подставляет дефолт 30 при загрузке конфига, так что
+		// 0 здесь означает «старый daemon без поля»). Сохраняем встроенный
+		// fallback 30 минут.
+		if h.ShowCompletedMinutes > 0 {
+			m.ttlMinutes = h.ShowCompletedMinutes
 		}
 
 	case ipc.TypeStateSnapshot:
 		var snap ipc.StateSnapshotPayload
 		if err := json.Unmarshal(payload, &snap); err != nil {
-			return
+			return fmt.Errorf("bad envelope (state_snapshot): %w", err)
 		}
+		m.snapshotReceived = true
 		// Track flash: detect model changes vs existing server state.
 		oldCount := len(m.servers)
 		m.applyServerList(snap.Servers)
@@ -338,38 +430,8 @@ func (m *model) handleEnvelope(env ipc.Envelope, payload json.RawMessage) {
 			m.resizeViewports()
 		}
 
-	case ipc.TypeStateDiff:
-		var diff struct {
-			Servers          []ipc.ServerState  `json:"servers"`
-			RequestsUpserted []ipc.RequestState `json:"requests_upserted"`
-			RequestsRemoved  []string           `json:"requests_removed"`
-		}
-		if err := json.Unmarshal(payload, &diff); err != nil {
-			return
-		}
-		oldCount := len(m.servers)
-		if len(diff.Servers) > 0 {
-			// Merge: update only the named servers.
-			for _, updated := range diff.Servers {
-				m.applyServerUpdate(updated)
-			}
-		}
-		for _, r := range diff.RequestsUpserted {
-			m.requests[r.ID] = r
-		}
-		for _, id := range diff.RequestsRemoved {
-			delete(m.requests, id)
-		}
-		if oldCount != len(m.servers) {
-			m.resizeViewports()
-		}
-
-	case ipc.TypeLogLine:
-		// LogPane убран в v0.8.0 — лог-поток от daemon'а пока приходит, но
-		// мы его игнорируем (поток оставлен ради обратной совместимости wire-
-		// протокола). Если в будущем понадобится «events»-feed в InfoPane,
-		// он встанет сюда.
 	}
+	return nil
 }
 
 // applyServerList replaces m.servers and tracks model changes for flash.
@@ -382,43 +444,26 @@ func (m *model) applyServerList(incoming []ipc.ServerState) {
 	for _, s := range incoming {
 		if old, ok := oldByName[s.Name]; ok {
 			if old.CurrentModel != s.CurrentModel {
-				m.flashMap[s.Name] = flashEntry{model: s.CurrentModel, flashAt: now}
+				m.flashMap[s.Name] = flashEntry{flashAt: now}
 			}
 		}
 	}
 	m.servers = incoming
 }
 
-// applyServerUpdate merges a single server diff into m.servers.
-func (m *model) applyServerUpdate(updated ipc.ServerState) {
-	now := time.Now()
-	for i, s := range m.servers {
-		if s.Name == updated.Name {
-			if updated.CurrentModel != "" && s.CurrentModel != updated.CurrentModel {
-				m.flashMap[s.Name] = flashEntry{model: updated.CurrentModel, flashAt: now}
-			}
-			// Merge non-zero fields.
-			if updated.CurrentModel != "" {
-				m.servers[i].CurrentModel = updated.CurrentModel
-			}
-			if updated.URL != "" {
-				m.servers[i].URL = updated.URL
-			}
-			m.servers[i].Healthy = updated.Healthy
-			m.servers[i].InFlight = updated.InFlight
-			m.servers[i].QueueDepth = updated.QueueDepth
-			if len(updated.Models) > 0 {
-				m.servers[i].Models = updated.Models
-			}
-			return
-		}
-	}
-	// Server not found in existing list — append.
-	m.servers = append(m.servers, updated)
-}
-
 // handleKey handles all keyboard events, respecting filter mode.
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Help overlay перехватывает все клавиши кроме закрывающих.
+	if m.showHelp {
+		switch {
+		case key.Matches(msg, keys.Help),
+			key.Matches(msg, keys.Esc),
+			key.Matches(msg, keys.Quit):
+			m.showHelp = false
+		}
+		return m, nil
+	}
+
 	// Filter input mode.
 	if m.filterActive {
 		switch {
@@ -442,13 +487,17 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Normal mode.
 	switch {
 	case key.Matches(msg, keys.Quit):
+		m.cancel()
 		return m, tea.Quit
 
-	case key.Matches(msg, keys.Refresh):
-		// F5: send ping to daemon to prompt a fresh snapshot.
-		// The daemon will reply with state_snapshot on next message.
-		// Nothing special needed client-side; waitForMessage loop is already running.
+	case key.Matches(msg, keys.Help):
+		m.showHelp = true
 		return m, nil
+
+	case key.Matches(msg, keys.Refresh):
+		// F5: отправить daemon'у запрос немедленного snapshot.
+		// Snapshot придёт через обычный Recv-поток.
+		return m, m.sendRequestSnapshot()
 
 	case key.Matches(msg, keys.Filter):
 		m.filterActive = true
@@ -506,6 +555,16 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.scrollEnd()
 	}
 	return m, nil
+}
+
+// sendRequestSnapshot возвращает tea.Cmd, отправляющую daemon'у request_snapshot.
+// Выполняется в горутине чтобы не блокировать Update.
+func (m *model) sendRequestSnapshot() tea.Cmd {
+	return func() tea.Msg {
+		_ = m.client.RequestSnapshot(m.ctx)
+		// Snapshot придёт через Recv — просто возвращаем nil msg.
+		return nil
+	}
 }
 
 // visibleRequests returns the filtered+sorted list that is currently shown.
@@ -583,13 +642,15 @@ func (m *model) pageUp() tea.Cmd {
 func (m *model) pageDown() tea.Cmd {
 	switch m.activePane {
 	case paneRequests:
-		max := len(m.visibleRequests()) - 1
+		visible := m.visibleRequests()
+		max := len(visible) - 1
+		if max < 0 {
+			m.selectedIdx = 0
+			return nil
+		}
 		m.selectedIdx += m.reqViewport.Height
 		if m.selectedIdx > max {
 			m.selectedIdx = max
-		}
-		if m.selectedIdx < 0 {
-			m.selectedIdx = 0
 		}
 		m.refreshInfoFromRequests()
 	case paneInfo:
@@ -739,27 +800,41 @@ func (m *model) View() string {
 	now := time.Now()
 
 	// Клампим selectedServerIdx — серверы могли уйти/прийти.
-	if m.selectedServerIdx >= len(m.servers) {
-		m.selectedServerIdx = len(m.servers) - 1
+	// (мутация в View допустима только для клампинга индекса — чистый инвариант
+	// «не выходить за пределы слайса» без побочных эффектов на логику).
+	clampedIdx := m.selectedServerIdx
+	if clampedIdx >= len(m.servers) {
+		clampedIdx = len(m.servers) - 1
 	}
-	if m.selectedServerIdx < 0 {
-		m.selectedServerIdx = 0
+	if clampedIdx < 0 {
+		clampedIdx = 0
 	}
+
+	// Title — показывает версию daemon'а или статус соединения.
+	ver := m.connStatusLabel()
+	title := StyleTitle.Render("Proxy") + StyleHeader.Render("LM.GO") + StyleTitle.Render(" "+ver)
 
 	// Panels.
 	header := renderHeaderBar(m.servers, reqSlice, flashModels, m.ttlMinutes, m.width,
-		m.activePane == paneHeader, m.selectedServerIdx)
-	reqPanel := renderRequestTable(
-		&m.reqViewport,
-		reqSlice,
-		m.servers,
-		m.selectedIdx,
-		m.filterText,
-		m.width,
-		m.activePane,
-		now,
-		m.ttlMinutes,
-	)
+		m.activePane == paneHeader, clampedIdx)
+
+	var reqPanel string
+	if !m.snapshotReceived {
+		reqPanel = renderLoadingPane(m.connURL, m.width, m.activePane)
+	} else {
+		reqPanel = renderRequestTable(
+			&m.reqViewport,
+			reqSlice,
+			m.servers,
+			m.selectedIdx,
+			m.filterText,
+			m.width,
+			m.activePane,
+			now,
+			m.ttlMinutes,
+		)
+	}
+
 	infoPanel := renderInfoPane(
 		&m.infoViewport,
 		m.activePane,
@@ -768,16 +843,8 @@ func (m *model) View() string {
 		m.lookupInfoServer(),
 		m.width,
 	)
-	footer := renderFooter(m.filterActive, m.width)
 
-	// Version in title area.
-	ver := m.version
-	if ver == "" {
-		ver = "connecting…"
-	}
-	// "Proxy" — bright blue (StyleTitle), "LM.GO" — white bold (StyleHeader),
-	// версия — обратно в StyleTitle.
-	title := StyleTitle.Render("Proxy") + StyleHeader.Render("LM.GO") + StyleTitle.Render(" "+ver)
+	footer := m.buildFooter()
 
 	sections := []string{title, header, reqPanel, infoPanel}
 
@@ -786,7 +853,39 @@ func (m *model) View() string {
 	}
 	sections = append(sections, footer)
 
-	return lipgloss.JoinVertical(lipgloss.Left, sections...)
+	base := lipgloss.JoinVertical(lipgloss.Left, sections...)
+
+	// Help overlay — рендерится поверх всего содержимого.
+	if m.showHelp {
+		return renderHelpOverlay(m.width, m.height)
+	}
+
+	return base
+}
+
+// connStatusLabel возвращает строку статуса соединения для title.
+func (m *model) connStatusLabel() string {
+	switch m.connStatus {
+	case connStateConnecting:
+		return "connecting…"
+	case connStateReconnecting:
+		return StyleFlash.Render("reconnecting…")
+	default:
+		if m.version != "" {
+			return m.version
+		}
+		return "live"
+	}
+}
+
+// buildFooter собирает строку footer с учётом parse-error и ширины.
+func (m *model) buildFooter() string {
+	// parse-error имеет приоритет над обычным footer.
+	if m.lastParseError != "" {
+		errText := StyleError.Render("parse error: " + m.lastParseError)
+		return StyleFooter.Width(m.width - 2).Render(errText)
+	}
+	return renderFooter(m.filterActive, m.width)
 }
 
 // lookupInfoRequest возвращает указатель на RequestState с id == infoRequestID,

@@ -182,6 +182,7 @@ Streaming nuance: if the error arrives **before the first SSE chunk** — retry 
 
 ## 7. Discovery
 
+- **Initial healthcheck:** on daemon startup, before accepting HTTP requests, a single synchronous poll of `GET /v1/models` is performed for every backend server regardless of `discovery.enabled`. Servers with an explicit non-empty `backends[].models` list are marked healthy immediately without a poll.
 - Every `discovery.interval_seconds` (default 30 s), poll `/v1/models` on each server.
 - One shared `time.Ticker`, then fan-out goroutines (one per server) in a loop; results collected into `ModelMap: map[string]map[string]struct{}`.
 - Used by the router.
@@ -194,9 +195,9 @@ The daemon exposes an additional WebSocket endpoint (`/admin/stream`) on the mai
 
 WebSocket library: `github.com/coder/websocket` (minimalist, idiomatic for Go 1.21+, no external dependencies).
 
-The TUI (Bubble Tea) connects via the same binary in `proxylm tui --connect ...` mode, receiving JSON messages of two kinds:
-- `state`: snapshot + diff (requests, servers, statistics).
-- `log`: a log line.
+The TUI (Bubble Tea) connects via the same binary in `proxylm tui --connect ...` mode. On connect the daemon immediately sends a `state_snapshot` envelope (type `state_snapshot`, field `time`, field `payload` containing `servers` and `requests` arrays). The TUI may request a fresh snapshot at any time by sending `{"type": "request_snapshot", "time": "<RFC3339>"}` — this is the F5 refresh mechanism.
+
+**TUI auto-reconnect:** on WebSocket disconnection the TUI client performs infinite exponential backoff (1 s, 2 s, …, cap 30 s). The title shows `connecting…` / `reconnecting…` / `live`. Exit only via `q` / `F10` / Ctrl-C.
 
 Authentication: the same Bearer mechanism, but using a dedicated admin key.
 
@@ -320,12 +321,12 @@ ProxyLM.GO/
 │   │       ├── 0001_init.sql
 │   │       └── 0002_model_reloaded.sql  # ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0
 │   ├── ipc/
-│   │   ├── messages.go           # JSON message types (state_snapshot/diff/log_line/...)
+│   │   ├── messages.go           # JSON message types (Envelope, state_snapshot, request_snapshot, hello, ...)
 │   │   ├── server.go             # publisher on the daemon side
 │   │   └── client.go             # WebSocket client (used by TUI)
 │   ├── tui/
 │   │   ├── app.go                # Bubble Tea Model/Update/View
-│   │   ├── widgets.go            # HeaderBar, RequestTable, LogPane (lipgloss + bubbles)
+│   │   ├── widgets.go            # HeaderBar, RequestTable, InfoPane (lipgloss + bubbles)
 │   │   ├── styles.go             # lipgloss styles
 │   │   └── keys.go               # hotkeys (F5, F10, q, /)
 │   └── service/
@@ -378,14 +379,13 @@ Dependencies are minimized: all core HTTP server/client code is stdlib. Third-pa
 │  0045  … q     14:02:20    qwen2.5:14b     srv1*   —   —           —     —/—         …       │
 │  0040  ✗ fail  13:55:40    qwen2.5:14b     srv1    ✓   13:55:55   15.0s  —/—         ERR(2)  │
 │                                                                                              │
-├─ Log ────────────────────────────────────────────────────────────────────────────────────────┤
-│ 14:02:11 INFO  api      accepted req#0043 client=service-b model=llama3.1:8b               │
-│ 14:02:11 INFO  router   chose srv2 (model loaded, queue=0)                                  │
-│ 14:02:11 INFO  srv2     model swap: idle → llama3.1:8b                                      │
-│ 14:01:08 INFO  srv1     completed req#0042 6.3s 82 tok                                      │
-│ 14:01:02 INFO  api      accepted req#0042 client=service-a model=qwen2.5:14b                │
+├─ Info ────────────────────────────────────────────────────────────────────────────────────────┤
+│ ID           0e9c...    Created    14:01:02   Queue wait  120ms                              │
+│ Client       service-a  Started   14:01:02   Prompt tok  312                                │
+│ Model        qwen2.5:14b           Completed 14:01:08   Output tok  82                      │
+│ Server       srv1       Status    completed (1/3)       RM  —                               │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
-   Tab Header/Requests/Log  F5 Refresh  F10 Quit
+   F1 Help  Tab Header/Requests/Info  F5 Refresh  F10 Quit
 ```
 
 Changes relative to v0.1.0:
@@ -395,23 +395,29 @@ Changes relative to v0.1.0:
 - Server header shows regression metrics: `t_load · ↓tok_in/s · ↑tok_out/s`. If `PerfOK=false` or model is not loaded — the metrics line is empty; if there are no reload observations — `t_load` is replaced with `—`.
 - Active server in the header is marked with `▸`.
 
-Bubble Tea architecture: `Model` holds a snapshot of `[]ServerView`, `[]RequestRow`, and a circular log buffer. `Update(msg)` handles three sources:
-1. WebSocket messages (`state_snapshot` / `state_diff` / `log_line`) — via `tea.Cmd` with a reader goroutine.
+Bubble Tea architecture: `Model` holds a snapshot of `[]ServerView`, `[]RequestRow`, and detail state. `Update(msg)` handles three sources:
+1. WebSocket messages (`state_snapshot`) — via `tea.Cmd` with a reader goroutine.
 2. Tick for periodic tasks (TUI auto-hide of completed records per `tui.show_completed_minutes`).
-3. Key events (`Tab`, `F5`, `F10`, `q`, `/`, `↑`, `↓`, `Enter`).
+3. Key events (`F1`, `F5`, `Tab`, `F10`, `q`, `/`, `↑`, `↓`, `Enter`, `Esc`).
 
 `View()` renders the entire TUI via `lipgloss` styles (border, foreground, padding).
 
-### Interactive header (paneHeader)
+### Three panes
 
-Starting with v0.7.0, the TUI supports three named panes: `paneHeader`, `paneRequests`, `paneLog`. `Tab` cycles focus: Header → Requests → Log → Header.
+The TUI supports three named panes: `paneHeader`, `paneRequests`, `paneInfo`. `Tab` cycles focus: Header → Requests → Info → Header.
 
 When `paneHeader` is active:
 - `↑` / `↓` select a server in the header; the selected one gets the `▸` marker and a bright border (`StyleBorderActive`).
-- `Enter` opens the server-detail modal with a per-model statistics table: `Model | Reqs | Load | t_load | ↓tok/s | ↑tok/s`.
+- `Enter` shows server details (per-model statistics) in `paneInfo`.
 - Mouse wheel in the header area also changes the selected server.
 
-The modal closes on `Esc` / repeated `Enter` / `q`.
+When `paneRequests` is active:
+- `↑` / `↓` navigate the request list.
+- `Enter` shows request details in `paneInfo`.
+
+`paneInfo` is the lower-right information panel — it is not a modal overlay.
+
+`F1` opens a help overlay listing all hotkeys. `Esc` / `F1` / `q` close the overlay.
 
 ## 15. Build and Distribution
 

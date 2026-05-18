@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"proxylm/internal/config"
 	"proxylm/internal/core"
@@ -82,6 +83,7 @@ func (s *Server) router() http.Handler {
 	// /v1/* — клиентский OpenAI-API
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(s.auth.ClientAuth)
+		r.Use(requestIDMiddleware) // X-Request-Id в response headers
 		r.Get("/models", listModelsHandler(s.servers))
 		for _, endpoint := range []string{"/chat/completions", "/completions", "/embeddings"} {
 			h := newProxyHandler("/v1"+endpoint, s.sched, s.backends, s.history, s.compat, s.log)
@@ -124,6 +126,21 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// requestIDMiddleware генерирует X-Request-Id перед хендлером и возвращает
+// его клиенту в заголовке ответа. Хендлер может получить значение через
+// RequestIDFromContext. Если клиент прислал X-Request-Id — используем его.
+func requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get("X-Request-Id")
+		if reqID == "" {
+			reqID = uuid.NewString()
+		}
+		w.Header().Set("X-Request-Id", reqID)
+		ctx := context.WithValue(r.Context(), ctxRequestID, reqID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // recoverer перехватывает panic в handler'ах, логирует и отдаёт 500.

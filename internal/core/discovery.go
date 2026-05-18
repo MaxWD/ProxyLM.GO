@@ -9,6 +9,61 @@ import (
 	"proxylm/internal/core/backends"
 )
 
+// InitialHealthcheck выполняет один синхронный poll /v1/models для каждого
+// зарегистрированного сервера. Используется при старте daemon'а вне зависимости
+// от cfg.discovery.enabled, чтобы сразу выставить Healthy и Models (C1).
+//
+// Если сервер имеет explicitModels — он помечается healthy без poll'а (FR-25).
+// Для серверов без explicit-списка — вызывает ListModels с таймаутом из
+// backends[].timeout_seconds (capped 10s). Ошибка → Healthy=false + warn-лог,
+// старт не блокируется (U-3 в SRS).
+func (d *Discovery) InitialHealthcheck(ctx context.Context) {
+	d.mu.Lock()
+	entries := append([]*discoveryEntry(nil), d.entries...)
+	d.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, e := range entries {
+		wg.Add(1)
+		go func(e *discoveryEntry) {
+			defer wg.Done()
+			// Если модели заданы явно — сервер сразу healthy; poll не нужен.
+			if len(e.explicitModels) > 0 {
+				e.server.Healthy.Store(true)
+				d.log.Info("initial healthcheck: explicit models, marking healthy",
+					"server", e.server.Name,
+					"models", len(e.explicitModels))
+				return
+			}
+			// Ограничиваем таймаут: берём timeout из ServerInfo, но не более 10s.
+			timeout := e.server.Timeout
+			const maxInitTimeout = 10 * time.Second
+			if timeout <= 0 || timeout > maxInitTimeout {
+				timeout = maxInitTimeout
+			}
+			pollCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+
+			models, err := e.backend.ListModels(pollCtx)
+			if err != nil {
+				e.server.Healthy.Store(false)
+				d.log.Warn("initial healthcheck: server unavailable",
+					"server", e.server.Name,
+					"error", err.Error())
+				return
+			}
+			e.server.Healthy.Store(true)
+			e.server.Lock()
+			e.server.Models = toModelInfos(models)
+			e.server.Unlock()
+			d.log.Info("initial healthcheck: server healthy",
+				"server", e.server.Name,
+				"models", len(models))
+		}(e)
+	}
+	wg.Wait()
+}
+
 // Discovery — периодический воркер, опрашивающий /v1/models на каждом бэкенде
 // и обновляющий ServerInfo.Models / Healthy. При unhealthyAfterFailedPolls
 // подряд неуспехах сервер помечается Healthy=false.

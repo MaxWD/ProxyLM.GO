@@ -20,7 +20,8 @@ import (
 	"proxylm/internal/storage"
 )
 
-// daemonVersion прокидывается main'ом через runtimeVersion для отображения в IPC hello.
+// daemonVersion прокидывается main'ом через cmd/root.go (см. SetVersion) для
+// отображения в IPC hello payload подключающимся TUI.
 var daemonVersion = "dev"
 
 // SetDaemonVersion вызывается из cmd/root.go при SetVersion, чтобы Hub отдавал
@@ -122,6 +123,12 @@ func runDaemon(parent context.Context, cfgPath string) error {
 	for i, b := range cfg.Backends {
 		disc.AddServer(servers[i], backendMap[b.Name], b.Models)
 	}
+
+	// C1: initial healthcheck — всегда, независимо от cfg.Discovery.Enabled.
+	// Один синхронный poll на старте: сразу знаем, кто healthy.
+	// Если poll провалился — сервер помечается unhealthy, старт не блокируется (U-3).
+	disc.InitialHealthcheck(ctx)
+
 	if cfg.Discovery.Enabled {
 		go disc.Run(ctx)
 	}

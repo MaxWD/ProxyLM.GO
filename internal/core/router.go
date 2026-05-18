@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"sort"
+	"sync/atomic"
 )
 
 // RouterStrategy — стратегия выбора сервера для модели.
@@ -22,7 +23,7 @@ const (
 type Router struct {
 	servers  []*ServerInfo
 	strategy RouterStrategy
-	rrIdx    int // только для round_robin; читается под mu
+	rrIdx    atomic.Int64 // только для round_robin; атомарный счётчик без блокировок
 }
 
 // ErrNoServer — нет ни одного healthy-сервера с указанной моделью.
@@ -110,7 +111,7 @@ func pickLeastBusy(candidates []*ServerInfo) *ServerInfo {
 		load int
 		prio int
 	}
-	scored1 := make([]scored, 0, len(candidates))
+	ranked := make([]scored, 0, len(candidates))
 	for _, s := range candidates {
 		s.Lock()
 		ql := len(s.Queue)
@@ -119,20 +120,20 @@ func pickLeastBusy(candidates []*ServerInfo) *ServerInfo {
 		if s.InFlight.Load() {
 			load++
 		}
-		scored1 = append(scored1, scored{s: s, load: load, prio: s.Priority})
+		ranked = append(ranked, scored{s: s, load: load, prio: s.Priority})
 	}
-	sort.SliceStable(scored1, func(i, j int) bool {
-		if scored1[i].load != scored1[j].load {
-			return scored1[i].load < scored1[j].load
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].load != ranked[j].load {
+			return ranked[i].load < ranked[j].load
 		}
-		return scored1[i].prio < scored1[j].prio
+		return ranked[i].prio < ranked[j].prio
 	})
-	return scored1[0].s
+	return ranked[0].s
 }
 
 func (r *Router) pickRoundRobin(candidates []*ServerInfo) *ServerInfo {
-	// candidates всегда non-empty в этом месте
-	idx := r.rrIdx % len(candidates)
-	r.rrIdx++
+	// candidates всегда non-empty в этом месте (проверено в Pick).
+	// Add(1) - 1: первый вызов возвращает 0, сохраняя порядок a→b→a→...
+	idx := (r.rrIdx.Add(1) - 1) % int64(len(candidates))
 	return candidates[idx]
 }

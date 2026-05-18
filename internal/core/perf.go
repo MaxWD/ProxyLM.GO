@@ -11,6 +11,10 @@ import (
 // данных для трёх неизвестных (t_load, k_in, k_out) даже теоретически.
 const perfMinSamples = 3
 
+// perfMaxObservations — максимальный размер кольцевого буфера наблюдений на пару
+// (server, model). При превышении самое старое наблюдение дропается (M11).
+const perfMaxObservations = 1000
+
 // perfObservation — одна точка измерения по результату успешного запроса.
 // in/out — usage.prompt_tokens / usage.completion_tokens (b и c в формуле),
 // totalMs — полное время Run (t_all), loaded — был ли это первый запрос после
@@ -72,9 +76,13 @@ func (p *PerfTracker) Record(server, model string, in, out int, totalMs int64, l
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	k := perfKey{server: server, model: model}
-	p.bySlot[k] = append(p.bySlot[k], perfObservation{
-		in: in, out: out, totalMs: totalMs, loaded: loaded,
-	})
+	obs := p.bySlot[k]
+	obs = append(obs, perfObservation{in: in, out: out, totalMs: totalMs, loaded: loaded})
+	// Ring-buffer: при превышении cap дропаем самое старое наблюдение (M11).
+	if len(obs) > perfMaxObservations {
+		obs = obs[len(obs)-perfMaxObservations:]
+	}
+	p.bySlot[k] = obs
 }
 
 // PerfStats — результат регрессии по паре (server, model).

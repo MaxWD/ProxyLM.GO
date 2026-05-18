@@ -28,10 +28,13 @@ var tuiCmd = &cobra.Command{
 		}
 		client, err := ipc.Dial(cmd.Context(), connect, token)
 		if err != nil {
+			if ipc.IsAuthError(err) {
+				return fmt.Errorf("authentication failed — check --token: %w", err)
+			}
 			return fmt.Errorf("connect %s: %w", connect, err)
 		}
 		defer client.Close()
-		return tui.Run(cmd.Context(), client)
+		return tui.RunWithAddr(cmd.Context(), client, connect)
 	},
 }
 

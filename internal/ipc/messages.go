@@ -7,11 +7,9 @@ import "time"
 type MessageType string
 
 const (
-	TypeStateSnapshot MessageType = "state_snapshot"
-	TypeStateDiff     MessageType = "state_diff"
-	TypeLogLine       MessageType = "log_line"
-	TypeHello         MessageType = "hello"
-	TypePing          MessageType = "ping"
+	TypeStateSnapshot   MessageType = "state_snapshot"
+	TypeHello           MessageType = "hello"
+	TypeRequestSnapshot MessageType = "request_snapshot" // client→server: запрос немедленного snapshot
 )
 
 // Envelope — внешний контейнер для всех сообщений. Конкретный payload зависит от Type.
@@ -116,11 +114,4 @@ type RequestState struct {
 type StateSnapshotPayload struct {
 	Servers  []ServerState  `json:"servers"`
 	Requests []RequestState `json:"requests"`
-}
-
-// LogLinePayload — одна запись лога.
-type LogLinePayload struct {
-	Level   string         `json:"level"`
-	Message string         `json:"message"`
-	Fields  map[string]any `json:"fields,omitempty"`
 }

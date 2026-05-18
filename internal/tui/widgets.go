@@ -502,7 +502,10 @@ type colWidths struct {
 	endpoint int // только при width >= 200
 }
 
-func calcColWidths(_ int, showEndpoint bool) colWidths {
+// calcColWidths вычисляет ширины колонок RequestTable с учётом ширины терминала.
+// Базовый набор колонок (~112 символов без маркера): при termWidth < 112 пропорционально
+// сужаем model (минимум 18) и tokens (минимум 9), чтобы не допустить молчаливого overflow.
+func calcColWidths(termWidth int, showEndpoint bool) colWidths {
 	cw := colWidths{
 		id:     4,
 		client: 9,
@@ -521,6 +524,32 @@ func calcColWidths(_ int, showEndpoint bool) colWidths {
 	}
 	if showEndpoint {
 		cw.endpoint = 18
+	}
+
+	// fullWidth — сумма всех базовых колонок + пробелы + 2-char маркер + border(4).
+	// 2 (marker) + 4+1 + 9+1 + 27+1 + 10+1 + 12+1 + 2+1 + 8+1 + 8+1 + 7+1 + 11 + 4(border) = ~116
+	// Когда termWidth ≥ 100 проверяем запас; при нехватке сжимаем model и tokens.
+	if termWidth >= 100 {
+		const fixedCols = 2 + (4 + 1) + (9 + 1) + (10 + 1) + (12 + 1) + (2 + 1) + (8 + 1) + (8 + 1) + (7 + 1) + 4
+		// fixedCols = 2+5+10+11+13+3+9+9+8+4 = 74; remaining for model+tokens+space = termWidth-74
+		remaining := termWidth - fixedCols - 1 // -1 between model and server
+		const minModel = 18
+		const minTokens = 9
+		minRequired := minModel + 1 + cw.tokens // space between model and tokens
+		if remaining < cw.model+1+cw.tokens {
+			// Сжимаем: сначала model до minModel, потом tokens до minTokens.
+			if remaining >= minModel+1+cw.tokens {
+				cw.model = remaining - 1 - cw.tokens
+			} else if remaining >= minModel+1+minTokens {
+				cw.model = minModel
+				cw.tokens = remaining - 1 - minModel
+			} else if remaining >= minRequired {
+				cw.model = minModel
+				cw.tokens = minTokens
+			}
+			// Если даже minRequired не влезает — оставляем минимумы,
+			// renderRequestTable всё равно обрежет через truncStr.
+		}
 	}
 	return cw
 }
@@ -1090,6 +1119,9 @@ func renderFooter(showFilter bool, width int) string {
 	var text string
 	if showFilter {
 		text = "Esc Cancel filter   Enter Confirm"
+	} else if width < 80 {
+		// Narrow terminal — show minimal hints only.
+		text = "F1 Help · q Quit"
 	} else {
 		text = "F1 Help   F5 Refresh   / Filter   Tab Header/Requests/Info   Click — выбор   q/F10 Quit"
 	}
@@ -1100,4 +1132,82 @@ func renderFooter(showFilter bool, width int) string {
 
 func renderTooNarrow() string {
 	return StyleError.Render("terminal too narrow (min 60)")
+}
+
+// ---- HelpOverlay ------------------------------------------------------------
+
+// helpItem описывает одну строку в help overlay.
+type helpItem struct {
+	key  string
+	desc string
+}
+
+var helpItems = []helpItem{
+	{"F1", "help (toggle this overlay)"},
+	{"F5", "refresh (request snapshot from daemon)"},
+	{"Tab", "switch pane (Header → Requests → Info)"},
+	{"↑/k", "navigate up"},
+	{"↓/j", "navigate down"},
+	{"PgUp/PgDn", "page up / page down"},
+	{"Home/End", "jump to first / last row"},
+	{"Enter", "show details in Info pane"},
+	{"/", "filter requests (model / client / server / status)"},
+	{"Esc", "cancel filter / close overlay"},
+	{"mouse wheel", "scroll pane under cursor; select server in header"},
+	{"q / F10", "quit"},
+}
+
+// renderHelpOverlay возвращает help overlay, отцентрированный в терминале
+// шириной termW и высотой termH.
+func renderHelpOverlay(termW, termH int) string {
+	// Строим содержимое: заголовок + строки хоткеев.
+	var sb strings.Builder
+	sb.WriteString(StyleModalTitle.Render("Keyboard shortcuts"))
+	sb.WriteString("\n\n")
+
+	// Ширина колонки key = максимальная длина key + 2.
+	maxKey := 0
+	for _, it := range helpItems {
+		if len(it.key) > maxKey {
+			maxKey = len(it.key)
+		}
+	}
+	keyW := maxKey + 2
+
+	for _, it := range helpItems {
+		sb.WriteString(StyleHelpKey.Render(pad(it.key, keyW)))
+		sb.WriteString("  ")
+		sb.WriteString(StyleHelpDesc.Render(it.desc))
+		sb.WriteByte('\n')
+	}
+	sb.WriteString("\n")
+	sb.WriteString(StyleDim.Render("Press F1, Esc or q to close"))
+
+	content := StyleHelpBorder.Render(sb.String())
+
+	// Центрируем в экране.
+	return lipgloss.Place(termW, termH, lipgloss.Center, lipgloss.Center, content)
+}
+
+// ---- LoadingPane ------------------------------------------------------------
+
+// renderLoadingPane отображается в request-панели до прихода первого snapshot.
+func renderLoadingPane(addr string, width int, activePane paneID) string {
+	msg := StyleDim.Render("Waiting for daemon…")
+	if addr != "" {
+		msg += " " + StyleDim.Render("(connected to "+addr+")")
+	}
+	// Минимальный placeholder во viewport.
+	vp := viewport.Model{}
+	vp.Width = width - 4
+	vp.Height = 3
+	vp.SetContent(msg)
+
+	var borderStyle lipgloss.Style
+	if activePane == paneRequests {
+		borderStyle = StyleBorderActive
+	} else {
+		borderStyle = StyleBorderInactive
+	}
+	return borderStyle.Width(width - 2).Render(StyleTitle.Render("Requests") + "\n" + vp.View())
 }

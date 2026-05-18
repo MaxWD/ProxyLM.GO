@@ -49,6 +49,7 @@ func newProxyHandler(endpoint string, sched *core.Scheduler, bks map[string]back
 }
 
 func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close() // H4: явный close body (даже при ранних return)
 	clientName := ClientFromContext(r.Context())
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 32<<20)) // 32 MiB
@@ -88,11 +89,8 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.persistRecord(rec, "pending")
 
 	job := &core.Job{
-		ID:         rec.ID,
-		Model:      rec.Model,
-		Endpoint:   rec.Endpoint,
-		ClientName: rec.ClientName,
-		Stream:     rec.Stream,
+		ID:    rec.ID,
+		Model: rec.Model,
 		Run: func(_ context.Context, srv *core.ServerInfo) core.JobResult {
 			rec.ServerName = srv.Name
 			rec.StartedAt = time.Now().UTC()
