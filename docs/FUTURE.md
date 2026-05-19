@@ -18,21 +18,15 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 2. Ridge regression / regularization (priority: medium)
+## 2. Ridge regression / regularization (priority: medium) — DONE in v0.10.0
 
-**Problem:** with few observations, or when all `loaded=1` (or all `loaded=0`), the matrix `X^T X` may be nearly singular, leading to numerically unstable estimates. The current fallback is 2×2 without diagnostics.
-
-**Solution:** add ridge regularization: `(X^T X + λI) · θ = X^T y`, where λ is a small constant (e.g., `1e-4`). Compute the R² quality metric and publish it in the TUI server-detail modal as a `degraded fit` indicator when R² is below threshold.
-
-**User-visible effect:** the operator sees "fit: good / degraded" in the modal and understands estimate reliability.
+Implemented as `(X^T X + λI)θ = X^T y` with λ = 1e-4 across all 1/2/3-var solvers, plus R² and 95% confidence intervals published in `PerfStats` (`RSquared`, `TLoadCI`, `KInCI`, `KOutCI`, `FitQuality ∈ {"good","degraded",""}`). The TUI highlights degraded rows in the server-detail Info pane. See `internal/core/perf.go`.
 
 ---
 
-## 3. Per-endpoint statistics (priority: low)
+## 3. Per-endpoint statistics (priority: low) — DONE in v0.10.0
 
-**Problem:** `PerfTracker` aggregates by `(server, model)` without accounting for request type. `POST /v1/chat/completions` and `POST /v1/embeddings` have fundamentally different token/time profiles; mixing distorts the regression.
-
-**Solution:** add an `endpoint` dimension to the observation key: `(server, model, endpoint)`. A separate `ModelSummary` per endpoint; in the modal — tabs or separate rows.
+The regression key is now `(server, model, endpoint)`. Endpoint is propagated from `RequestRecord.Endpoint` into `core.Job.Endpoint` → `Scheduler.recordPerf` → `PerfTracker.Record`. `ServerSummary` returns one `ModelSummary` per `(model, endpoint)` bucket; `ipc.ModelStats` exposes the new `Endpoint` field. The TUI server-detail table shows a `Endpoint` column.
 
 ---
 
@@ -64,19 +58,15 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 7. Confidence interval and R² in server-detail modal (priority: low)
+## 7. Confidence interval and R² in server-detail modal (priority: low) — DONE in v0.10.0
 
-**Problem:** the server-detail modal shows only a point estimate for `t_load / tok/s`. The user does not know how reliable the estimate is (few data points, high variance).
-
-**Solution:** compute R² (coefficient of determination) and a 95% confidence interval for each parameter based on residuals. Show in the modal next to the estimate: `38.5 tok/s [±5.1]  R²=0.94`.
+R² and 95% CI half-widths are computed in `fillFitQuality` using σ̂² · diag((X^T X + λI)^-1) and published as `t_load_ci`, `k_in_ci`, `k_out_ci` in `ModelStats`. The TUI server-detail Info pane renders `↓tok/s` and `↑tok/s` columns as `38.5±5.1` when CI is available; the `R²` column shows the coefficient; degraded rows (R² < 0.70) are flash-highlighted.
 
 ---
 
-## 8. max_consecutive_requests_per_model — starvation protection (priority: medium)
+## 8. max_consecutive_requests_per_model — starvation protection (priority: medium) — DONE in v0.10.0
 
-**Problem:** with a continuous stream of requests for model A, other models in the queue will not be served (starvation). This is currently a documented trade-off (R-1 in SRS.md §9.2).
-
-**Solution:** config parameter `scheduler.max_consecutive_per_model` (int, default 0 = disabled): after N consecutive requests for model A the worker forcibly picks the next FIFO request, even if there are more requests for A pending.
+Implemented as a **new routing strategy** `fair_share_round_robin` (instead of altering existing strategies). When `scheduler.max_consecutive_per_model > 0` and the server reaches the limit, `pool.PopForFairShare` forcibly picks the next FIFO Job for a different model. Falls back to ordinary drain if no other compatible model is queued. See `internal/core/pool.go`, `internal/core/scheduler.go`, and the strategy section in `docs/ARCHITECTURE.md`.
 
 ---
 

@@ -15,6 +15,14 @@ const (
 	RouterLeastBusy                RouterStrategy = "least_busy"
 	RouterDeferredModelThenCapable RouterStrategy = "deferred_model_then_capable"
 	RouterPreserveModelCoverage    RouterStrategy = "preserve_model_coverage"
+	// RouterFairShareRoundRobin — pull-стратегия с защитой от голодания
+	// (FUTURE.md #8 → v0.10.0). По умолчанию ведёт себя как
+	// deferred_model_then_capable (drain current_model FIFO), но при
+	// scheduler.max_consecutive_per_model > 0 принудительно переключается
+	// на job под ДРУГУЮ модель после N подряд диспатчей одной модели —
+	// гарантирует, что непрерывный поток для модели A не запрёт модели
+	// B/C/… в очереди навсегда (R-1 из SRS.md §9.2).
+	RouterFairShareRoundRobin RouterStrategy = "fair_share_round_robin"
 )
 
 // Router — выбор сервера для запроса. Имеет доступ к списку серверов и реализует
@@ -51,9 +59,12 @@ func (r *Router) Pick(model string, exclude map[string]bool) (*ServerInfo, error
 		return r.pickRoundRobin(candidates), nil
 	case RouterLeastBusy:
 		return pickLeastBusy(candidates), nil
-	case RouterDeferredModelThenCapable, RouterPreserveModelCoverage, RouterModelAffinityLeastBusy:
+	case RouterDeferredModelThenCapable, RouterPreserveModelCoverage,
+		RouterFairShareRoundRobin, RouterModelAffinityLeastBusy:
 		fallthrough
 	default:
+		// pull-стратегии (deferred / preserve / fair_share) сюда заходят только
+		// в фолбэк-пути submitPush; основной диспатч у них идёт через JobPool.
 		return pickModelAffinityLeastBusy(model, candidates), nil
 	}
 }

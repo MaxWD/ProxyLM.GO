@@ -1032,13 +1032,20 @@ func renderInfoServer(s ipc.ServerState, innerW int) string {
 	if s.FailureCount > 0 {
 		failedStr = StyleStatusFailed.Render(failedStr)
 	}
+	// Fit-индикатор для header-метрики: R² и качественная оценка
+	// (good / degraded). Помогает оператору понять, насколько надёжна
+	// текущая точечная оценка t_load / tok/s. См. FUTURE.md #7 → v0.10.0.
+	fitStr := "—"
+	if s.PerfOK {
+		fitStr = renderFitIndicator(s.RSquared, s.FitQuality)
+	}
 	rows := [][2][2]string{
 		{{"Server", s.Name}, {"TL", tLoadStr}},
 		{{"URL", s.URL}, {GlyphTokIn() + " in", tokIn}},
 		{{"Health", healthyStr}, {GlyphTokOut() + " out", tokOut}},
 		{{"Current", current}, {"Samples", fmt.Sprintf("%d", s.PerfSamples)}},
-		{{"Queue", fmt.Sprintf("%d", s.QueueDepth)}, {"Failed", failedStr}},
-		{{"Models", fmt.Sprintf("%d discovered", len(s.Models))}, {"", ""}},
+		{{"Queue", fmt.Sprintf("%d", s.QueueDepth)}, {"Fit", fitStr}},
+		{{"Models", fmt.Sprintf("%d discovered", len(s.Models))}, {"Failed", failedStr}},
 	}
 	var sb strings.Builder
 	for _, row := range rows {
@@ -1054,7 +1061,8 @@ func renderInfoServer(s ipc.ServerState, innerW int) string {
 		sb.WriteByte('\n')
 	}
 
-	// Per-model таблица.
+	// Per-(model, endpoint) таблица (v0.10.0, FUTURE.md #3/#7).
+	// Endpoint выводится отдельной колонкой; R² + CI — диагностика fit'а.
 	sb.WriteByte('\n')
 	sb.WriteString(StyleColHeader.Render("Per-model performance"))
 	sb.WriteByte('\n')
@@ -1062,31 +1070,104 @@ func renderInfoServer(s ipc.ServerState, innerW int) string {
 		sb.WriteString(StyleDim.Render("  (no completed requests yet)"))
 		return sb.String()
 	}
-	header := fmt.Sprintf("  %-24s %6s %5s %8s %10s %10s",
-		"Model", "Reqs", "Load", "TL", "↓tok/s", "↑tok/s")
+	header := fmt.Sprintf("  %-20s %-16s %5s %4s %7s %12s %12s %5s",
+		"Model", "Endpoint", "Reqs", "Ld", "TL", "↓tok/s", "↑tok/s", "R²")
 	sb.WriteString(StyleColHeader.Render(header))
 	sb.WriteByte('\n')
 	for _, ms := range s.PerModelStats {
 		tLoad := "—"
 		ti := "—"
 		to := "—"
+		r2 := "—"
 		if ms.OK {
 			if ms.TLoadMs > 0 {
 				tLoad = fmtMs(int64(ms.TLoadMs))
 			}
 			if ms.TokInPerSec > 0 {
-				ti = fmt.Sprintf("%.1f", ms.TokInPerSec)
+				if ms.KInCI > 0 {
+					ci := tokPerSecCIHalf(ms.TokInPerSec, ms.KInCI)
+					ti = fmt.Sprintf("%.1f±%.1f", ms.TokInPerSec, ci)
+				} else {
+					ti = fmt.Sprintf("%.1f", ms.TokInPerSec)
+				}
 			}
 			if ms.TokOutPerSec > 0 {
-				to = fmt.Sprintf("%.1f", ms.TokOutPerSec)
+				if ms.KOutCI > 0 {
+					ci := tokPerSecCIHalf(ms.TokOutPerSec, ms.KOutCI)
+					to = fmt.Sprintf("%.1f±%.1f", ms.TokOutPerSec, ci)
+				} else {
+					to = fmt.Sprintf("%.1f", ms.TokOutPerSec)
+				}
 			}
+			r2 = fmt.Sprintf("%.2f", ms.RSquared)
 		}
-		row := fmt.Sprintf("  %-24s %6d %5d %8s %10s %10s",
-			truncStr(ms.Model, 24), ms.Samples, ms.Loaded, tLoad, ti, to)
+		row := fmt.Sprintf("  %-20s %-16s %5d %4d %7s %12s %12s %5s",
+			truncStr(ms.Model, 20), truncStr(displayEndpoint(ms.Endpoint), 16),
+			ms.Samples, ms.Loaded, tLoad, ti, to, r2)
+		// Подсвечиваем строки с degraded fit, чтобы оператор видел, какие
+		// оценки сейчас нельзя считать надёжными.
+		if ms.OK && ms.FitQuality == "degraded" {
+			row = StyleFlash.Render(row)
+		}
 		sb.WriteString(row)
 		sb.WriteByte('\n')
 	}
 	return sb.String()
+}
+
+// renderFitIndicator форматирует «R² + словесная оценка» одной строкой для
+// header-секции server-info: например, "0.94 good" или "0.42 degraded".
+// При degraded строка подсвечивается StyleFlash, чтобы привлечь внимание.
+func renderFitIndicator(r2 float64, quality string) string {
+	if quality == "" {
+		return "—"
+	}
+	text := fmt.Sprintf("%.2f %s", r2, quality)
+	if quality == "degraded" {
+		return StyleFlash.Render(text)
+	}
+	return text
+}
+
+// displayEndpoint сокращает имена /v1/* для табличного отображения. Возвращает
+// "chat", "completions", "embeddings" и т. п. при стандартных путях, иначе —
+// исходную строку. Пустая строка маппится в "—" (статистика, накопленная до
+// миграции на per-endpoint ключи).
+func displayEndpoint(ep string) string {
+	switch ep {
+	case "":
+		return "—"
+	case "/v1/chat/completions":
+		return "chat"
+	case "/v1/completions":
+		return "completions"
+	case "/v1/embeddings":
+		return "embeddings"
+	case "/v1/responses":
+		return "responses"
+	}
+	return ep
+}
+
+// tokPerSecCIHalf переводит half-width 95% CI коэффициента регрессии
+// (мс/токен) в тот же диапазон, выраженный в tok/s. Поскольку tok/s = 1000/k
+// — функция нелинейная, точное преобразование — половина разницы между
+// 1000/(k−Δk) и 1000/(k+Δk). Для умеренных Δk/k (< 50%) этот результат
+// почти равен 1000·Δk/k², но мы считаем точно во избежание перекосов.
+func tokPerSecCIHalf(tokPerSec, kCI float64) float64 {
+	if tokPerSec <= 0 || kCI <= 0 {
+		return 0
+	}
+	k := 1000.0 / tokPerSec
+	lower := k + kCI
+	upper := k - kCI
+	if upper <= 0 {
+		// CI «прокрутил» k в ноль/отрицательное — отдаём asymmetric верхнюю
+		// границу, чтобы не делить на ноль. На практике редкий случай при
+		// очень малой выборке.
+		return tokPerSec
+	}
+	return (1000.0/upper - 1000.0/lower) / 2.0
 }
 
 // padDisplay — pad ИЛИ truncate с учётом ANSI-escape'ов. Для plain-строк

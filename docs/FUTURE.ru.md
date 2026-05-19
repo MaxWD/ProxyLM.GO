@@ -18,21 +18,15 @@
 
 ---
 
-## 2. Ridge regression / регуляризация (приоритет: средний)
+## 2. Ridge regression / регуляризация (приоритет: средний) — РЕАЛИЗОВАНО в v0.10.0
 
-**Проблема:** при малом числе наблюдений или когда все `loaded=1` (или все `loaded=0`) матрица `X^T X` может быть почти сингулярной, что приводит к численно нестабильным оценкам. Сейчас fallback — 2×2 без диагностики.
-
-**Решение:** добавить ridge-регуляризацию: `(X^T X + λI) · θ = X^T y`, где λ — малая константа (например, `1e-4`). Вычислять метрику качества R² и публиковать её в server-detail modal TUI как индикатор `degraded fit` при R² < порога.
-
-**Эффект для пользователя:** operator видит в modal «fit: good / degraded», понимает достоверность оценок.
+Реализовано как `(X^T X + λI)θ = X^T y` с λ = 1e-4 во всех 1/2/3-переменных солверах, плюс R² и 95% доверительные интервалы публикуются в `PerfStats` (`RSquared`, `TLoadCI`, `KInCI`, `KOutCI`, `FitQuality ∈ {"good","degraded",""}`). TUI подсвечивает degraded-строки в server-detail Info pane. См. `internal/core/perf.go`.
 
 ---
 
-## 3. Per-endpoint статистика (приоритет: низкий)
+## 3. Per-endpoint статистика (приоритет: низкий) — РЕАЛИЗОВАНО в v0.10.0
 
-**Проблема:** `PerfTracker` агрегирует по `(server, model)` без учёта типа запроса. `POST /v1/chat/completions` и `POST /v1/embeddings` имеют принципиально разный профиль токен/время; смешение искажает регрессию.
-
-**Решение:** добавить измерение `endpoint` в ключ наблюдения: `(server, model, endpoint)`. Отдельный `ModelSummary` для каждого endpoint; в modal — вкладки или отдельные строки.
+Ключ регрессии теперь `(server, model, endpoint)`. Endpoint прокидывается из `RequestRecord.Endpoint` в `core.Job.Endpoint` → `Scheduler.recordPerf` → `PerfTracker.Record`. `ServerSummary` возвращает один `ModelSummary` на каждую пару `(model, endpoint)`; `ipc.ModelStats` получил новое поле `Endpoint`. В server-detail таблице TUI появилась колонка `Endpoint`.
 
 ---
 
@@ -64,19 +58,15 @@
 
 ---
 
-## 7. Confidence interval и R² в server-detail modal (приоритет: низкий)
+## 7. Confidence interval и R² в server-detail modal (приоритет: низкий) — РЕАЛИЗОВАНО в v0.10.0
 
-**Проблема:** server-detail modal показывает только точечную оценку `t_load / tok/s`. Пользователь не знает, насколько оценка надёжна (мало данных, высокий разброс).
-
-**Решение:** вычислять R² (коэффициент детерминации) и 95% confidence interval для каждого параметра на основе residuals. Показывать в modal рядом с оценкой: `38.5 tok/s [±5.1]  R²=0.94`.
+R² и half-width 95% CI вычисляются в `fillFitQuality` через σ̂² · diag((X^T X + λI)^-1) и публикуются как `t_load_ci`, `k_in_ci`, `k_out_ci` в `ModelStats`. В Info-pane сервера TUI колонки `↓tok/s` и `↑tok/s` отображаются как `38.5±5.1` при наличии CI; колонка `R²` показывает коэффициент; degraded-строки (R² < 0.70) подсвечиваются flash-стилем.
 
 ---
 
-## 8. max_consecutive_requests_per_model — защита от голода (приоритет: средний)
+## 8. max_consecutive_requests_per_model — защита от голода (приоритет: средний) — РЕАЛИЗОВАНО в v0.10.0
 
-**Проблема:** при непрерывном потоке запросов модели A другие модели в очереди не получат обслуживания (голод). Сейчас это задокументированный компромисс (R-1 в SRS.md §9.2).
-
-**Решение:** конфиг-параметр `scheduler.max_consecutive_per_model` (int, default 0 = отключено): после N последовательных запросов модели A воркер принудительно берёт следующий FIFO-запрос, даже если есть ещё запросы для A.
+Реализовано как **новая стратегия маршрутизации** `fair_share_round_robin` (вместо модификации существующих стратегий). При `scheduler.max_consecutive_per_model > 0` и достижении лимита `pool.PopForFairShare` принудительно берёт следующий FIFO-Job под другую модель. При отсутствии другой совместимой модели в очереди — fallback на обычный drain. См. `internal/core/pool.go`, `internal/core/scheduler.go` и раздел стратегий в `docs/ARCHITECTURE.ru.md`.
 
 ---
 

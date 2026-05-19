@@ -1,6 +1,6 @@
 # ProxyLM.GO — API Specification
 
-Версия документа: 0.9.7
+Версия документа: 0.10.0
 Связанные документы: [`ARCHITECTURE.ru.md`](./ARCHITECTURE.ru.md), [`SRS.ru.md`](./SRS.ru.md)
 
 Документ описывает три группы API:
@@ -307,26 +307,38 @@ Sec-WebSocket-Key: ...
         "t_load_ms": 4200.0,
         "tok_in_per_sec": 0.0,
         "tok_out_per_sec": 38.5,
+        "r_squared": 0.94,
+        "fit_quality": "good",
         "slow": false,
         "failure_count": 0,
         "per_model_stats": [
           {
             "model": "qwen2.5:14b",
+            "endpoint": "/v1/chat/completions",
             "samples": 12,
             "loaded": 3,
             "ok": true,
             "t_load_ms": 4200.0,
             "tok_in_per_sec": 0.0,
-            "tok_out_per_sec": 38.5
+            "tok_out_per_sec": 38.5,
+            "r_squared": 0.94,
+            "fit_quality": "good",
+            "t_load_ci": 180.0,
+            "k_out_ci": 1.2
           },
           {
             "model": "llama3.1:8b",
+            "endpoint": "/v1/chat/completions",
             "samples": 5,
             "loaded": 1,
             "ok": true,
             "t_load_ms": 1100.0,
             "tok_in_per_sec": 0.0,
-            "tok_out_per_sec": 72.1
+            "tok_out_per_sec": 72.1,
+            "r_squared": 0.62,
+            "fit_quality": "degraded",
+            "t_load_ci": 950.0,
+            "k_out_ci": 4.7
           }
         ]
       }
@@ -373,21 +385,31 @@ Sec-WebSocket-Key: ...
 | `t_load_ms` | float64 | оценка времени загрузки (мс); опускается если 0 |
 | `tok_in_per_sec` | float64 | пропускная способность по prompt-токенам (tok/s); опускается если 0 |
 | `tok_out_per_sec` | float64 | пропускная способность по completion-токенам (tok/s); опускается если 0 |
+| `r_squared` | float64 | коэффициент детерминации R² header-регрессии, [0,1]; опускается если 0 (нет fit'а) |
+| `fit_quality` | string | словесная оценка: `"good"` (R² ≥ 0.70), `"degraded"` (<0.70), `""` если нет fit'а |
 | `slow` | bool | последний завершённый запрос занял ≥ 2× от расчётного по регрессии; опускается если false |
 | `failure_count` | int64 | суммарное число упавших попыток на этом сервере с момента старта daemon; опускается если 0 |
-| `per_model_stats` | `ModelStats[]` | статистика по всем моделям сервера, отсортированная по `samples DESC`; опускается если пусто |
+| `per_model_stats` | `ModelStats[]` | статистика per-(model, endpoint), отсортированная по `samples DESC`; опускается если пусто |
 
 ##### Структура `ModelStats`
+
+Отдельный бакет на каждую пару `(model, endpoint)` сервера. Endpoint стал частью ключа регрессии в v0.10.0 (FUTURE.md #3), чтобы запросы с принципиально разными профилями tokens/ms (например, `/v1/chat/completions` vs `/v1/embeddings`) не искажали fit.
 
 | Поле | Тип | Описание |
 |------|-----|----------|
 | `model` | string | идентификатор модели |
-| `samples` | int | общее число наблюдений для пары (server, model) |
+| `endpoint` | string | путь запроса (напр. `/v1/chat/completions`); опускается если пусто (legacy-данные до миграции v0.10.0) |
+| `samples` | int | общее число наблюдений для ключа (server, model, endpoint) |
 | `loaded` | int | из них — с флагом model_reload (смена модели перед запросом) |
 | `ok` | bool | регрессия валидна |
 | `t_load_ms` | float64 | оценка времени загрузки (мс); опускается если 0 |
 | `tok_in_per_sec` | float64 | пропускная способность prompt-токенов (tok/s); опускается если 0 |
 | `tok_out_per_sec` | float64 | пропускная способность completion-токенов (tok/s); опускается если 0 |
+| `r_squared` | float64 | коэффициент детерминации R², [0,1]; опускается если 0 |
+| `fit_quality` | string | `"good"` / `"degraded"` / `""` (нет fit'а) |
+| `t_load_ci` | float64 | half-width 95% доверительного интервала для `t_load_ms`; опускается если 0 (мало данных или коэффициент зафиксирован NNLS на нуле) |
+| `k_in_ci` | float64 | half-width 95% CI коэффициента входных токенов `k_in_ms_tok` (публикуемая величина — `tok_in_per_sec = 1000/k_in`; CI выражен в `ms/tok`, клиент может пересчитать) |
+| `k_out_ci` | float64 | half-width 95% CI коэффициента выходных токенов `k_out_ms_tok` |
 
 ##### Поля `RequestState`
 

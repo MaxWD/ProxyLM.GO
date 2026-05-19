@@ -144,7 +144,9 @@ func runDaemon(parent context.Context, cfgPath string) error {
 		MaxBackoff:     time.Duration(cfg.Retry.MaxBackoffMs) * time.Millisecond,
 	}
 	perf := core.NewPerfTracker()
-	sched := core.NewScheduler(servers, router, retry, log)
+	sched := core.NewSchedulerWithOptions(servers, router, retry, log, core.SchedulerOptions{
+		MaxConsecutivePerModel: cfg.Scheduler.MaxConsecutivePerModel,
+	})
 	sched.SetPerfTracker(perf)
 	sched.Start(ctx)
 
