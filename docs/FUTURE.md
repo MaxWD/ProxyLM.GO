@@ -2,7 +2,12 @@
 
 > **FUTURE-RULE.** This file is an idea parking lot, not a work plan. **Nothing here is implemented automatically**: neither Claude Code, nor sub-agents, nor the tech-writer should treat items here as a signal to act. Any implementation requires an **explicit user request** ("implement item N" or equivalent). See also the FUTURE-RULE section in `CLAUDE.md`.
 >
-> **What the tech-writer is allowed to do:** at each significant release or on request, revise this file — remove already-implemented items, add new ideas that emerged during work, maintain a consistent format (name, problem, solution, priority, optionally risks/constraints). Content is fully read-only for all other roles.
+> **What the tech-writer is allowed to do:**
+> 1. At each significant release or on request — revise this file: **delete** items that have been implemented (their description survives in CHANGELOG / SRS / ARCHITECTURE — keeping a stub here would duplicate it and rot), **renumber** the remaining items sequentially, and **add** new ideas that emerged during work.
+> 2. **Before deleting an item, double-check that it was not already implemented incidentally** by another task — grep the repo for the field names, config keys, or function names mentioned in the item; if the feature exists in code without anyone noticing, delete the item the same way as if it had been implemented on purpose.
+> 3. Maintain a consistent format (name, problem, solution, priority, optionally risks/constraints).
+>
+> Content is fully read-only for all other roles.
 
 This document records features that did not make it into current releases but arise from accumulated development experience. Each item contains a brief rationale and an indicative priority.
 
@@ -10,27 +15,15 @@ This document records features that did not make it into current releases but ar
 
 ## 1. Persistence of perf statistics (priority: high)
 
-**Problem:** `PerfTracker` keeps all observations `(server, model)` in RAM. When the daemon restarts, the history is wiped; regression restarts from scratch — the first 2–3 requests yield no metrics.
+**Problem:** `PerfTracker` keeps all observations `(server, model, endpoint)` in RAM. When the daemon restarts, the history is wiped; regression restarts from scratch — the first 2–3 requests yield no metrics.
 
-**Solution:** persist `[]perfObservation` in SQLite (new table `perf_observations`), load on startup. Limit storage size (e.g., 1000 observations per pair, FIFO).
+**Solution:** persist `[]perfObservation` in SQLite (new table `perf_observations`), load on startup. Limit storage size (e.g., 1000 observations per key, FIFO).
 
 **Risks:** small overhead per completed request; migration 0003 required.
 
 ---
 
-## 2. Ridge regression / regularization (priority: medium) — DONE in v0.10.0
-
-Implemented as `(X^T X + λI)θ = X^T y` with λ = 1e-4 across all 1/2/3-var solvers, plus R² and 95% confidence intervals published in `PerfStats` (`RSquared`, `TLoadCI`, `KInCI`, `KOutCI`, `FitQuality ∈ {"good","degraded",""}`). The TUI highlights degraded rows in the server-detail Info pane. See `internal/core/perf.go`.
-
----
-
-## 3. Per-endpoint statistics (priority: low) — DONE in v0.10.0
-
-The regression key is now `(server, model, endpoint)`. Endpoint is propagated from `RequestRecord.Endpoint` into `core.Job.Endpoint` → `Scheduler.recordPerf` → `PerfTracker.Record`. `ServerSummary` returns one `ModelSummary` per `(model, endpoint)` bucket; `ipc.ModelStats` exposes the new `Endpoint` field. The TUI server-detail table shows a `Endpoint` column.
-
----
-
-## 4. In-memory queue persistence (priority: medium)
+## 2. In-memory queue persistence (priority: medium)
 
 **Problem:** when the daemon restarts, all requests in `pending` are lost — clients receive a connection error and must retry on their side. In production installations this can cause significant losses.
 
@@ -40,7 +33,7 @@ The regression key is now `(server, model, endpoint)`. Endpoint is propagated fr
 
 ---
 
-## 5. Web UI (priority: low)
+## 3. Web UI (priority: low)
 
 **Problem:** TUI requires a terminal; when monitoring remotely via a browser, TUI is inconvenient.
 
@@ -50,7 +43,7 @@ The regression key is now `(server, model, endpoint)`. Endpoint is propagated fr
 
 ---
 
-## 6. Authenticated WS multiplexing with event filtering (priority: medium)
+## 4. Authenticated WS multiplexing with event filtering (priority: medium)
 
 **Problem:** the current `/admin/stream` delivers all events to all connected clients. With multiple simultaneous TUI sessions, backpressure and event drops are possible.
 
@@ -58,19 +51,7 @@ The regression key is now `(server, model, endpoint)`. Endpoint is propagated fr
 
 ---
 
-## 7. Confidence interval and R² in server-detail modal (priority: low) — DONE in v0.10.0
-
-R² and 95% CI half-widths are computed in `fillFitQuality` using σ̂² · diag((X^T X + λI)^-1) and published as `t_load_ci`, `k_in_ci`, `k_out_ci` in `ModelStats`. The TUI server-detail Info pane renders `↓tok/s` and `↑tok/s` columns as `38.5±5.1` when CI is available; the `R²` column shows the coefficient; degraded rows (R² < 0.70) are flash-highlighted.
-
----
-
-## 8. max_consecutive_requests_per_model — starvation protection (priority: medium) — DONE in v0.10.0
-
-Implemented as a **new routing strategy** `fair_share_round_robin` (instead of altering existing strategies). When `scheduler.max_consecutive_per_model > 0` and the server reaches the limit, `pool.PopForFairShare` forcibly picks the next FIFO Job for a different model. Falls back to ordinary drain if no other compatible model is queued. See `internal/core/pool.go`, `internal/core/scheduler.go`, and the strategy section in `docs/ARCHITECTURE.md`.
-
----
-
-## 9. Optional CGO SQLite build (priority: low)
+## 5. Optional CGO SQLite build (priority: low)
 
 **Problem:** `modernc.org/sqlite` (pure-Go) is noticeably slower than `mattn/go-sqlite3` (CGO) under high history throughput.
 
@@ -78,7 +59,7 @@ Implemented as a **new routing strategy** `fair_share_round_robin` (instead of a
 
 ---
 
-## 10. Model aliasing / fallback mapping (priority: low)
+## 6. Model aliasing / fallback mapping (priority: low)
 
 **Problem:** when a client requests a model not present on any healthy server, the proxy returns `ErrNoServer` / 503. Some clients work with an entire model family (e.g., "any 20B+ instruct") and do not want a 404 when a specific model name is not deployed.
 
@@ -88,7 +69,7 @@ Implemented as a **new routing strategy** `fair_share_round_robin` (instead of a
 
 ---
 
-## 11. Preflight `/v1/models` shape validation (priority: high)
+## 7. Preflight `/v1/models` shape validation (priority: high)
 
 **Problem:** the proxy is backend-agnostic and accepts any URL in `backends[].url`. If a user accidentally points it at a non-OpenAI endpoint (Anthropic `/v1/messages`, Azure with `api-version`, raw Ollama `/api/generate`), the misconfiguration surfaces only on the first client request as a 404/500 with no diagnostic guidance.
 
@@ -98,7 +79,7 @@ Implemented as a **new routing strategy** `fair_share_round_robin` (instead of a
 
 ---
 
-## 12. 429-aware retry with `Retry-After` and jitter (priority: high)
+## 8. 429-aware retry with `Retry-After` and jitter (priority: high)
 
 **Problem:** the retry policy (FR-18..FR-20) does not currently distinguish between 5xx, network errors, and 429 rate-limit responses. For cloud backends (OpenRouter, Groq, Together, OpenAI) this can amplify rate limits — failover to a second cloud backend multiplies the 429 storm rather than waiting it out.
 
@@ -111,7 +92,7 @@ Implemented as a **new routing strategy** `fair_share_round_robin` (instead of a
 
 ---
 
-## 13. Per-backend `serialize_by_model` flag (priority: medium)
+## 9. Per-backend `serialize_by_model` flag (priority: medium)
 
 **Problem:** model-affinity routing (INV-2) serializes requests by model on each server to prevent VRAM swaps. For single-model backends (LM Studio, Ollama, vLLM, llama.cpp) this is essential. For multi-model cloud backends (OpenRouter, Groq, Together — all models available simultaneously, no VRAM swap), it is pure overhead: requests for different models that could be served in parallel are queued sequentially.
 

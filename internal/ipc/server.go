@@ -338,11 +338,11 @@ func tokPerSec(kMsPerTok float64) float64 {
 }
 
 // bestModelStats возвращает PerfStats наиболее представительного endpoint'а
-// для пары (server, model). С v0.10.0 ключ регрессии включает endpoint
-// (FUTURE.md #3), поэтому для header-метрики (одна строка на сервер) нужно
-// агрегировать по одному endpoint'у — выбираем тот, у которого больше всего
-// samples (это, как правило, основной режим использования модели). Если ни
-// одного endpoint'а не нашлось — возвращает zero-value PerfStats.
+// для пары (server, model). С v0.10.0 ключ регрессии включает endpoint,
+// поэтому для header-метрики (одна строка на сервер) нужно агрегировать по
+// одному endpoint'у — выбираем тот, у которого больше всего samples (это,
+// как правило, основной режим использования модели). Если ни одного
+// endpoint'а не нашлось — возвращает zero-value PerfStats.
 func bestModelStats(p *core.PerfTracker, server, model string) core.PerfStats {
 	if p == nil {
 		return core.PerfStats{}

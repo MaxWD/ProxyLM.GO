@@ -393,7 +393,7 @@ Sent once immediately after connection, and again in response to a `request_snap
 
 ##### `ModelStats` structure
 
-Tracks a single `(model, endpoint)` bucket on this server. Endpoint became part of the regression key in v0.10.0 (FUTURE.md #3) so that request types with fundamentally different token/time profiles (e.g. `/v1/chat/completions` vs `/v1/embeddings`) don't distort the fit.
+Tracks a single `(model, endpoint)` bucket on this server. Endpoint became part of the regression key in v0.10.0 so that request types with fundamentally different token/time profiles (e.g. `/v1/chat/completions` vs `/v1/embeddings`) don't distort the fit.
 
 | Field | Type | Description |
 |-------|------|-------------|

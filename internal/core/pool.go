@@ -93,8 +93,7 @@ func (p *JobPool) PopFor(s *ServerInfo) *Job {
 	return nil
 }
 
-// PopForFairShare — реализация стратегии fair_share_round_robin
-// (FUTURE.md #8 → v0.10.0).
+// PopForFairShare — реализация стратегии fair_share_round_robin (v0.10.0).
 //
 // Базовая семантика совпадает с PopFor (drain current_model FIFO, затем —
 // первый совместимый Job из очереди). Дополнительно учитывается счётчик

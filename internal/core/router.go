@@ -16,7 +16,7 @@ const (
 	RouterDeferredModelThenCapable RouterStrategy = "deferred_model_then_capable"
 	RouterPreserveModelCoverage    RouterStrategy = "preserve_model_coverage"
 	// RouterFairShareRoundRobin — pull-стратегия с защитой от голодания
-	// (FUTURE.md #8 → v0.10.0). По умолчанию ведёт себя как
+	// (v0.10.0). По умолчанию ведёт себя как
 	// deferred_model_then_capable (drain current_model FIFO), но при
 	// scheduler.max_consecutive_per_model > 0 принудительно переключается
 	// на job под ДРУГУЮ модель после N подряд диспатчей одной модели —

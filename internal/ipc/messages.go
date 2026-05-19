@@ -51,7 +51,7 @@ type ServerState struct {
 	TokOutPerSec float64 `json:"tok_out_per_sec,omitempty"`
 	// RSquared — коэффициент детерминации R² регрессии для header-метрики
 	// (выбран endpoint с наибольшим числом samples для CurrentModel). [0,1].
-	// 0 ⇒ нет данных или fit не определён. См. FUTURE.md #7 → v0.10.0.
+	// 0 ⇒ нет данных или fit не определён. Введено в v0.10.0.
 	RSquared float64 `json:"r_squared,omitempty"`
 	// FitQuality — словесная оценка fit: "good" / "degraded" / "" (нет данных).
 	// Порог "good" — R² ≥ 0.70. TUI подсвечивает «degraded» как индикатор того,
@@ -75,12 +75,12 @@ type ServerState struct {
 }
 
 // ModelStats — агрегат регрессии по одному ключу (Model, Endpoint) на одном
-// сервере. Endpoint введён в v0.10.0 (FUTURE.md #3): запросы разных типов
+// сервере. Endpoint введён в v0.10.0: запросы разных типов
 // (/v1/chat/completions, /v1/embeddings) имеют принципиально разные профили
 // tokens/ms — смешивать их в одну регрессию нельзя.
 //
 // RSquared / FitQuality / TLoadCI / KInCI / KOutCI — диагностика fit'а
-// (FUTURE.md #7 → v0.10.0). CI-поля — half-width 95% доверительного интервала
+// (v0.10.0). CI-поля — half-width 95% доверительного интервала
 // для соответствующего коэффициента.
 type ModelStats struct {
 	Model        string  `json:"model"`

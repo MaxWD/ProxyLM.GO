@@ -1034,7 +1034,7 @@ func renderInfoServer(s ipc.ServerState, innerW int) string {
 	}
 	// Fit-индикатор для header-метрики: R² и качественная оценка
 	// (good / degraded). Помогает оператору понять, насколько надёжна
-	// текущая точечная оценка t_load / tok/s. См. FUTURE.md #7 → v0.10.0.
+	// текущая точечная оценка t_load / tok/s. Введено в v0.10.0.
 	fitStr := "—"
 	if s.PerfOK {
 		fitStr = renderFitIndicator(s.RSquared, s.FitQuality)
@@ -1061,7 +1061,7 @@ func renderInfoServer(s ipc.ServerState, innerW int) string {
 		sb.WriteByte('\n')
 	}
 
-	// Per-(model, endpoint) таблица (v0.10.0, FUTURE.md #3/#7).
+	// Per-(model, endpoint) таблица (v0.10.0).
 	// Endpoint выводится отдельной колонкой; R² + CI — диагностика fit'а.
 	sb.WriteByte('\n')
 	sb.WriteString(StyleColHeader.Render("Per-model performance"))

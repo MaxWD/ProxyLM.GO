@@ -42,9 +42,9 @@ type Routing struct {
 type Scheduler struct {
 	// MaxConsecutivePerModel — лимит подряд выполненных задач одной модели
 	// на одном сервере перед принудительным переключением. Действует только
-	// для стратегии fair_share_round_robin (FUTURE.md #8 → v0.10.0). 0 =
-	// лимит отключён (стратегия деградирует к deferred_model_then_capable).
-	// При других стратегиях значение игнорируется (но валидируется).
+	// для стратегии fair_share_round_robin (v0.10.0). 0 = лимит отключён
+	// (стратегия деградирует к deferred_model_then_capable). При других
+	// стратегиях значение игнорируется (но валидируется).
 	MaxConsecutivePerModel int `yaml:"max_consecutive_per_model"`
 }
 

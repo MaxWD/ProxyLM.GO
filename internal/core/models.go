@@ -90,7 +90,7 @@ type ServerInfo struct {
 	Notify chan struct{} // capacity 1
 
 	// LastDispatchedModel / ConsecutiveModelCount — учёт серии подряд
-	// выполненных задач одной модели (FUTURE.md #8 → v0.10.0). Используется
+	// выполненных задач одной модели (введено в v0.10.0). Используется
 	// стратегией fair_share_round_robin: при достижении лимита воркер
 	// принудительно берёт job под ДРУГУЮ модель. Поля защищены mu;
 	// обновляются в Scheduler.dispatch перед стартом Run.

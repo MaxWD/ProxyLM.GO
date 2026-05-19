@@ -23,7 +23,7 @@ type Job struct {
 	// (/v1/chat/completions, /v1/completions, /v1/embeddings и т. п.).
 	// Используется PerfTracker как часть ключа регрессии: разные endpoint'ы
 	// имеют принципиально разные профили tokens/ms и не должны смешиваться
-	// (FUTURE.md #3 → v0.10.0). Пустая строка допустима для совместимости со
+	// (введено в v0.10.0). Пустая строка допустима для совместимости со
 	// старыми сценариями и тестами — она попадёт в «безымянный» бакет.
 	Endpoint string
 
@@ -81,9 +81,9 @@ type Scheduler struct {
 	// логику PopFor: не drain'им current_model вслепую, а только если этот
 	// сервер — единственный её держатель.
 	coverageAware bool
-	// fairShare включён для стратегии fair_share_round_robin
-	// (FUTURE.md #8 → v0.10.0). При maxConsecutivePerModel > 0 воркер
-	// принудительно переключает модель после N подряд диспатчей одной.
+	// fairShare включён для стратегии fair_share_round_robin (v0.10.0).
+	// При maxConsecutivePerModel > 0 воркер принудительно переключает
+	// модель после N подряд диспатчей одной.
 	// 0 (или отрицательное) — лимит отключён, поведение совпадает с
 	// deferred_model_then_capable.
 	fairShare              bool
@@ -493,7 +493,7 @@ func (s *Scheduler) dispatch(ctx context.Context, srv *ServerInfo, j *Job) {
 	if reloaded {
 		srv.SetCurrentModel(j.Model)
 	}
-	// Учёт серии подряд диспатчей одной модели (FUTURE.md #8 → v0.10.0).
+	// Учёт серии подряд диспатчей одной модели (v0.10.0).
 	// Обновляем безусловно — overhead минимальный (один lock + int++); даже
 	// если стратегия не fair_share, поле остаётся как honest «последний
 	// диспатченный» для возможной диагностики в будущем.

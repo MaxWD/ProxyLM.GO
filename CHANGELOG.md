@@ -11,11 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`fair_share_round_robin` routing strategy** (FUTURE.md #8). A new pull-strategy that extends `deferred_model_then_capable` with starvation protection: when `scheduler.max_consecutive_per_model > 0` and a server has dispatched N consecutive jobs for one model, the worker forcibly picks the next FIFO job for a *different* model (if any compatible one is queued). Falls back to ordinary drain if no other compatible model is available. Existing strategies are unchanged; the new behaviour is opt-in via `routing.strategy: fair_share_round_robin` + `scheduler.max_consecutive_per_model: <N>`.
+- **`fair_share_round_robin` routing strategy** (previously parked in `docs/FUTURE.md`). A new pull-strategy that extends `deferred_model_then_capable` with starvation protection: when `scheduler.max_consecutive_per_model > 0` and a server has dispatched N consecutive jobs for one model, the worker forcibly picks the next FIFO job for a *different* model (if any compatible one is queued). Falls back to ordinary drain if no other compatible model is available. Existing strategies are unchanged; the new behaviour is opt-in via `routing.strategy: fair_share_round_robin` + `scheduler.max_consecutive_per_model: <N>`.
 - **`scheduler` config section** with `max_consecutive_per_model` (default `0` = disabled). Validated by `Config.Validate()`; ignored by other strategies.
-- **Ridge regression in `PerfTracker`** (FUTURE.md #2). All normal-equation solvers (1/2/3-variable) now add `λI` to `X^T X` with `λ = 1e-4`. Stabilises estimates on collinear or low-sample data without observable impact on well-conditioned fits.
-- **R² and 95% confidence intervals in `PerfStats`** (FUTURE.md #7). Each `(server, model, endpoint)` bucket now publishes `RSquared`, `FitQuality ∈ {"good","degraded",""}` (good if R² ≥ 0.70), and half-width 95% CI for each coefficient (`TLoadCI`, `KInCI`, `KOutCI`). The TUI server-detail Info pane renders `tok/s` as `38.5±5.1`, exposes an `R²` column, and flash-highlights rows with `fit_quality = "degraded"`.
-- **Per-endpoint performance statistics** (FUTURE.md #3). The regression key changed from `(server, model)` to `(server, model, endpoint)`. `/v1/chat/completions` and `/v1/embeddings` (and any other path) are tracked in separate buckets, so mixing request types no longer distorts the fit. `core.Job.Endpoint` propagates the value from `RequestRecord.Endpoint` into `recordPerf`; `ipc.ModelStats.Endpoint` is published in `state_snapshot`.
+- **Ridge regression in `PerfTracker`** (previously parked in `docs/FUTURE.md`). All normal-equation solvers (1/2/3-variable) now add `λI` to `X^T X` with `λ = 1e-4`. Stabilises estimates on collinear or low-sample data without observable impact on well-conditioned fits.
+- **R² and 95% confidence intervals in `PerfStats`** (previously parked in `docs/FUTURE.md`). Each `(server, model, endpoint)` bucket now publishes `RSquared`, `FitQuality ∈ {"good","degraded",""}` (good if R² ≥ 0.70), and half-width 95% CI for each coefficient (`TLoadCI`, `KInCI`, `KOutCI`). The TUI server-detail Info pane renders `tok/s` as `38.5±5.1`, exposes an `R²` column, and flash-highlights rows with `fit_quality = "degraded"`.
+- **Per-endpoint performance statistics** (previously parked in `docs/FUTURE.md`). The regression key changed from `(server, model)` to `(server, model, endpoint)`. `/v1/chat/completions` and `/v1/embeddings` (and any other path) are tracked in separate buckets, so mixing request types no longer distorts the fit. `core.Job.Endpoint` propagates the value from `RequestRecord.Endpoint` into `recordPerf`; `ipc.ModelStats.Endpoint` is published in `state_snapshot`.
 - **Unit tests**: `internal/core/fair_share_test.go` covers forced switch after limit, fallback to drain, visited respect, and disabled-limit equivalence to `PopFor`. Existing perf tests updated for the new `Record(server, model, endpoint, …)` signature.
 
 ### Changed
@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- **`docs/FUTURE.md` / `docs/FUTURE.ru.md`** items #2, #3, #7, #8 collapsed to "DONE in v0.10.0" stubs pointing at the implementation. Their parking-lot description is preserved for traceability.
+- **`docs/FUTURE.md` / `docs/FUTURE.ru.md`** — four implemented parking-lot items (ridge regression, per-endpoint stats, R²/CI, max-consecutive starvation protection) deleted per `FUTURE-RULE`: their description survives in CHANGELOG / SRS §3.7 / ARCHITECTURE §4 / code docstrings. Remaining items renumbered sequentially (1..9, no gaps) in both EN and RU versions.
 
 ## [0.9.7] - 2026-05-19
 
@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`Config.Warnings()`** — non-fatal advisory output collected alongside `Validate()`. Currently emits one line per backend with a non-`openai` `type` value. Logged at WARN level by `cmd/serve` on daemon start.
-- **`docs/FUTURE.md`** — three new parked items recording risks raised by the QA review of the backend-agnostic concept: preflight `/v1/models` shape validation (#11), 429-aware retry with `Retry-After` and jitter (#12), per-backend `serialize_by_model` flag (#13). All three are documented but explicitly out of scope for v0.9.x per FUTURE-RULE.
+- **`docs/FUTURE.md`** — three new parked items recording risks raised by the QA review of the backend-agnostic concept: preflight `/v1/models` shape validation, 429-aware retry with `Retry-After` and jitter, per-backend `serialize_by_model` flag. All three are documented but explicitly out of scope for v0.9.x per FUTURE-RULE. (At the time of this release they were numbered #11/#12/#13; v0.10.0 cleaned up implemented items and renumbered the survivors to #7/#8/#9.)
 
 ## [0.9.6] - 2026-05-18
 
