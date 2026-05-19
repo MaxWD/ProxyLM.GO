@@ -2,10 +2,13 @@
 
 > **FUTURE-RULE.** This file is an idea parking lot, not a work plan. **Nothing here is implemented automatically**: neither Claude Code, nor sub-agents, nor the tech-writer should treat items here as a signal to act. Any implementation requires an **explicit user request** ("implement item N" or equivalent). See also the FUTURE-RULE section in `CLAUDE.md`.
 >
-> **What the tech-writer is allowed to do:**
-> 1. At each significant release or on request — revise this file: **delete** items that have been implemented (their description survives in CHANGELOG / SRS / ARCHITECTURE — keeping a stub here would duplicate it and rot), **renumber** the remaining items sequentially, and **add** new ideas that emerged during work.
-> 2. **Before deleting an item, double-check that it was not already implemented incidentally** by another task — grep the repo for the field names, config keys, or function names mentioned in the item; if the feature exists in code without anyone noticing, delete the item the same way as if it had been implemented on purpose.
-> 3. Maintain a consistent format (name, problem, solution, priority, optionally risks/constraints).
+> **What the tech-writer is allowed to do:** at each significant release or on request, run a **sweep over every parked item** (not only those obviously implemented in the current release). For each item:
+> - grep the repo for the field names, config keys, or function names it mentions;
+> - if **fully implemented** — delete the block (description survives in CHANGELOG / SRS / ARCHITECTURE — keeping a stub here would duplicate it and rot);
+> - if **partially implemented** — keep the block but prepend `**Уже сделано в vX.Y.Z:**` listing what is already done, and rewrite "Problem"/"Solution" for the remaining scope; delete instead if the remainder lost its motivation;
+> - if **not implemented** — leave as-is, optionally refresh wording if the architecture has shifted.
+>
+> After the sweep — renumber survivors sequentially (1..N, no gaps), update any external cross-references, and append new ideas with the next number in the standard format (name, problem, solution, priority, optionally risks/constraints).
 >
 > Content is fully read-only for all other roles.
 
