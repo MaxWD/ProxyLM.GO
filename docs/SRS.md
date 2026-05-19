@@ -1,7 +1,7 @@
 # ProxyLM.GO — Software Requirements Specification (SRS)
 
-Document version: 0.9.6
-Baseline: ProxyLM.GO v0.9.6
+Document version: 0.9.7
+Baseline: ProxyLM.GO v0.9.7
 Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`API.md`](./API.md), [`AGENTS.md`](./AGENTS.md)
 
 ---
@@ -10,7 +10,7 @@ Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`API.md`](./API.md),
 
 ### 1.1. Purpose
 
-ProxyLM.GO is an HTTP proxy in Go placed in front of local LLM servers (LM Studio, Ollama, any OpenAI-compatible backend). The primary goal is to **serialize requests by model**, preventing constant model reloads into VRAM that occur when multiple clients send requests to multiple models in arbitrary order.
+ProxyLM.GO is an HTTP proxy in Go placed in front of any OpenAI-compatible LLM backend — local engines (LM Studio, Ollama, vLLM, llama.cpp) or remote APIs (OpenRouter, Groq, Together AI, OpenAI). The proxy is backend-agnostic: it operates purely on the OpenAI `/v1/*` contract and is unaware of what software is running behind the URL. The primary goal is to **serialize requests by model** on single-model backends, preventing constant model reloads into VRAM that occur when multiple clients send requests to multiple models in arbitrary order.
 
 Delivered as a **single portable binary**: the same executable can run as a daemon (service) or as a TUI client to a running daemon. On first run, `config.yaml` and `proxylm.db` are automatically created alongside the binary. Cross-compiles to any OS (`GOOS`/`GOARCH`) without a CGO toolchain.
 
@@ -36,7 +36,7 @@ The product applies to installations where:
 | Term                    | Definition                                                                          |
 |-------------------------|-------------------------------------------------------------------------------------|
 | LLM                     | Large Language Model                                                                |
-| Backend                 | LLM server behind the proxy (LM Studio, Ollama)                                     |
+| Backend                 | Any OpenAI-compatible LLM server behind the proxy (LM Studio, Ollama, vLLM, llama.cpp, OpenAI, OpenRouter, Groq, Together AI, …) |
 | Model affinity          | Routing strategy preferring the server where the model is already loaded            |
 | Model swap              | Evicting the current model and loading another into VRAM                            |
 | In-flight               | A request sent to the backend whose response has not yet been fully received        |

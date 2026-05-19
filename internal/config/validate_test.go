@@ -88,6 +88,40 @@ func defaultValidConfig() Config {
 	return c
 }
 
+func TestConfig_Warnings(t *testing.T) {
+	t.Run("без type — без предупреждений", func(t *testing.T) {
+		c := defaultValidConfig()
+		if w := c.Warnings(); len(w) != 0 {
+			t.Errorf("ожидалось 0 предупреждений, получено %d: %v", len(w), w)
+		}
+	})
+	t.Run("type=openai — без предупреждений", func(t *testing.T) {
+		c := defaultValidConfig()
+		c.Backends[0].Type = "openai"
+		if w := c.Warnings(); len(w) != 0 {
+			t.Errorf("ожидалось 0 предупреждений, получено %d: %v", len(w), w)
+		}
+	})
+	t.Run("type=ollama — одно предупреждение про reserved field", func(t *testing.T) {
+		c := defaultValidConfig()
+		c.Backends[0].Type = "ollama"
+		w := c.Warnings()
+		if len(w) != 1 {
+			t.Fatalf("ожидалось 1 предупреждение, получено %d: %v", len(w), w)
+		}
+		if !strings.Contains(w[0], "зарезервировано") || !strings.Contains(w[0], "ollama") {
+			t.Errorf("неожиданный текст: %s", w[0])
+		}
+	})
+	t.Run("type=ollama не блокирует Validate", func(t *testing.T) {
+		c := defaultValidConfig()
+		c.Backends[0].Type = "ollama"
+		if err := c.Validate(); err != nil {
+			t.Errorf("type=ollama должно быть валидным, получено: %v", err)
+		}
+	})
+}
+
 func TestApplyDefaults(t *testing.T) {
 	c := Config{
 		Backends: []Backend{{Name: "srv1", URL: "http://1.1.1.1"}},

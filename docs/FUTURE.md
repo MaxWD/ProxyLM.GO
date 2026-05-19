@@ -95,3 +95,39 @@ This document records features that did not make it into current releases but ar
 **Solution:** config parameter at the `compat.model_aliases` level (or a separate section) with rules of the form `from: <model> → to: [<candidate1>, <candidate2>, …]`. When a request arrives for a model absent from all healthy servers, the proxy substitutes it with the first available candidate from the list and forwards; both model names (`requested_model` vs `actual_model`) are recorded in logs and history.
 
 **Constraint:** currently (v0.9.3 baseline) the absence of a model returns `ErrNoServer` / 503 — this is a deliberate choice until aliasing is implemented.
+
+---
+
+## 11. Preflight `/v1/models` shape validation (priority: high)
+
+**Problem:** the proxy is backend-agnostic and accepts any URL in `backends[].url`. If a user accidentally points it at a non-OpenAI endpoint (Anthropic `/v1/messages`, Azure with `api-version`, raw Ollama `/api/generate`), the misconfiguration surfaces only on the first client request as a 404/500 with no diagnostic guidance.
+
+**Solution:** at startup, after the initial healthcheck, issue a single `GET /v1/models` and validate the response shape (`data: []` with objects having `id: string`). If the shape is wrong, mark the server `unhealthy` and emit a WARN log explaining that the endpoint is not OpenAI-compatible. The proxy stays up — the rest of the configured servers continue to work.
+
+**Risks:** adds one extra HTTP call per backend at startup; trivial cost.
+
+---
+
+## 12. 429-aware retry with `Retry-After` and jitter (priority: high)
+
+**Problem:** the retry policy (FR-18..FR-20) does not currently distinguish between 5xx, network errors, and 429 rate-limit responses. For cloud backends (OpenRouter, Groq, Together, OpenAI) this can amplify rate limits — failover to a second cloud backend multiplies the 429 storm rather than waiting it out.
+
+**Solution:**
+- classify upstream errors: 4xx (except 429) → no retry; 429 / 503 → respect `Retry-After` (seconds or HTTP-date), capped by `retry.max_backoff_ms`; 5xx / network → exponential backoff as today;
+- add jitter (e.g., `±20%`) to backoff intervals to avoid synchronized retry waves;
+- optional per-backend circuit breaker: after N consecutive 429s within a window, treat the backend as `unhealthy` for a cool-down period.
+
+**Risks:** small change in retry semantics — existing clients should not regress because today's behavior is "retry on any error", and the new policy is strictly less aggressive on 429.
+
+---
+
+## 13. Per-backend `serialize_by_model` flag (priority: medium)
+
+**Problem:** model-affinity routing (INV-2) serializes requests by model on each server to prevent VRAM swaps. For single-model backends (LM Studio, Ollama, vLLM, llama.cpp) this is essential. For multi-model cloud backends (OpenRouter, Groq, Together — all models available simultaneously, no VRAM swap), it is pure overhead: requests for different models that could be served in parallel are queued sequentially.
+
+**Solution:** per-backend config flag `serialize_by_model: auto | true | false` (default `auto`):
+- `true` — keep current INV-2 behavior (single-model backend);
+- `false` — disable per-model serialization for this backend; requests dispatched as soon as the worker is free, regardless of model;
+- `auto` — heuristic: if `/v1/models` returns ≤ 2 models, behave as `true`; if ≥ 10, as `false`; otherwise log a hint and default to `true`.
+
+**Risks:** complicates the scheduler's worker loop; needs careful test coverage so single-model behavior is unaffected.

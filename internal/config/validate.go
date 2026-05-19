@@ -165,11 +165,10 @@ func validateBackends(bs []Backend) error {
 		if err := validateBackendURL(b.URL); err != nil {
 			return fmt.Errorf("backends[%q].url: %w", b.Name, err)
 		}
-		switch b.Type {
-		case BackendTypeOpenAI, BackendTypeOllama:
-		default:
-			return fmt.Errorf("backends[%q].type: ожидалось openai|ollama, получено %q", b.Name, b.Type)
-		}
+		// backends[].type — reserved for future native-protocol backends
+		// (Ollama /api/*, Anthropic, Gemini). MVP ignores the value;
+		// applyDefaults() turns "" into "openai". Unknown values are accepted
+		// but surface in Config.Warnings().
 		if b.TimeoutSeconds < 1 {
 			return fmt.Errorf("backends[%q].timeout_seconds ≥ 1, получено %d", b.Name, b.TimeoutSeconds)
 		}
@@ -207,3 +206,21 @@ func validateBackendURL(raw string) error {
 }
 
 func isValidPort(p int) bool { return p >= 1 && p <= 65535 }
+
+// Warnings возвращает non-fatal замечания к конфигу — то, что не блокирует старт,
+// но стоит показать оператору при загрузке. Сейчас покрывает поле
+// backends[].type: значения, отличные от "openai", принимаются (поле зарезервировано
+// под будущие native-протоколы — Ollama /api/*, Anthropic, Gemini), но в MVP
+// игнорируются — об этом полезно предупредить, иначе пользователь будет думать,
+// что type: ollama что-то меняет в поведении прокси.
+func (c *Config) Warnings() []string {
+	var out []string
+	for _, b := range c.Backends {
+		if b.Type != "" && b.Type != BackendTypeOpenAI {
+			out = append(out,
+				fmt.Sprintf("backends[%q].type=%q: поле зарезервировано под будущие native-протоколы и в MVP игнорируется; прокси использует OpenAI-совместимый /v1/* shim для всех бэкендов",
+					b.Name, b.Type))
+		}
+	}
+	return out
+}

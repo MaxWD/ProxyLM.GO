@@ -63,9 +63,14 @@ type Compat struct {
 }
 
 type Backend struct {
-	Name           string   `yaml:"name"`
-	URL            string   `yaml:"url"`
-	Priority       int      `yaml:"priority"`
+	Name     string `yaml:"name"`
+	URL      string `yaml:"url"`
+	Priority int    `yaml:"priority"`
+	// Type зарезервировано под будущие native-протоколы (Ollama /api/*,
+	// Anthropic, Gemini). В MVP игнорируется: прокси одинаково работает с любым
+	// OpenAI-совместимым /v1/* сервером (LM Studio, Ollama OpenAI-shim, vLLM,
+	// llama.cpp, OpenRouter, Groq, Together AI, OpenAI, …). Пустое значение
+	// заполняется через applyDefaults() как "openai".
 	Type           string   `yaml:"type"`
 	TimeoutSeconds int      `yaml:"timeout_seconds"`
 	APIKey         string   `yaml:"api_key"`
