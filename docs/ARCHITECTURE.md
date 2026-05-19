@@ -156,7 +156,13 @@ sort candidates by:
 choose candidates[0]
 ```
 
-This is `model_affinity_least_busy` — the default strategy. Implementation is a pure function of `[]*ServerInfo` and `model`; it does not block workers and reads `CurrentModel` via `atomic.Pointer[string].Load()`.
+This is `model_affinity_least_busy` — the default push-strategy. Implementation is a pure function of `[]*ServerInfo` and `model`; it does not block workers and reads `CurrentModel` via `atomic.Pointer[string].Load()`.
+
+### Pull strategies (shared `JobPool`)
+
+For `deferred_model_then_capable`, `preserve_model_coverage`, and `fair_share_round_robin` no server is assigned at accept time. Instead the scheduler keeps a shared `JobPool` (`internal/core/pool.go`); released workers pull the next compatible Job themselves via `PopFor` / `PopForCoverage` / `PopForFairShare`. This redistributes load proportionally to backend speed when several servers hold the same model.
+
+`fair_share_round_robin` (added in v0.10.0) extends `deferred_model_then_capable` with **starvation protection**. The scheduler tracks `ConsecutiveModelCount` on each `ServerInfo` (under `s.mu`, updated in `dispatch`). When `scheduler.max_consecutive_per_model > 0` and the count has reached the limit, `PopForFairShare` scans the pool for a Job under a model different from `current_model` and dispatches it. If no other compatible model is queued, it falls back to ordinary FIFO drain — the worker is never stuck idle while compatible work exists. The cost is one extra model reload every N requests, which is honestly reflected in the perf regression (`t_load × loaded=1`).
 
 ## 5. Retry + Failover
 

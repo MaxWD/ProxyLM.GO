@@ -2,7 +2,15 @@
 
 > **FUTURE-RULE.** This file is an idea parking lot, not a work plan. **Nothing here is implemented automatically**: neither Claude Code, nor sub-agents, nor the tech-writer should treat items here as a signal to act. Any implementation requires an **explicit user request** ("implement item N" or equivalent). See also the FUTURE-RULE section in `CLAUDE.md`.
 >
-> **What the tech-writer is allowed to do:** at each significant release or on request, revise this file — remove already-implemented items, add new ideas that emerged during work, maintain a consistent format (name, problem, solution, priority, optionally risks/constraints). Content is fully read-only for all other roles.
+> **What the tech-writer is allowed to do:** at each significant release or on request, run a **sweep over every parked item** (not only those obviously implemented in the current release). For each item:
+> - grep the repo for the field names, config keys, or function names it mentions;
+> - if **fully implemented** — delete the block (description survives in CHANGELOG / SRS / ARCHITECTURE — keeping a stub here would duplicate it and rot);
+> - if **partially implemented** — keep the block but prepend `**Уже сделано в vX.Y.Z:**` listing what is already done, and rewrite "Problem"/"Solution" for the remaining scope; delete instead if the remainder lost its motivation;
+> - if **not implemented** — leave as-is, optionally refresh wording if the architecture has shifted.
+>
+> After the sweep — renumber survivors sequentially (1..N, no gaps), update any external cross-references, and append new ideas with the next number in the standard format (name, problem, solution, priority, optionally risks/constraints).
+>
+> Content is fully read-only for all other roles.
 
 This document records features that did not make it into current releases but arise from accumulated development experience. Each item contains a brief rationale and an indicative priority.
 
@@ -10,33 +18,15 @@ This document records features that did not make it into current releases but ar
 
 ## 1. Persistence of perf statistics (priority: high)
 
-**Problem:** `PerfTracker` keeps all observations `(server, model)` in RAM. When the daemon restarts, the history is wiped; regression restarts from scratch — the first 2–3 requests yield no metrics.
+**Problem:** `PerfTracker` keeps all observations `(server, model, endpoint)` in RAM. When the daemon restarts, the history is wiped; regression restarts from scratch — the first 2–3 requests yield no metrics.
 
-**Solution:** persist `[]perfObservation` in SQLite (new table `perf_observations`), load on startup. Limit storage size (e.g., 1000 observations per pair, FIFO).
+**Solution:** persist `[]perfObservation` in SQLite (new table `perf_observations`), load on startup. Limit storage size (e.g., 1000 observations per key, FIFO).
 
 **Risks:** small overhead per completed request; migration 0003 required.
 
 ---
 
-## 2. Ridge regression / regularization (priority: medium)
-
-**Problem:** with few observations, or when all `loaded=1` (or all `loaded=0`), the matrix `X^T X` may be nearly singular, leading to numerically unstable estimates. The current fallback is 2×2 without diagnostics.
-
-**Solution:** add ridge regularization: `(X^T X + λI) · θ = X^T y`, where λ is a small constant (e.g., `1e-4`). Compute the R² quality metric and publish it in the TUI server-detail modal as a `degraded fit` indicator when R² is below threshold.
-
-**User-visible effect:** the operator sees "fit: good / degraded" in the modal and understands estimate reliability.
-
----
-
-## 3. Per-endpoint statistics (priority: low)
-
-**Problem:** `PerfTracker` aggregates by `(server, model)` without accounting for request type. `POST /v1/chat/completions` and `POST /v1/embeddings` have fundamentally different token/time profiles; mixing distorts the regression.
-
-**Solution:** add an `endpoint` dimension to the observation key: `(server, model, endpoint)`. A separate `ModelSummary` per endpoint; in the modal — tabs or separate rows.
-
----
-
-## 4. In-memory queue persistence (priority: medium)
+## 2. In-memory queue persistence (priority: medium)
 
 **Problem:** when the daemon restarts, all requests in `pending` are lost — clients receive a connection error and must retry on their side. In production installations this can cause significant losses.
 
@@ -46,7 +36,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 5. Web UI (priority: low)
+## 3. Web UI (priority: low)
 
 **Problem:** TUI requires a terminal; when monitoring remotely via a browser, TUI is inconvenient.
 
@@ -56,7 +46,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 6. Authenticated WS multiplexing with event filtering (priority: medium)
+## 4. Authenticated WS multiplexing with event filtering (priority: medium)
 
 **Problem:** the current `/admin/stream` delivers all events to all connected clients. With multiple simultaneous TUI sessions, backpressure and event drops are possible.
 
@@ -64,23 +54,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 7. Confidence interval and R² in server-detail modal (priority: low)
-
-**Problem:** the server-detail modal shows only a point estimate for `t_load / tok/s`. The user does not know how reliable the estimate is (few data points, high variance).
-
-**Solution:** compute R² (coefficient of determination) and a 95% confidence interval for each parameter based on residuals. Show in the modal next to the estimate: `38.5 tok/s [±5.1]  R²=0.94`.
-
----
-
-## 8. max_consecutive_requests_per_model — starvation protection (priority: medium)
-
-**Problem:** with a continuous stream of requests for model A, other models in the queue will not be served (starvation). This is currently a documented trade-off (R-1 in SRS.md §9.2).
-
-**Solution:** config parameter `scheduler.max_consecutive_per_model` (int, default 0 = disabled): after N consecutive requests for model A the worker forcibly picks the next FIFO request, even if there are more requests for A pending.
-
----
-
-## 9. Optional CGO SQLite build (priority: low)
+## 5. Optional CGO SQLite build (priority: low)
 
 **Problem:** `modernc.org/sqlite` (pure-Go) is noticeably slower than `mattn/go-sqlite3` (CGO) under high history throughput.
 
@@ -88,7 +62,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 10. Model aliasing / fallback mapping (priority: low)
+## 6. Model aliasing / fallback mapping (priority: low)
 
 **Problem:** when a client requests a model not present on any healthy server, the proxy returns `ErrNoServer` / 503. Some clients work with an entire model family (e.g., "any 20B+ instruct") and do not want a 404 when a specific model name is not deployed.
 
@@ -98,7 +72,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 11. Preflight `/v1/models` shape validation (priority: high)
+## 7. Preflight `/v1/models` shape validation (priority: high)
 
 **Problem:** the proxy is backend-agnostic and accepts any URL in `backends[].url`. If a user accidentally points it at a non-OpenAI endpoint (Anthropic `/v1/messages`, Azure with `api-version`, raw Ollama `/api/generate`), the misconfiguration surfaces only on the first client request as a 404/500 with no diagnostic guidance.
 
@@ -108,7 +82,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 12. 429-aware retry with `Retry-After` and jitter (priority: high)
+## 8. 429-aware retry with `Retry-After` and jitter (priority: high)
 
 **Problem:** the retry policy (FR-18..FR-20) does not currently distinguish between 5xx, network errors, and 429 rate-limit responses. For cloud backends (OpenRouter, Groq, Together, OpenAI) this can amplify rate limits — failover to a second cloud backend multiplies the 429 storm rather than waiting it out.
 
@@ -121,7 +95,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 13. Per-backend `serialize_by_model` flag (priority: medium)
+## 9. Per-backend `serialize_by_model` flag (priority: medium)
 
 **Problem:** model-affinity routing (INV-2) serializes requests by model on each server to prevent VRAM swaps. For single-model backends (LM Studio, Ollama, vLLM, llama.cpp) this is essential. For multi-model cloud backends (OpenRouter, Groq, Together — all models available simultaneously, no VRAM swap), it is pure overhead: requests for different models that could be served in parallel are queued sequentially.
 

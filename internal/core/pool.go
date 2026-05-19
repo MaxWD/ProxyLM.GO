@@ -93,6 +93,85 @@ func (p *JobPool) PopFor(s *ServerInfo) *Job {
 	return nil
 }
 
+// PopForFairShare — реализация стратегии fair_share_round_robin (v0.10.0).
+//
+// Базовая семантика совпадает с PopFor (drain current_model FIFO, затем —
+// первый совместимый Job из очереди). Дополнительно учитывается счётчик
+// последовательных диспатчей одной модели на этом сервере:
+//
+//   - если maxConsecutive ≤ 0 — лимит отключён, поведение идентично PopFor;
+//   - если ConsecutiveModelCount ≥ maxConsecutive И в очереди есть Job
+//     под другую модель, которую этот сервер тоже умеет обрабатывать —
+//     ПРИНУДИТЕЛЬНО берём этот «другой» Job (после dispatch'а сервер
+//     переключит current_model и счётчик сбросится в 1);
+//   - если других совместимых моделей в очереди нет — продолжаем drain'ить
+//     текущую (никогда не блокируемся).
+//
+// Это решает проблему голодания (R-1, SRS §9.2): непрерывный поток запросов
+// к модели A не запирает в очереди запросы к моделям B/C/…, если у сервера
+// они тоже есть в Models. Цена — лишняя загрузка модели каждые N запросов,
+// которая отображается в perf-регрессии (t_load × loaded=1).
+//
+// Реактивный crash-detect: unhealthy сервер не получает Job из пула — см. PopFor.
+func (p *JobPool) PopForFairShare(s *ServerInfo, maxConsecutive int) *Job {
+	if !s.Healthy.Load() {
+		return nil
+	}
+	current := s.CurrentModelString()
+	allowed := s.modelsSnapshot()
+
+	s.Lock()
+	forceSwitch := maxConsecutive > 0 &&
+		s.LastDispatchedModel != "" &&
+		s.ConsecutiveModelCount >= maxConsecutive
+	s.Unlock()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Forced switch: ищем первый совместимый Job под модель ≠ current.
+	// Если такого нет — fall through на обычный drain (лучше продолжить
+	// одной моделью, чем блокироваться).
+	if forceSwitch && current != "" {
+		for i, j := range p.jobs {
+			if !allowed[j.Model] || j.Model == current {
+				continue
+			}
+			if j.visited != nil && j.visited[s.Name] {
+				continue
+			}
+			p.jobs = append(p.jobs[:i], p.jobs[i+1:]...)
+			return j
+		}
+	}
+
+	// Обычный путь: drain current_model FIFO.
+	if current != "" {
+		for i, j := range p.jobs {
+			if j.Model != current {
+				continue
+			}
+			if j.visited != nil && j.visited[s.Name] {
+				continue
+			}
+			p.jobs = append(p.jobs[:i], p.jobs[i+1:]...)
+			return j
+		}
+	}
+	// Очередь не содержит current — берём первый совместимый.
+	for i, j := range p.jobs {
+		if !allowed[j.Model] {
+			continue
+		}
+		if j.visited != nil && j.visited[s.Name] {
+			continue
+		}
+		p.jobs = append(p.jobs[:i], p.jobs[i+1:]...)
+		return j
+	}
+	return nil
+}
+
 // PopForCoverage — реализация стратегии preserve_model_coverage.
 //
 // В отличие от PopFor (всегда сначала drain current_model FIFO), этот выбор

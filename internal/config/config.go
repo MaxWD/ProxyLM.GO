@@ -8,6 +8,7 @@ type Config struct {
 	Proxy     Proxy     `yaml:"proxy"`
 	Auth      Auth      `yaml:"auth"`
 	Routing   Routing   `yaml:"routing"`
+	Scheduler Scheduler `yaml:"scheduler"`
 	Retry     Retry     `yaml:"retry"`
 	Discovery Discovery `yaml:"discovery"`
 	Storage   Storage   `yaml:"storage"`
@@ -34,6 +35,17 @@ type APIKey struct {
 
 type Routing struct {
 	Strategy string `yaml:"strategy"`
+}
+
+// Scheduler — параметры планировщика, не зависящие от выбора стратегии напрямую
+// (но некоторые параметры могут активироваться только определёнными стратегиями).
+type Scheduler struct {
+	// MaxConsecutivePerModel — лимит подряд выполненных задач одной модели
+	// на одном сервере перед принудительным переключением. Действует только
+	// для стратегии fair_share_round_robin (v0.10.0). 0 = лимит отключён
+	// (стратегия деградирует к deferred_model_then_capable). При других
+	// стратегиях значение игнорируется (но валидируется).
+	MaxConsecutivePerModel int `yaml:"max_consecutive_per_model"`
 }
 
 type Retry struct {
@@ -84,6 +96,7 @@ const (
 	StrategyLeastBusy              = "least_busy"
 	StrategyDeferredModelThenCap   = "deferred_model_then_capable"
 	StrategyPreserveModelCoverage  = "preserve_model_coverage"
+	StrategyFairShareRoundRobin    = "fair_share_round_robin"
 
 	BackendTypeOpenAI = "openai"
 	BackendTypeOllama = "ollama"

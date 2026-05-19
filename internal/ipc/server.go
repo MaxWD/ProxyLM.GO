@@ -196,17 +196,25 @@ func (h *Hub) buildSnapshot(ctx context.Context) Envelope {
 			Slow:         s.LastSlow.Load(),
 			FailureCount: s.FailureCount.Load(),
 		}
-		// Метрики для шапки — пара (server, current_model). Для server-modal
-		// (Enter в paneHeader) отдаём полный список моделей сервера.
+		// Метрики для шапки — пара (server, current_model). Если у пары есть
+		// статистика на нескольких endpoint'ах (с v0.10.0 ключ включает endpoint),
+		// для header'а агрегируем по «наиболее представительному» (с максимумом
+		// samples). Это совпадает с интуицией оператора, когда модель в основном
+		// используется через один endpoint. Полный per-(model,endpoint) разрез
+		// доступен в server-modal через PerModelStats.
 		if h.perf != nil {
 			if current != "" {
-				st := h.perf.Snapshot(s.Name, current)
-				state.PerfSamples = st.Samples
-				state.PerfOK = st.OK
-				if st.OK {
-					state.TLoadMs = st.TLoadMs
-					state.TokInPerSec = tokPerSec(st.KInMsTok)
-					state.TokOutPerSec = tokPerSec(st.KOutMsTok)
+				best := bestModelStats(h.perf, s.Name, current)
+				if best.Samples > 0 {
+					state.PerfSamples = best.Samples
+					state.PerfOK = best.OK
+					if best.OK {
+						state.TLoadMs = best.TLoadMs
+						state.TokInPerSec = tokPerSec(best.KInMsTok)
+						state.TokOutPerSec = tokPerSec(best.KOutMsTok)
+						state.RSquared = best.RSquared
+						state.FitQuality = best.FitQuality
+					}
 				}
 			}
 			summary := h.perf.ServerSummary(s.Name)
@@ -215,12 +223,18 @@ func (h *Hub) buildSnapshot(ctx context.Context) Envelope {
 				for _, ms := range summary {
 					state.PerModelStats = append(state.PerModelStats, ModelStats{
 						Model:        ms.Model,
+						Endpoint:     ms.Endpoint,
 						Samples:      ms.Stats.Samples,
 						Loaded:       ms.Stats.Loaded,
 						OK:           ms.Stats.OK,
 						TLoadMs:      ms.Stats.TLoadMs,
 						TokInPerSec:  tokPerSec(ms.Stats.KInMsTok),
 						TokOutPerSec: tokPerSec(ms.Stats.KOutMsTok),
+						RSquared:     ms.Stats.RSquared,
+						FitQuality:   ms.Stats.FitQuality,
+						TLoadCI:      ms.Stats.TLoadCI,
+						KInCI:        ms.Stats.KInCI,
+						KOutCI:       ms.Stats.KOutCI,
 					})
 				}
 			}
@@ -321,6 +335,28 @@ func tokPerSec(kMsPerTok float64) float64 {
 		return 0
 	}
 	return 1000.0 / kMsPerTok
+}
+
+// bestModelStats возвращает PerfStats наиболее представительного endpoint'а
+// для пары (server, model). С v0.10.0 ключ регрессии включает endpoint,
+// поэтому для header-метрики (одна строка на сервер) нужно агрегировать по
+// одному endpoint'у — выбираем тот, у которого больше всего samples (это,
+// как правило, основной режим использования модели). Если ни одного
+// endpoint'а не нашлось — возвращает zero-value PerfStats.
+func bestModelStats(p *core.PerfTracker, server, model string) core.PerfStats {
+	if p == nil {
+		return core.PerfStats{}
+	}
+	var best core.PerfStats
+	for _, ms := range p.ServerSummary(server) {
+		if ms.Model != model {
+			continue
+		}
+		if ms.Stats.Samples > best.Samples {
+			best = ms.Stats
+		}
+	}
+	return best
 }
 
 func (c *hubClient) writer(ctx context.Context, log *slog.Logger) {

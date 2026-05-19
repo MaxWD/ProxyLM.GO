@@ -156,7 +156,13 @@ sort candidates by:
 choose candidates[0]
 ```
 
-Это и есть `model_affinity_least_busy` — стратегия по умолчанию. Реализация — чистая функция от `[]*ServerInfo` и `model`, не блокирует воркеры; читает `CurrentModel` через `atomic.Pointer[string].Load()`.
+Это и есть `model_affinity_least_busy` — push-стратегия по умолчанию. Реализация — чистая функция от `[]*ServerInfo` и `model`, не блокирует воркеры; читает `CurrentModel` через `atomic.Pointer[string].Load()`.
+
+### Pull-стратегии (общий `JobPool`)
+
+Для `deferred_model_then_capable`, `preserve_model_coverage` и `fair_share_round_robin` сервер не выбирается при приёме. Вместо этого планировщик держит общий `JobPool` (`internal/core/pool.go`); освобождающиеся воркеры сами тянут следующий совместимый Job через `PopFor` / `PopForCoverage` / `PopForFairShare`. Это перераспределяет нагрузку пропорционально скорости бэкендов, когда модель есть на нескольких серверах.
+
+`fair_share_round_robin` (добавлено в v0.10.0) расширяет `deferred_model_then_capable` **защитой от голодания**. Планировщик ведёт счётчик `ConsecutiveModelCount` на каждом `ServerInfo` (под `s.mu`, обновляется в `dispatch`). При `scheduler.max_consecutive_per_model > 0` и достижении лимита `PopForFairShare` ищет в пуле Job под модель, отличную от `current_model`, и отдаёт его. Если других совместимых моделей в очереди нет — поведение деградирует к обычному FIFO-drain'у (воркер никогда не простаивает при наличии совместимой работы). Цена — лишняя загрузка модели каждые N запросов, что честно отражается в perf-регрессии (`t_load × loaded=1`).
 
 ## 5. Retry + Failover
 

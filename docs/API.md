@@ -1,6 +1,6 @@
 # ProxyLM.GO — API Specification
 
-Document version: 0.9.7
+Document version: 0.10.0
 Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`SRS.md`](./SRS.md)
 
 This document describes three API groups:
@@ -307,26 +307,38 @@ Sent once immediately after connection, and again in response to a `request_snap
         "t_load_ms": 4200.0,
         "tok_in_per_sec": 0.0,
         "tok_out_per_sec": 38.5,
+        "r_squared": 0.94,
+        "fit_quality": "good",
         "slow": false,
         "failure_count": 0,
         "per_model_stats": [
           {
             "model": "qwen2.5:14b",
+            "endpoint": "/v1/chat/completions",
             "samples": 12,
             "loaded": 3,
             "ok": true,
             "t_load_ms": 4200.0,
             "tok_in_per_sec": 0.0,
-            "tok_out_per_sec": 38.5
+            "tok_out_per_sec": 38.5,
+            "r_squared": 0.94,
+            "fit_quality": "good",
+            "t_load_ci": 180.0,
+            "k_out_ci": 1.2
           },
           {
             "model": "llama3.1:8b",
+            "endpoint": "/v1/chat/completions",
             "samples": 5,
             "loaded": 1,
             "ok": true,
             "t_load_ms": 1100.0,
             "tok_in_per_sec": 0.0,
-            "tok_out_per_sec": 72.1
+            "tok_out_per_sec": 72.1,
+            "r_squared": 0.62,
+            "fit_quality": "degraded",
+            "t_load_ci": 950.0,
+            "k_out_ci": 4.7
           }
         ]
       }
@@ -373,21 +385,31 @@ Sent once immediately after connection, and again in response to a `request_snap
 | `t_load_ms` | float64 | estimated model load time (ms); omitted if 0 |
 | `tok_in_per_sec` | float64 | prompt-token throughput (tok/s); omitted if 0 |
 | `tok_out_per_sec` | float64 | completion-token throughput (tok/s); omitted if 0 |
+| `r_squared` | float64 | coefficient of determination R² of header-level regression, [0,1]; omitted if 0 (no fit) |
+| `fit_quality` | string | qualitative grade: `"good"` (R² ≥ 0.70), `"degraded"` (<0.70), `""` if no fit |
 | `slow` | bool | last completed request took ≥ 2× the regression estimate; omitted if false |
 | `failure_count` | int64 | total failed attempts on this server since daemon start; omitted if 0 |
-| `per_model_stats` | `ModelStats[]` | statistics for all models of the server, sorted by `samples DESC`; omitted if empty |
+| `per_model_stats` | `ModelStats[]` | per-(model, endpoint) statistics, sorted by `samples DESC`; omitted if empty |
 
 ##### `ModelStats` structure
+
+Tracks a single `(model, endpoint)` bucket on this server. Endpoint became part of the regression key in v0.10.0 so that request types with fundamentally different token/time profiles (e.g. `/v1/chat/completions` vs `/v1/embeddings`) don't distort the fit.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `model` | string | model identifier |
-| `samples` | int | total number of observations for the (server, model) pair |
+| `endpoint` | string | request path (e.g. `/v1/chat/completions`); omitted if empty (legacy data prior to v0.10.0 migration) |
+| `samples` | int | total number of observations for the (server, model, endpoint) key |
 | `loaded` | int | of those — with the model_reload flag (model switch before request) |
 | `ok` | bool | regression is valid |
 | `t_load_ms` | float64 | estimated load time (ms); omitted if 0 |
 | `tok_in_per_sec` | float64 | prompt-token throughput (tok/s); omitted if 0 |
 | `tok_out_per_sec` | float64 | completion-token throughput (tok/s); omitted if 0 |
+| `r_squared` | float64 | coefficient of determination R², [0,1]; omitted if 0 |
+| `fit_quality` | string | `"good"` / `"degraded"` / `""` (no fit) |
+| `t_load_ci` | float64 | half-width of 95% confidence interval for `t_load_ms`; omitted if 0 (insufficient data or coefficient pinned at 0 by NNLS) |
+| `k_in_ci` | float64 | half-width of 95% CI for the input-token coefficient `k_in_ms_tok` (note: the published value is `tok_in_per_sec = 1000/k_in`; the CI is in `ms/tok` units, the client may convert) |
+| `k_out_ci` | float64 | half-width of 95% CI for the output-token coefficient `k_out_ms_tok` |
 
 ##### `RequestState` fields
 

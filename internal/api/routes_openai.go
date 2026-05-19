@@ -89,8 +89,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.persistRecord(rec, "pending")
 
 	job := &core.Job{
-		ID:    rec.ID,
-		Model: rec.Model,
+		ID:       rec.ID,
+		Model:    rec.Model,
+		Endpoint: rec.Endpoint,
 		Run: func(_ context.Context, srv *core.ServerInfo) core.JobResult {
 			rec.ServerName = srv.Name
 			rec.StartedAt = time.Now().UTC()

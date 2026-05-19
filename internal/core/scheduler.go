@@ -19,6 +19,13 @@ import (
 type Job struct {
 	ID    string
 	Model string
+	// Endpoint — путь OpenAI-API, по которому пришёл запрос
+	// (/v1/chat/completions, /v1/completions, /v1/embeddings и т. п.).
+	// Используется PerfTracker как часть ключа регрессии: разные endpoint'ы
+	// имеют принципиально разные профили tokens/ms и не должны смешиваться
+	// (введено в v0.10.0). Пустая строка допустима для совместимости со
+	// старыми сценариями и тестами — она попадёт в «безымянный» бакет.
+	Endpoint string
 
 	// Run — пользовательский handler. Должен вернуть JobResult со статусом
 	// и пометить ResponseStarted=true как только первый байт ушёл клиенту (INV-6).
@@ -74,6 +81,13 @@ type Scheduler struct {
 	// логику PopFor: не drain'им current_model вслепую, а только если этот
 	// сервер — единственный её держатель.
 	coverageAware bool
+	// fairShare включён для стратегии fair_share_round_robin (v0.10.0).
+	// При maxConsecutivePerModel > 0 воркер принудительно переключает
+	// модель после N подряд диспатчей одной.
+	// 0 (или отрицательное) — лимит отключён, поведение совпадает с
+	// deferred_model_then_capable.
+	fairShare              bool
+	maxConsecutivePerModel int
 
 	// perf — скользящее окно tok/s и TTFT по парам (server, model).
 	// nil-safe: если не передан, Record просто игнорируется.
@@ -83,9 +97,28 @@ type Scheduler struct {
 // ErrSchedulerStopped — попытка Submit после остановки планировщика.
 var ErrSchedulerStopped = errors.New("scheduler: остановлен")
 
-// NewScheduler создаёт планировщик. При strategy = deferred_model_then_capable
+// SchedulerOptions — параметры конструктора Scheduler помимо обязательных
+// (router/retry/servers/log). Используются для опций, добавленных позднее MVP
+// (v0.10.0+) — чтобы не ломать сигнатуру каждым новым полем.
+type SchedulerOptions struct {
+	// MaxConsecutivePerModel — лимит подряд выполненных задач одной модели
+	// на одном сервере перед принудительным переключением. Действует только
+	// для стратегии fair_share_round_robin; для других стратегий
+	// игнорируется. 0 или отрицательное — лимит отключён.
+	MaxConsecutivePerModel int
+}
+
+// NewScheduler создаёт планировщик. Для pull-стратегий
+// (deferred_model_then_capable, preserve_model_coverage, fair_share_round_robin)
 // дополнительно инициализирует общий JobPool.
 func NewScheduler(servers []*ServerInfo, router *Router, retry RetryConfig, log *slog.Logger) *Scheduler {
+	return NewSchedulerWithOptions(servers, router, retry, log, SchedulerOptions{})
+}
+
+// NewSchedulerWithOptions — расширенная версия NewScheduler, принимающая
+// дополнительные параметры (см. SchedulerOptions). Обычные вызовы могут
+// использовать NewScheduler.
+func NewSchedulerWithOptions(servers []*ServerInfo, router *Router, retry RetryConfig, log *slog.Logger, opts SchedulerOptions) *Scheduler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -102,6 +135,10 @@ func NewScheduler(servers []*ServerInfo, router *Router, retry RetryConfig, log 
 		case RouterPreserveModelCoverage:
 			s.pool = NewJobPool()
 			s.coverageAware = true
+		case RouterFairShareRoundRobin:
+			s.pool = NewJobPool()
+			s.fairShare = true
+			s.maxConsecutivePerModel = opts.MaxConsecutivePerModel
 		}
 	}
 	return s
@@ -373,6 +410,8 @@ func (s *Scheduler) worker(ctx context.Context, srv *ServerInfo) {
 			switch {
 			case s.pool != nil && s.coverageAware:
 				j = s.pool.PopForCoverage(srv, s.servers)
+			case s.pool != nil && s.fairShare:
+				j = s.pool.PopForFairShare(srv, s.maxConsecutivePerModel)
 			case s.pool != nil:
 				j = s.pool.PopFor(srv)
 			default:
@@ -454,6 +493,18 @@ func (s *Scheduler) dispatch(ctx context.Context, srv *ServerInfo, j *Job) {
 	if reloaded {
 		srv.SetCurrentModel(j.Model)
 	}
+	// Учёт серии подряд диспатчей одной модели (v0.10.0).
+	// Обновляем безусловно — overhead минимальный (один lock + int++); даже
+	// если стратегия не fair_share, поле остаётся как honest «последний
+	// диспатченный» для возможной диагностики в будущем.
+	srv.Lock()
+	if srv.LastDispatchedModel == j.Model {
+		srv.ConsecutiveModelCount++
+	} else {
+		srv.LastDispatchedModel = j.Model
+		srv.ConsecutiveModelCount = 1
+	}
+	srv.Unlock()
 	if !srv.InFlight.CompareAndSwap(false, true) {
 		s.log.Error("INV-1 нарушен: InFlight=true перед dispatch",
 			"server", srv.Name, "request_id", j.ID)
@@ -483,7 +534,7 @@ func (s *Scheduler) dispatch(ctx context.Context, srv *ServerInfo, j *Job) {
 		}
 	}
 	if res.Err == nil {
-		s.recordPerf(srv.Name, j.Model, &res, runStart, reloaded)
+		s.recordPerf(srv.Name, j.Model, j.Endpoint, &res, runStart, reloaded)
 	}
 	j.done <- res
 }
@@ -517,7 +568,7 @@ func (s *Scheduler) failServerQueue(srv *ServerInfo, cause error) {
 // srv.LastSlow ← true (флаг публикуется в IPC и отображается в TUI).
 // При actual < 2×predicted флаг сбрасывается. Текущая точка добавляется в
 // статистику ПОСЛЕ сравнения, чтобы slow-выброс не «отравил» predicted.
-func (s *Scheduler) recordPerf(server, model string, res *JobResult, runStart time.Time, loaded bool) {
+func (s *Scheduler) recordPerf(server, model, endpoint string, res *JobResult, runStart time.Time, loaded bool) {
 	if s.perf == nil {
 		return
 	}
@@ -526,9 +577,9 @@ func (s *Scheduler) recordPerf(server, model string, res *JobResult, runStart ti
 		// non-stream: первый байт == последний (целиком ответ записан одной операцией).
 		res.TtftMs = totalMs
 	}
-	predicted := s.perf.Predict(server, model, res.PromptTokens, res.OutputTokens, loaded)
+	predicted := s.perf.Predict(server, model, endpoint, res.PromptTokens, res.OutputTokens, loaded)
 	s.updateSlowFlag(server, totalMs, predicted)
-	s.perf.Record(server, model, res.PromptTokens, res.OutputTokens, totalMs, loaded)
+	s.perf.Record(server, model, endpoint, res.PromptTokens, res.OutputTokens, totalMs, loaded)
 }
 
 // updateSlowFlag устанавливает / сбрасывает ServerInfo.LastSlow по сравнению

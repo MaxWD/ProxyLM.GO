@@ -88,6 +88,14 @@ type ServerInfo struct {
 	Queue  []*Job      // FIFO задания; защищён mu; обрабатывается одним worker'ом
 	mu     sync.Mutex
 	Notify chan struct{} // capacity 1
+
+	// LastDispatchedModel / ConsecutiveModelCount — учёт серии подряд
+	// выполненных задач одной модели (введено в v0.10.0). Используется
+	// стратегией fair_share_round_robin: при достижении лимита воркер
+	// принудительно берёт job под ДРУГУЮ модель. Поля защищены mu;
+	// обновляются в Scheduler.dispatch перед стартом Run.
+	LastDispatchedModel   string
+	ConsecutiveModelCount int
 }
 
 // NewServerInfo создаёт ServerInfo с инициализированными atomic-полями и каналом Notify.

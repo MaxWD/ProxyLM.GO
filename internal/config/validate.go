@@ -20,6 +20,9 @@ func (c *Config) Validate() error {
 	if err := c.Routing.validate(); err != nil {
 		return fmt.Errorf("routing: %w", err)
 	}
+	if err := c.Scheduler.validate(); err != nil {
+		return fmt.Errorf("scheduler: %w", err)
+	}
 	if err := c.Retry.validate(); err != nil {
 		return fmt.Errorf("retry: %w", err)
 	}
@@ -93,11 +96,19 @@ func (r *Routing) validate() error {
 		StrategyRoundRobin,
 		StrategyLeastBusy,
 		StrategyDeferredModelThenCap,
-		StrategyPreserveModelCoverage:
+		StrategyPreserveModelCoverage,
+		StrategyFairShareRoundRobin:
 		return nil
 	default:
 		return fmt.Errorf("strategy: неизвестная стратегия %q", r.Strategy)
 	}
+}
+
+func (s *Scheduler) validate() error {
+	if s.MaxConsecutivePerModel < 0 {
+		return fmt.Errorf("max_consecutive_per_model ≥ 0, получено %d", s.MaxConsecutivePerModel)
+	}
+	return nil
 }
 
 func (r *Retry) validate() error {
