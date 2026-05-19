@@ -5,7 +5,7 @@
 [![Go](https://img.shields.io/github/go-mod/go-version/MaxWD/ProxyLM.GO)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-OpenAI-compatible HTTP proxy for local LLM servers (LM Studio, Ollama) with model-aware queueing, retry/failover, SSE streaming, and a Bubble Tea TUI. Single portable binary, no CGO.
+OpenAI-compatible HTTP proxy for any OpenAI-compatible LLM backend — local (LM Studio, Ollama, vLLM, llama.cpp) or remote (OpenRouter, Groq, Together AI, OpenAI). Model-aware queueing, retry/failover, SSE streaming, and a Bubble Tea TUI. Single portable binary, no CGO.
 
 **[На русском](README.ru.md)** · English
 
@@ -13,7 +13,7 @@ OpenAI-compatible HTTP proxy for local LLM servers (LM Studio, Ollama) with mode
 
 ## Overview
 
-ProxyLM.GO sits between your applications and one or more local (or remote) OpenAI-compatible LLM servers. To the client it looks like a standard OpenAI API endpoint; behind the scenes it manages routing, queuing, and failover across multiple backends.
+ProxyLM.GO sits between your applications and one or more OpenAI-compatible LLM servers — local engines (LM Studio, Ollama, vLLM, llama.cpp) or remote APIs (OpenRouter, Groq, Together AI, OpenAI). To the client it looks like a standard OpenAI API endpoint; behind the scenes it manages routing, queuing, and failover across multiple backends. You point it at a URL, supply an API key if the backend needs one, and it works — regardless of what software is running on the other side.
 
 The primary design goal is to eliminate redundant model swaps. Each LLM occupies significant VRAM; when multiple clients request different models in an interleaved pattern, a server without a proxy spends seconds to minutes unloading and reloading models on every request. ProxyLM.GO collects incoming requests into per-server queues and **drains all pending requests for the currently loaded model before switching** — the model loads once and processes its entire backlog. Requests for the same model across multiple capable servers are distributed in parallel to keep GPU utilization high.
 
@@ -21,7 +21,7 @@ The primary design goal is to eliminate redundant model swaps. Each LLM occupies
 
 - **Model-affinity queue** — per-server worker drains all queued requests for the current model before switching; prevents redundant model swaps (INV-1..INV-3)
 - **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/healthz`
-- **Multiple backends** — route across any number of OpenAI-compatible servers (LM Studio, Ollama, or cloud); configurable priority per backend
+- **Multiple backends** — route across any number of OpenAI-compatible servers; configurable priority per backend (use it to prefer local over cloud when both can serve a model)
 - **Auto-discovery** — polls each backend's `/v1/models` at a configurable interval; marks unhealthy servers after N consecutive failures
 - **Retry and failover** — exponential backoff with rolling server exclusion; failover to another healthy backend after local retries (INV-5)
 - **SSE streaming** — transparent chunk-by-chunk proxying; no buffering, no retry after the first chunk is sent to the client (INV-6)
@@ -107,18 +107,25 @@ Open `config.yaml` and adjust the `backends` section:
 
 ```yaml
 backends:
-  - name: lm-studio
-    url: http://127.0.0.1:1234   # LM Studio default
-    type: openai
+  - name: lm-studio          # any descriptive name — shown in TUI and logs
+    url: http://127.0.0.1:1234   # LM Studio default port
     timeout_seconds: 600
+    priority: 100            # lower number = higher preference among free servers
 
   - name: ollama
-    url: http://127.0.0.1:11434  # Ollama default
-    type: openai                 # Ollama exposes an OpenAI-compatible /v1/* shim
+    url: http://127.0.0.1:11434  # Ollama default port (OpenAI-compatible /v1/* shim)
     timeout_seconds: 600
+    priority: 200
+
+  # Cloud fallback — uncomment if you want OpenRouter to serve when locals are busy
+  # - name: openrouter
+  #   url: https://openrouter.ai/api
+  #   api_key: sk-or-v1-...
+  #   timeout_seconds: 120
+  #   priority: 900          # high number = used only when locals can't serve
 ```
 
-Change the placeholder keys in `auth.api_keys` and `auth.admin_key`, then restart the daemon.
+Any OpenAI-compatible `/v1/*` server works the same way — `url` (+ `api_key` if the backend requires one) is all you need. Pick `name` so you recognise the server later in the TUI (e.g. `lmstudio-desktop`, `ollama-rack`). Then change the placeholder keys in `auth.api_keys` and `auth.admin_key` and restart the daemon.
 
 ### 4. Connect the TUI
 
@@ -169,10 +176,10 @@ The `compat.response_format_mode` setting is useful for mixed backend pools:
             v
    +----------------------------------+
    | ProxyLM.GO daemon                |        +-----------+
-   |  AuthN -> Router -> per-server   |------->| srv1 (LM) |
+   |  AuthN -> Router -> per-server   |------->| srv1      |
    |           queues + workers       |        +-----------+
    |           (drain current model   |        +-----------+
-   |            fully before switch)  |------->| srv2 (Ol) |
+   |            fully before switch)  |------->| srv2      |
    |  Discovery / SQLite / IPC        |        +-----------+
    +----------------+-----------------+
                     |  WebSocket /admin/stream

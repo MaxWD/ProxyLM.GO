@@ -70,6 +70,9 @@ func runDaemon(parent context.Context, cfgPath string) error {
 		log.Info("config файл создан из встроенного шаблона", "path", created)
 	}
 	log.Info("конфиг загружен", "path", cfgPath, "backends", len(cfg.Backends))
+	for _, w := range cfg.Warnings() {
+		log.Warn("конфиг: " + w)
+	}
 
 	// Обработка сигналов для foreground-режима.
 	ctx, cancel := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)

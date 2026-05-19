@@ -1,6 +1,6 @@
 # ProxyLM.GO — API Specification
 
-Document version: 0.9.6
+Document version: 0.9.7
 Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`SRS.md`](./SRS.md)
 
 This document describes three API groups:
@@ -456,11 +456,39 @@ No `payload` is required. The daemon responds with a regular `state_snapshot` me
 | Text completion           | POST   | `/v1/completions`          | passthrough                             |
 | Embeddings                | POST   | `/v1/embeddings`           | passthrough                             |
 
-### 3.3. LM Studio / Ollama specifics
+### 3.3. Backend compatibility notes
 
-- LM Studio: OpenAI-compatible API at `http://<host>:1234/v1/*`.
-- Ollama: OpenAI shim at `http://<host>:11434/v1/*` (native `/api/*` — out of scope for MVP).
-- Ollama behavior when `model: "..."` does not exist: 404 — mapped to the standard proxy error path.
+ProxyLM.GO is **backend-agnostic**: any server exposing an OpenAI-compatible `/v1/*` API works without per-backend code. The proxy is transparent — it forwards the JSON body and headers (minus `Authorization`, which is injected from `backends[].api_key`) and reads the response stream-by-stream.
+
+Tested / commonly-used backends:
+
+| Backend                      | Default URL                          | Authentication        | Notes                                                                                    |
+|------------------------------|--------------------------------------|-----------------------|------------------------------------------------------------------------------------------|
+| **LM Studio** (local)        | `http://<host>:1234`                 | optional Bearer       | Single-model server (one model loaded at a time). Triggers INV-2 model affinity.         |
+| **Ollama** (local)           | `http://<host>:11434`                | none by default       | OpenAI-compatible shim at `/v1/*` (native `/api/*` is out of scope — see SRS §8). Single-model semantics; `keep_alive` controlled via `OLLAMA_KEEP_ALIVE` env on the Ollama side, not via this proxy. Returns `404` when `model` is unknown — mapped to standard proxy error. |
+| **vLLM** (local/cluster)     | `http://<host>:8000`                 | optional Bearer       | Single-model server. Full OpenAI surface (incl. `logprobs`).                              |
+| **llama.cpp** (`./server`)   | `http://<host>:8080`                 | optional Bearer       | Single-model. Minimal OpenAI shim.                                                       |
+| **OpenAI** (cloud)           | `https://api.openai.com`             | Bearer (`sk-...`)     | Multi-model; INV-2 model affinity does not provide benefit but is not harmful. Cost-bearing — use `priority` to keep cloud as fallback. |
+| **OpenRouter** (cloud)       | `https://openrouter.ai/api`          | Bearer (`sk-or-v1-`)  | Multi-model (hundreds of models in `/v1/models`); see *Known limitations* below.         |
+| **Groq / Together / Fireworks** (cloud) | provider-specific          | Bearer                | Multi-model; same semantics as OpenRouter.                                               |
+
+Configuration is uniform across all of the above:
+
+```yaml
+- name: <descriptive-name>
+  url: <base-url-without-/v1>
+  api_key: <token-or-null>
+  timeout_seconds: <seconds>
+  priority: <int, lower = preferred>
+```
+
+The `backends[].type` field is reserved for future native-protocol backends (Ollama `/api/*`, Anthropic, Gemini) and is **ignored by the MVP**. You may omit it.
+
+**Known limitations for cloud backends in v0.9.x:**
+
+- The retry policy (FR-18..FR-20) does not yet parse `Retry-After` headers; under heavy 429 from a cloud provider it can amplify rate limits. Track via [`docs/FUTURE.md`](./FUTURE.md) item *429-aware retry*.
+- Discovery polls `/v1/models` every `discovery.interval_seconds` for **all** backends; an OpenRouter backend (~300 models) populates the proxy's model table with all of them. Recommended workaround: set `models:` explicitly per backend to restrict discovery to the models you actually use.
+- Model-affinity routing (INV-2) sequences requests by model on each server. For multi-model cloud backends this is a no-op overhead rather than a benefit; a per-backend `serialize_by_model` flag is on the roadmap (see FUTURE.md).
 
 ### 3.4. Response handling
 

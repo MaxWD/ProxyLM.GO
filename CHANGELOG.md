@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-05-19
+
+### Changed
+
+- **Positioning**: reframed the project as **backend-agnostic** in README, SRS, and config example. ProxyLM.GO sits in front of *any* OpenAI-compatible `/v1/*` server — local engines (LM Studio, Ollama, vLLM, llama.cpp) and remote APIs (OpenRouter, Groq, Together AI, OpenAI) are all configured the same way (`url` + optional `api_key`). The wire-level behavior was already backend-agnostic; this release aligns documentation and naming with the actual code.
+- **`backends[].type` now optional**. The field is reserved for future native-protocol backends (Ollama `/api/*`, Anthropic, Gemini) and is *ignored by the MVP*. Empty value defaults to `openai`; any other value is accepted, but `Config.Warnings()` surfaces a one-line WARN at daemon start explaining that the value does not change runtime behavior. Existing configs with `type: openai` or `type: ollama` continue to work without modification.
+- **`config.example.yaml`**: regenerated comments and example names (`lmstudio-desktop`, `ollama-rack`, commented-out `openrouter-cloud` showing cloud-fallback via `priority`).
+- **`docs/API.md` §3.3**: renamed from "LM Studio / Ollama specifics" to "Backend compatibility notes"; expanded into a per-backend table with auth flavour and routing implications.
+
+### Added
+
+- **`Config.Warnings()`** — non-fatal advisory output collected alongside `Validate()`. Currently emits one line per backend with a non-`openai` `type` value. Logged at WARN level by `cmd/serve` on daemon start.
+- **`docs/FUTURE.md`** — three new parked items recording risks raised by the QA review of the backend-agnostic concept: preflight `/v1/models` shape validation (#11), 429-aware retry with `Retry-After` and jitter (#12), per-backend `serialize_by_model` flag (#13). All three are documented but explicitly out of scope for v0.9.x per FUTURE-RULE.
+
 ## [0.9.6] - 2026-05-18
 
 ### Added
@@ -91,7 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.6...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.7...HEAD
+[0.9.7]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.3...v0.9.4

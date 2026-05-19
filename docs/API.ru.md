@@ -1,6 +1,6 @@
 # ProxyLM.GO — API Specification
 
-Версия документа: 0.9.6
+Версия документа: 0.9.7
 Связанные документы: [`ARCHITECTURE.ru.md`](./ARCHITECTURE.ru.md), [`SRS.ru.md`](./SRS.ru.md)
 
 Документ описывает три группы API:
@@ -456,11 +456,39 @@ Payload не требуется. Daemon отвечает обычным `state_s
 | Text completion           | POST  | `/v1/completions`          | passthrough                              |
 | Embeddings                | POST  | `/v1/embeddings`           | passthrough                              |
 
-### 3.3. LM Studio / Ollama специфика
+### 3.3. Совместимость бэкендов
 
-- LM Studio: OpenAI-совместимый API на `http://<host>:1234/v1/*`.
-- Ollama: OpenAI-shim на `http://<host>:11434/v1/*` (нативные `/api/*` — out of scope MVP).
-- Поведение `Ollama` при `model: "..."`, которой нет: 404 — мапится в стандартный путь ошибки прокси.
+ProxyLM.GO **не привязан к конкретному бэкенду**: подключается любой сервер, отдающий OpenAI-совместимый `/v1/*` API. Прокси прозрачен — он пробрасывает JSON-тело и заголовки клиента (кроме `Authorization`, который подставляется из `backends[].api_key`) и читает ответ потоково.
+
+Протестированные / типичные бэкенды:
+
+| Бэкенд                          | URL по умолчанию                      | Аутентификация       | Примечания                                                                              |
+|---------------------------------|---------------------------------------|----------------------|------------------------------------------------------------------------------------------|
+| **LM Studio** (локально)        | `http://<host>:1234`                  | опц. Bearer          | Одна модель в памяти; срабатывает INV-2 model affinity.                                  |
+| **Ollama** (локально)           | `http://<host>:11434`                 | без auth по умолчанию | OpenAI-совместимый shim на `/v1/*` (нативный `/api/*` — out of scope, см. SRS §8). Одно-модельная семантика; `keep_alive` управляется переменной окружения `OLLAMA_KEEP_ALIVE` на стороне Ollama, не через прокси. При отсутствии модели возвращает `404` — мапится в стандартный путь ошибки. |
+| **vLLM** (локально/кластер)     | `http://<host>:8000`                  | опц. Bearer          | Одна модель; полный OpenAI surface (включая `logprobs`).                                  |
+| **llama.cpp** (`./server`)      | `http://<host>:8080`                  | опц. Bearer          | Одна модель; минимальный OpenAI shim.                                                    |
+| **OpenAI** (облако)             | `https://api.openai.com`              | Bearer (`sk-...`)    | Multi-model; INV-2 model affinity для cloud — лишний overhead, но не ломает. Платный — рекомендуется `priority` побольше, чтобы облако работало fallback'ом. |
+| **OpenRouter** (облако)         | `https://openrouter.ai/api`           | Bearer (`sk-or-v1-`) | Multi-model (сотни моделей в `/v1/models`); см. *Известные ограничения* ниже.            |
+| **Groq / Together / Fireworks** (облако) | provider-specific          | Bearer               | Multi-model; семантика как у OpenRouter.                                                 |
+
+Конфигурация — одинаковая для всех:
+
+```yaml
+- name: <человекочитаемое-имя>
+  url: <base-url-без-/v1>
+  api_key: <токен-или-null>
+  timeout_seconds: <секунды>
+  priority: <число, меньше = выше приоритет>
+```
+
+Поле `backends[].type` зарезервировано под будущие native-протоколы (Ollama `/api/*`, Anthropic, Gemini) и **в MVP игнорируется**. Можно не указывать.
+
+**Известные ограничения cloud-бэкендов в v0.9.x:**
+
+- Retry-политика (FR-18..FR-20) пока не парсит заголовок `Retry-After`; при массовых 429 от облака может усилить rate-limit. Запланировано в [`docs/FUTURE.md`](./FUTURE.md), пункт *429-aware retry*.
+- Discovery опрашивает `/v1/models` каждые `discovery.interval_seconds` для **всех** бэкендов; OpenRouter (~300 моделей) забьёт таблицу прокси. Обход: укажите `models:` явно в конфиге бэкенда, чтобы ограничить набор обнаруживаемых моделей.
+- Model-affinity (INV-2) сериализует запросы по модели на одном сервере. Для multi-model cloud это no-op overhead, не польза; per-backend `serialize_by_model` в плане (см. FUTURE.md).
 
 ### 3.4. Обработка ответов
 

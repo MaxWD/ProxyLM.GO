@@ -73,21 +73,43 @@ tui:
 compat:
   response_format_mode: passthrough
 
-# Бэкенд-серверы
+# Бэкенд-серверы.
+#
+# Работает с любым OpenAI-совместимым `/v1/*` сервером — что именно крутится
+# за URL'ом (LM Studio, Ollama, vLLM, llama.cpp, OpenRouter, Together AI,
+# Groq, OpenAI и т.п.), прокси не задумывается. Достаточно `url` и, если
+# бэкенд требует токен, `api_key`.
+#
+# `name` — произвольная человекочитаемая метка (видна в TUI и логах).
+# Пишите так, чтобы вы сами через месяц поняли, что это за сервер:
+# `lmstudio-desktop`, `ollama-rack`, `openrouter-cloud`.
+#
+# `priority` — ниже число = выше предпочтение среди свободных серверов.
+# Удобно для cloud-fallback: ставьте локалкам priority 100–200, облачному
+# OpenRouter — 900, и облако подключится только когда локалки заняты.
+#
+# `type` зарезервировано для будущих native-протоколов; в MVP игнорируется.
+# Можно не указывать.
 backends:
-  - name: srv1
+  - name: lmstudio-desktop
     url: http://127.0.0.1:1234           # LM Studio default
-    priority: 100                        # ниже число = выше приоритет, используется если свободно >1 сервера
-    type: openai                         # openai | ollama
+    priority: 100
     timeout_seconds: 600
-    api_key: null                        # если бэкенд требует токен
+    api_key: null                        # null если auth не требуется
     # Опционально: явно перечислить модели (выключает discovery для этого сервера)
     # models:
     #   - qwen2.5:14b
     #   - llama3.1:8b
 
-  - name: srv2
-    url: http://127.0.0.1:11434          # Ollama default
+  - name: ollama-rack
+    url: http://127.0.0.1:11434          # Ollama default (OpenAI-совместимый shim на /v1/*)
     priority: 200
-    type: openai                         # Ollama имеет OpenAI-совместимый shim на /v1/*
     timeout_seconds: 600
+
+  # Cloud fallback — раскомментировать если хочется, чтобы OpenRouter
+  # обслуживал запросы, когда локальные серверы заняты.
+  # - name: openrouter-cloud
+  #   url: https://openrouter.ai/api
+  #   api_key: sk-or-v1-...
+  #   priority: 900                      # высокий номер = подключается, когда локалки недоступны
+  #   timeout_seconds: 120
