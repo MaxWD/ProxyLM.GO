@@ -1,6 +1,6 @@
 # ProxyLM.GO — API Specification
 
-Document version: 0.10.0
+Document version: 0.11.0
 Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`SRS.md`](./SRS.md)
 
 This document describes three API groups:
@@ -19,7 +19,10 @@ Base prefix: `/v1`. Host and port — from `proxy.host` / `proxy.port` (default 
 
 ### 1.1. General requirements
 
-- All endpoints under `/v1/*` require the header `Authorization: Bearer <api_key>`. The key is looked up in `auth.api_keys[].key`. On mismatch — `401`.
+- All endpoints under `/v1/*` require authentication. The key is looked up in `auth.api_keys[].key`. On mismatch — `401`. Two header styles are accepted (in priority order):
+  1. `Authorization: Bearer <api_key>` — standard OpenAI style.
+  2. `x-api-key: <api_key>` — Anthropic SDK style.
+  If both headers are present, `Authorization` takes precedence. This dual-auth support allows Anthropic SDK clients to authenticate the same way they would to the real Anthropic API.
 - The header `Content-Type: application/json` is required for POST requests.
 - The proxy adds the field `client_name`, corresponding to `auth.api_keys[].name`, to logs and history. The key itself is never logged.
 - Unknown request body fields are forwarded to the backend without modification (FR-9).
@@ -120,7 +123,7 @@ Each message ends with two `\n`. The final marker is the literal `data: [DONE]`.
 - Does not buffer the body — forwards chunks as they arrive (via `http.ResponseWriter` + `http.Flusher`).
 - Counts `output_tokens` by the number of `delta.content` chunks (or takes `usage` from the last chunk).
 - On error **before the first** proxied chunk — may retry (FR-21).
-- On error **after the first** proxied chunk — retry is forbidden, see §1.6 (stream_aborted).
+- On error **after the first** proxied chunk — retry is forbidden, see §1.8 (stream_aborted).
 
 #### `response_format` compatibility (`compat.response_format_mode`)
 
@@ -166,7 +169,130 @@ The contract is identical to `POST /v1/chat/completions`, but the request body c
 
 Streaming for embeddings is not supported.
 
-### 1.5. `GET /v1/models`
+### 1.5. `POST /v1/messages` (Anthropic Messages API)
+
+#### Request
+
+| Parameter | HTTP level |
+|-----------|------------|
+| Method    | `POST`     |
+| Path      | `/v1/messages` |
+| Headers   | `Authorization: Bearer <key>` or `x-api-key: <key>`, `Content-Type: application/json` |
+
+JSON body schema (key fields):
+
+| Field          | Type               | Req. | Description |
+|----------------|--------------------|------|-------------|
+| `model`        | string             | yes  | Model identifier (e.g., `claude-3-5-sonnet-20241022`) |
+| `max_tokens`   | integer            | yes  | Maximum number of tokens to generate |
+| `messages`     | array of message   | yes  | Array of `{role: "user" \| "assistant", content: string \| array}` |
+| `system`       | string             | no   | System prompt (top-level field, not inside `messages`) |
+| `stream`       | boolean            | no   | `true` → SSE response. Default `false`. |
+| `temperature`  | number (0..1)      | no   | passthrough |
+| `top_p`        | number (0..1)      | no   | passthrough |
+| `top_k`        | integer            | no   | passthrough |
+| `stop_sequences` | string[]         | no   | passthrough |
+| `tools`        | array              | no   | passthrough (Anthropic tool format) |
+| `metadata`     | object             | no   | passthrough |
+| `thinking`     | object             | no   | Extended thinking config; passthrough only on Anthropic→Anthropic path |
+
+Example:
+
+```json
+{
+  "model": "claude-3-5-sonnet-20241022",
+  "max_tokens": 256,
+  "system": "You are a helpful assistant.",
+  "messages": [
+    {"role": "user", "content": "Hello."}
+  ]
+}
+```
+
+#### Response (non-streaming)
+
+Code `200 OK`. Headers: `Content-Type: application/json`, `X-Request-Id: <uuid>`.
+
+```json
+{
+  "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {"type": "text", "text": "Hello! How can I help you today?"}
+  ],
+  "model": "claude-3-5-sonnet-20241022",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 10
+  }
+}
+```
+
+#### Response (streaming, `stream: true`)
+
+Code `200 OK`. Headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Request-Id: <uuid>`, `Transfer-Encoding: chunked`.
+
+Body — a sequence of named SSE events. **Anthropic SSE format differs from OpenAI**: each event has an `event:` line before the `data:` line.
+
+```
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_01...","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: ping
+data: {"type":"ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"!"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":10}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+```
+
+Each event is separated by a blank line. The stream ends with `event: message_stop`.
+
+#### Cross-protocol translation
+
+The proxy transparently translates between OpenAI and Anthropic wire formats based on the **client endpoint** and **backend `type`** field. See FR-56 for the full compatibility matrix. Translation covers request fields, response fields, and streaming events.
+
+| Client endpoint | Backend type | Translation |
+|-----------------|--------------|-------------|
+| `/v1/chat/completions` | `openai` | passthrough |
+| `/v1/chat/completions` | `anthropic` | OpenAI→Anthropic request; Anthropic→OpenAI response |
+| `/v1/messages` | `openai` | Anthropic→OpenAI request; OpenAI→Anthropic response |
+| `/v1/messages` | `anthropic` | passthrough |
+
+#### Anthropic error format
+
+Errors from Anthropic backends use a different envelope:
+
+```json
+{"type": "error", "error": {"type": "invalid_request_error", "message": "..."}}
+```
+
+When translating for an OpenAI client, the proxy converts this to the standard OpenAI error format (see §1.7).
+
+#### Limitations
+
+- `/v1/completions` and `/v1/embeddings` are not translated to Anthropic backends — a `400 invalid_request` is returned if the backend has `type: anthropic`.
+- Extended thinking (`thinking`, `budget_tokens`) passes through only on Anthropic client → Anthropic backend. On translation to an OpenAI backend, these fields are silently dropped.
+
+### 1.6. `GET /v1/models`
 
 #### Request
 
@@ -189,7 +315,7 @@ Authorization: Bearer <key>
 
 The `served_by` field is an extension of the OpenAI schema; clients may ignore it. The list is aggregated from the `ModelMap` of healthy servers (see SRS, FR-7, U-2).
 
-### 1.6. `GET /healthz`
+### 1.7. `GET /healthz`
 
 #### Request
 
@@ -209,7 +335,7 @@ Code `200 OK`. Body:
 
 If the daemon is in graceful shutdown mode — `503` with body `{"status": "shutting_down"}`.
 
-### 1.7. Error codes and error body format
+### 1.8. Error codes and error body format
 
 Error body — OpenAI-compatible:
 
@@ -470,13 +596,22 @@ No `payload` is required. The daemon responds with a regular `state_snapshot` me
 
 ### 3.2. Paths used
 
+**OpenAI-protocol backends (`type: openai` or `type: ollama`):**
+
 | Purpose                   | Method | Path                       | Body                                    |
 |---------------------------|--------|----------------------------|-----------------------------------------|
 | Discovery                 | GET    | `/v1/models`               | —                                       |
-| Chat completion (regular) | POST   | `/v1/chat/completions`     | client body; `response_format` may be normalized per `compat.response_format_mode` |
-| Chat completion (stream)  | POST   | `/v1/chat/completions`     | body + `stream: true`; `response_format` may be normalized; response via `resp.Body` (chunked reading) |
-| Text completion           | POST   | `/v1/completions`          | passthrough                             |
-| Embeddings                | POST   | `/v1/embeddings`           | passthrough                             |
+| Chat completion (regular) | POST   | `/v1/chat/completions`     | client body or translated from Anthropic; `response_format` may be normalized per `compat.response_format_mode` |
+| Chat completion (stream)  | POST   | `/v1/chat/completions`     | body + `stream: true`; response via `resp.Body` (chunked reading) |
+| Text completion           | POST   | `/v1/completions`          | passthrough (OpenAI clients only; not routed to Anthropic backends) |
+| Embeddings                | POST   | `/v1/embeddings`           | passthrough (OpenAI clients only; not routed to Anthropic backends) |
+
+**Anthropic-protocol backends (`type: anthropic`):**
+
+| Purpose                      | Method | Path              | Body                                                                 |
+|------------------------------|--------|-------------------|----------------------------------------------------------------------|
+| Messages (regular)           | POST   | `/v1/messages`    | client body or translated from OpenAI `chat/completions` format      |
+| Messages (stream)            | POST   | `/v1/messages`    | body + `stream: true`; response uses Anthropic SSE event format      |
 
 ### 3.3. Backend compatibility notes
 
@@ -493,8 +628,23 @@ Tested / commonly-used backends:
 | **OpenAI** (cloud)           | `https://api.openai.com`             | Bearer (`sk-...`)     | Multi-model; INV-2 model affinity does not provide benefit but is not harmful. Cost-bearing — use `priority` to keep cloud as fallback. |
 | **OpenRouter** (cloud)       | `https://openrouter.ai/api`          | Bearer (`sk-or-v1-`)  | Multi-model (hundreds of models in `/v1/models`); see *Known limitations* below.         |
 | **Groq / Together / Fireworks** (cloud) | provider-specific          | Bearer                | Multi-model; same semantics as OpenRouter.                                               |
+| **Anthropic** (cloud)        | `https://api.anthropic.com`          | Bearer or `x-api-key` | `type: anthropic` required. Discovery is not performed (Anthropic has no `/v1/models` endpoint); set `backends[].models` explicitly. |
 
-Configuration is uniform across all of the above:
+Configuration example for an Anthropic backend:
+
+```yaml
+- name: anthropic-claude
+  url: https://api.anthropic.com
+  type: anthropic
+  api_key: sk-ant-...
+  timeout_seconds: 600
+  priority: 10
+  models:
+    - claude-3-5-sonnet-20241022
+    - claude-3-haiku-20240307
+```
+
+Configuration for OpenAI-protocol backends:
 
 ```yaml
 - name: <descriptive-name>
@@ -504,9 +654,9 @@ Configuration is uniform across all of the above:
   priority: <int, lower = preferred>
 ```
 
-The `backends[].type` field is reserved for future native-protocol backends (Ollama `/api/*`, Anthropic, Gemini) and is **ignored by the MVP**. You may omit it.
+The `backends[].type` field controls the wire protocol used when communicating with this backend. Accepted values: `openai` (default, also covers `ollama`), `anthropic`. When `type: anthropic`, the proxy sends Anthropic Messages API requests to the backend and translates client requests/responses as needed.
 
-**Known limitations for cloud backends in v0.9.x:**
+**Known limitations for cloud backends in v0.11.x:**
 
 - The retry policy (FR-18..FR-20) does not yet parse `Retry-After` headers; under heavy 429 from a cloud provider it can amplify rate limits. Track via [`docs/FUTURE.md`](./FUTURE.md) item *429-aware retry*.
 - Discovery polls `/v1/models` every `discovery.interval_seconds` for **all** backends; an OpenRouter backend (~300 models) populates the proxy's model table with all of them. Recommended workaround: set `models:` explicitly per backend to restrict discovery to the models you actually use.
@@ -589,7 +739,37 @@ curl -s "$PROXY/v1/models" -H "Authorization: Bearer $KEY"
 curl -s "$PROXY/healthz"
 ```
 
-### 4.7. Connect to `/admin/stream` (via `websocat`)
+### 4.7. Anthropic Messages API (non-streaming)
+
+```bash
+curl -s "$PROXY/v1/messages" \
+  -H "x-api-key: $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20241022",
+    "max_tokens": 64,
+    "system": "You are a helpful assistant.",
+    "messages": [{"role": "user", "content": "Hello."}]
+  }'
+```
+
+`x-api-key` and `Authorization: Bearer` are both accepted.
+
+### 4.8. Anthropic Messages API (streaming)
+
+```bash
+curl -N "$PROXY/v1/messages" \
+  -H "x-api-key: $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20241022",
+    "max_tokens": 64,
+    "messages": [{"role": "user", "content": "Tell me a joke."}],
+    "stream": true
+  }'
+```
+
+### 4.9. Connect to `/admin/stream` (via `websocat`)
 
 ```bash
 websocat -H="Authorization: Bearer $ADMIN" "ws://localhost:8080/admin/stream"

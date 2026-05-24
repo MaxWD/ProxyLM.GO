@@ -1,6 +1,6 @@
 # ProxyLM.GO — контекст для Claude Code
 
-OpenAI-совместимый прокси на Go перед локальными LLM (LM Studio, Ollama) с model-aware queueing и TUI. Один portable-бинарник: и daemon, и TUI-клиент, и инсталлятор службы.
+Мультипротокольный LLM-прокси на Go (OpenAI + Anthropic API) перед локальными и облачными LLM с model-aware queueing и TUI. Один portable-бинарник: и daemon, и TUI-клиент, и инсталлятор службы. Кросс-протокольная трансляция: клиент OpenAI SDK → Anthropic-бэкенд и наоборот.
 
 ## Стек
 

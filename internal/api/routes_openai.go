@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"proxylm/internal/api/translate"
 	"proxylm/internal/config"
 	"proxylm/internal/core"
 	"proxylm/internal/core/backends"
@@ -173,12 +174,31 @@ func (h *proxyHandler) persistRecord(rec *core.RequestRecord, phase string) {
 
 // runNonStream выполняет один POST к upstream и копирует ответ клиенту целиком.
 // Возвращает JobResult, который scheduler использует для решения retry/failover.
+// Поддерживает кросс-протокольную трансляцию: если бэкенд Anthropic, а клиент OpenAI,
+// запрос и ответ транслируются между форматами.
 func (h *proxyHandler) runNonStream(r *http.Request, w http.ResponseWriter, srv *core.ServerInfo, body []byte) core.JobResult {
 	bk, ok := h.backends[srv.Name]
 	if !ok {
 		return core.JobResult{Err: fmt.Errorf("backend %q не зарегистрирован", srv.Name)}
 	}
-	resp, err := bk.Forward(r.Context(), h.endpoint, bytes.NewReader(body), r.Header)
+
+	requestBody := body
+	backendPath := h.endpoint
+	anthropicBackend := !isOpenAIProtocol(srv)
+
+	if anthropicBackend {
+		if h.endpoint != "/v1/chat/completions" {
+			return core.JobResult{Err: fmt.Errorf("endpoint %s not supported by anthropic backend %s", h.endpoint, srv.Name)}
+		}
+		translated, err := translate.OpenAIChatToAnthropicMessages(body)
+		if err != nil {
+			return core.JobResult{Err: fmt.Errorf("translate request: %w", err)}
+		}
+		requestBody = translated
+		backendPath = "/v1/messages"
+	}
+
+	resp, err := bk.Forward(r.Context(), backendPath, bytes.NewReader(requestBody), r.Header)
 	if err != nil {
 		return core.JobResult{Err: err}
 	}
@@ -188,20 +208,15 @@ func (h *proxyHandler) runNonStream(r *http.Request, w http.ResponseWriter, srv 
 	if err != nil {
 		return core.JobResult{Err: fmt.Errorf("read upstream body: %w", err), HTTPStatus: resp.StatusCode}
 	}
-	prompt, output := peekUsage(respBody)
 
 	if resp.StatusCode/100 != 2 {
-		// Тело ответа LLM при 4xx/5xx часто содержит человекочитаемую причину
-		// ("model not loaded", "context length exceeded" и т.п.) — логируем
-		// первые 512 байт. Authorization и прочие секреты сюда не попадают:
-		// это тело ответа upstream, не наш request.
 		snippet := respBody
 		if len(snippet) > 512 {
 			snippet = snippet[:512]
 		}
 		h.log.Warn("upstream non-2xx",
 			"server", srv.Name,
-			"endpoint", h.endpoint,
+			"endpoint", backendPath,
 			"http_status", resp.StatusCode,
 			"body", string(snippet))
 		return core.JobResult{
@@ -210,11 +225,21 @@ func (h *proxyHandler) runNonStream(r *http.Request, w http.ResponseWriter, srv 
 		}
 	}
 
-	// 2xx — копируем заголовки и тело клиенту.
+	var prompt, output int
+	if anthropicBackend {
+		prompt, output = translate.PeekAnthropicUsage(respBody)
+		translated, err := translate.AnthropicMessageToOpenAIChatResponse(respBody)
+		if err != nil {
+			return core.JobResult{Err: fmt.Errorf("translate response: %w", err), HTTPStatus: resp.StatusCode}
+		}
+		respBody = translated
+	} else {
+		prompt, output = peekUsage(respBody)
+	}
+
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if _, err := w.Write(respBody); err != nil {
-		// тело уже частично отдано → ResponseStarted, INV-6 блокирует retry
 		return core.JobResult{
 			Err:             fmt.Errorf("write to client: %w", err),
 			HTTPStatus:      resp.StatusCode,

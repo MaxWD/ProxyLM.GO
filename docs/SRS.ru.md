@@ -1,7 +1,7 @@
 # ProxyLM.GO — Software Requirements Specification (SRS)
 
-Версия документа: 0.10.0
-Базовая линия: ProxyLM.GO v0.9.7
+Версия документа: 0.11.0
+Базовая линия: ProxyLM.GO v0.11.0
 Связанные документы: [`ARCHITECTURE.ru.md`](./ARCHITECTURE.ru.md), [`API.ru.md`](./API.ru.md), [`AGENTS.ru.md`](./AGENTS.ru.md)
 
 ---
@@ -10,7 +10,7 @@
 
 ### 1.1. Назначение
 
-ProxyLM.GO — HTTP-прокси на Go, размещаемый перед любым OpenAI-совместимым LLM-бэкендом: локальные движки (LM Studio, Ollama, vLLM, llama.cpp) либо удалённые API (OpenRouter, Groq, Together AI, OpenAI). Прокси нейтрален к бэкенду — он работает по контракту OpenAI `/v1/*` и не знает, какое именно ПО крутится за URL'ом. Главная задача — **сериализовать запросы по моделям** на одно-модельных бэкендах, чтобы избежать постоянной перезагрузки моделей в VRAM, которая возникает при произвольном чередовании запросов от нескольких клиентов к нескольким моделям.
+ProxyLM.GO — HTTP-прокси на Go, размещаемый перед любым OpenAI-совместимым или Anthropic-совместимым LLM-бэкендом: локальные движки (LM Studio, Ollama, vLLM, llama.cpp) либо удалённые API (OpenRouter, Groq, Together AI, OpenAI, Anthropic). Прокси нейтрален к бэкенду и **мультипротокольный**: принимает как OpenAI API (`/v1/*`), так и Anthropic Messages API (`/v1/messages`), и при необходимости транслирует между протоколами, если клиент и бэкенд используют разные форматы. Главная задача — **сериализовать запросы по моделям** на одно-модельных бэкендах, чтобы избежать постоянной перезагрузки моделей в VRAM, которая возникает при произвольном чередовании запросов от нескольких клиентов к нескольким моделям.
 
 Поставляется как **единый portable-бинарник**: один и тот же исполняемый файл может работать как daemon (служба) либо как TUI-клиент к запущенному daemon'у. При первом запуске рядом с бинарником автоматически создаются `config.yaml` и `proxylm.db`. Кросс-компилируется под любую ОС (`GOOS`/`GOARCH`) без CGO-toolchain.
 
@@ -41,7 +41,9 @@ ProxyLM.GO — HTTP-прокси на Go, размещаемый перед лю
 | Model swap              | Выгрузка текущей модели и загрузка другой в VRAM                             |
 | In-flight               | Запрос, отправленный на бэкенд, ответ по которому ещё не получен полностью   |
 | OpenAI API              | REST-контракт `POST /v1/chat/completions` и др., стандартизованный OpenAI    |
-| SSE                     | Server-Sent Events; формат стриминга OpenAI (`data: {...}\n\n`, `data: [DONE]`) |
+| Anthropic API           | REST-контракт `POST /v1/messages` и др., определённый Anthropic              |
+| SSE                     | Server-Sent Events; формат стриминга OpenAI (`data: {...}\n\n`, `data: [DONE]`); стриминг Anthropic использует именованные события (`event: <type>\ndata: {...}\n\n`) |
+| Кросс-протокольная трансляция | Преобразование запросов/ответов между форматами OpenAI и Anthropic     |
 | TUI                     | Text User Interface (на базе Bubble Tea)                                     |
 | IPC                     | Inter-process communication; здесь — WebSocket между daemon и TUI            |
 | Daemon                  | Серверный процесс ProxyLM.GO (`proxylm serve`)                                  |
@@ -75,8 +77,8 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 
 | ID    | Требование |
 |-------|------------|
-| FR-1  | Прокси ДОЛЖЕН принимать HTTP-запросы по путям `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`, `GET /v1/models`, `GET /healthz`. |
-| FR-2  | Прокси ДОЛЖЕН требовать заголовок `Authorization: Bearer <key>` для всех путей под `/v1/*` и `/admin/*`, кроме `GET /healthz`. |
+| FR-1  | Прокси ДОЛЖЕН принимать HTTP-запросы по путям `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`, `POST /v1/messages`, `GET /v1/models`, `GET /healthz`. |
+| FR-2  | Прокси ДОЛЖЕН принимать аутентификацию на всех путях `/v1/*` и `/admin/*` (кроме `GET /healthz`) через любой из двух стилей: `Authorization: Bearer <key>` **или** `x-api-key: <key>`. Оба стиля равнозначны; прокси извлекает ключ из того заголовка, который присутствует (если присутствуют оба, приоритет у `Authorization`). |
 | FR-3  | Прокси ДОЛЖЕН проверять предъявленный ключ против списка `auth.api_keys` (для `/v1/*`) или против `auth.admin_key` (для `/admin/*`). При несовпадении — `401 Unauthorized`. |
 | FR-4  | Прокси ДОЛЖЕН логировать и сохранять в истории **имя клиента** (`auth.api_keys[].name`), а не сам ключ. |
 | FR-5  | Прокси ДОЛЖЕН возвращать `404 model_not_found`, если запрошенная `model` отсутствует на всех healthy-серверах. |
@@ -127,7 +129,7 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 
 | ID     | Требование |
 |--------|------------|
-| FR-28  | Каждый запрос ДОЛЖЕН быть записан в SQLite-таблицу `requests` со схемой из `ARCHITECTURE.md` §9. |
+| FR-28  | Каждый запрос ДОЛЖЕН быть записан в SQLite-таблицу `requests` со схемой из `ARCHITECTURE.md` §10. |
 | FR-29  | Поле `status` ДОЛЖНО принимать значения `queued`, `running`, `completed`, `failed` (см. диаграмму состояний §5.1). |
 | FR-30  | Запись о запросе создаётся при приёме (`queued`) и обновляется при переходах состояний; финальный апдейт пишет `queue_wait_ms`, `duration_ms` (`server_proc_ms`), `input_tokens`, `output_tokens`, `error`. |
 | FR-31  | Прокси ДОЛЖЕН периодически (на старте + раз в сутки) удалять записи старше `storage.history_retention_days` (default 30). |
@@ -170,6 +172,20 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 | FR-50  | Каждый ответ `/v1/*` ДОЛЖЕН содержать заголовок `X-Request-Id` (UUIDv4). Если входящий запрос клиента уже несёт валидный `X-Request-Id` — это значение переиспользуется; иначе генерируется новый UUIDv4. Заголовок внедряется middleware до вызова хендлера. |
 | FR-51  | Для запроса свежего снапшота TUI ДОЛЖЕН отправить `{"type": "request_snapshot", "time": "<RFC3339>"}` через WebSocket. Daemon ДОЛЖЕН ответить тем же `state_snapshot`-конвертом, что и при начальном подключении. |
 
+### 3.10. Anthropic Messages API (v0.11.0)
+
+| ID     | Требование |
+|--------|------------|
+| FR-52  | Прокси ДОЛЖЕН принимать `POST /v1/messages` в соответствии с контрактом Anthropic Messages API. Обязательные поля: `model` (string), `max_tokens` (integer), `messages` (array). Необязательные: `system` (string), `stream` (boolean), `tools` (array), `metadata`. Неизвестные поля ДОЛЖНЫ пробрасываться без изменений (применяется FR-9). |
+| FR-53  | Не-streaming `POST /v1/messages` ДОЛЖЕН возвращать формат ответа Anthropic: `{"id": "msg_...", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "..."}], "model": "...", "stop_reason": "end_turn", "usage": {"input_tokens": N, "output_tokens": N}}`. |
+| FR-54  | Streaming `POST /v1/messages` со `stream: true` ДОЛЖЕН отдавать SSE-события в формате Anthropic: `message_start`, `content_block_start`, `content_block_delta` (с `delta.type = "text_delta"`), `content_block_stop`, `message_delta` (с `usage.output_tokens`), `message_stop`. Каждое событие ДОЛЖНО использовать строку `event: <type>`, за которой следует строка `data: <json>`. Поток ДОЛЖЕН завершаться событием `event: message_stop`. |
+| FR-55  | Поле `backends[].type` ДОЛЖНО быть функциональным (не зарезервированным/игнорируемым). Допустимые значения: `openai` (значение по умолчанию, если не указано), `anthropic`, `ollama` (трактуется как `openai`). Значение определяет wire-протокол при взаимодействии прокси с данным бэкендом. |
+| FR-56  | Прокси ДОЛЖЕН реализовывать **кросс-протокольную трансляцию** для всех четырёх комбинаций клиент/бэкенд: (1) OpenAI-клиент → OpenAI-бэкенд: passthrough, трансляции нет; (2) OpenAI-клиент → Anthropic-бэкенд: транслировать запрос из формата OpenAI в Anthropic Messages API, ответ — обратно; (3) Anthropic-клиент → OpenAI-бэкенд: транслировать запрос из формата Anthropic в OpenAI chat completions, ответ — обратно; (4) Anthropic-клиент → Anthropic-бэкенд: passthrough, трансляции нет. |
+| FR-57  | Трансляция из OpenAI в Anthropic ДОЛЖНА маппить: `messages` (выделяя `system`-роль в верхнеуровневое поле `system`), `max_tokens`, `temperature`, `top_p`, `stop`, `stream`, `tools` (с конвертацией формата). Трансляция из Anthropic в OpenAI ДОЛЖНА маппить: `system` (добавляется как сообщение с ролью `system`), `messages`, `max_tokens`, `temperature`, `top_p`, `stop_sequences` → `stop`, `stream`, `tools`. |
+| FR-58  | `/v1/completions` и `/v1/embeddings` НЕ ДОЛЖНЫ транслироваться на Anthropic-бэкенды — если маршрутизированный бэкенд имеет `type: anthropic`, прокси ДОЛЖЕН возвращать `400 invalid_request` с сообщением о том, что эндпоинт не поддерживается для Anthropic-бэкендов. |
+| FR-59  | Поля extended thinking (`thinking`, `budget_tokens`) поддерживаются только при прохождении Anthropic-клиент → Anthropic-бэкенд (passthrough). При трансляции на OpenAI-бэкенд поля extended thinking ДОЛЖНЫ молча отбрасываться. |
+| FR-60  | Ответы об ошибках от Anthropic-бэкенда ДОЛЖНЫ определяться по наличию `"type": "error"` в теле ответа и пробрасываться клиенту как есть (для Anthropic-клиентов) либо конвертироваться в формат ошибки OpenAI (для OpenAI-клиентов). Формат ошибки Anthropic: `{"type": "error", "error": {"type": "...", "message": "..."}}`. |
+
 ---
 
 ## 4. Нефункциональные требования (NFR)
@@ -185,7 +201,7 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 | NFR-7  | Поддерживаемость   | Версия пакета задаётся в одном месте — через `-ldflags "-X main.version=<ver>"` при сборке; CLI `proxylm version` печатает её. |
 | NFR-8  | Безопасность       | API-ключи и admin-ключ передаются только через `Authorization: Bearer`. Ключи в логи, в TUI и в БД **не пишутся** — только `client_name`. |
 | NFR-9  | Безопасность       | Конфиг-файл с ключами по умолчанию читается с правами текущего пользователя; рекомендации по правам — в README (вне SRS). |
-| NFR-10 | Совместимость API  | Запросы и ответы соответствуют OpenAI API v1 на уровне обязательных полей. Лишние поля проксируются без модификации (FR-9). |
+| NFR-10 | Совместимость API  | Запросы и ответы на `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` соответствуют OpenAI API v1 на уровне обязательных полей. Запросы и ответы на `/v1/messages` соответствуют контракту Anthropic Messages API. Лишние поля проксируются без модификации (FR-9). |
 | NFR-11 | Тестируемость      | Покрытие unit-тестами модулей `internal/core/scheduler.go`, `internal/core/router.go`, `internal/core/retry.go` ≥ 80% строк (`go test -cover`). |
 | NFR-12 | Документированность | Все публичные эндпоинты описаны в `docs/API.ru.md`; формат сообщений `/admin/stream` — там же. |
 
@@ -258,7 +274,7 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 |-----------------------|----------------|------------------------------------------------|
 | `name`                | str            | из конфига                                     |
 | `url`                 | str            | базовый URL                                    |
-| `type`                | enum           | `openai` (в MVP только это значение)            |
+| `type`                | enum           | `openai` (по умолчанию) / `anthropic` — определяет wire-протокол при взаимодействии с бэкендом |
 | `healthy`             | bool           | флаг                                           |
 | `current_model`       | str \| None    | модель последнего обработанного / in-flight    |
 | `pending`             | []Request      | in-memory очередь (slice под mutex)             |
@@ -439,7 +455,7 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 
 | ID    | Риск | Митигация |
 |-------|------|------------|
-| R-1   | Голод модели B при бесконечном потоке модели A (см. ARCHITECTURE §3). | Задокументировано как осознанный компромисс; возможная митигация отслеживается в [`docs/FUTURE.ru.md`](./FUTURE.ru.md) (пункт §8). |
+| R-1   | Голод модели B при бесконечном потоке модели A (см. ARCHITECTURE.ru.md §3). | Задокументировано как осознанный компромисс; возможная митигация отслеживается в [`docs/FUTURE.ru.md`](./FUTURE.ru.md) (пункт §8). |
 | R-2   | LM Studio долго грузит большую модель в VRAM → таймаут запроса. | `backends[].timeout_seconds` (default 600) + рекомендация в README. |
 | R-3   | Несовпадение списка моделей между discovery и реальностью (модель удалили на хосте между опросами). | Запрос вернёт 404 от бэкенда → стандартный путь ошибки + следующий цикл discovery исправит ModelMap. |
 | R-4   | Конкурентный доступ к `current_model` между воркером и роутером. | Воркер обновляет `current_model` под `sync.Mutex` сервера; роутер читает значение под тем же mutex (или `atomic.Pointer[string]`); eventual consistency допустима для эвристики. |
@@ -467,10 +483,10 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 
 ## 10. Версионирование и дорожная карта
 
-### Базовая линия: v0.9.3 (первый публичный релиз)
+### Базовая линия: v0.11.0
 
 Полностью реализованы:
-- FR-1 … FR-51 (HTTP API, планировщик, маршрутизация, retry, discovery, история, TUI/IPC, CLI, метрики производительности, авто-переподключение, initial healthcheck, X-Request-Id middleware, F5-протокол)
+- FR-1 … FR-60 (HTTP API включая Anthropic Messages API, планировщик, маршрутизация, retry, discovery, история, TUI/IPC, CLI, метрики производительности, авто-переподключение, initial healthcheck, X-Request-Id middleware, F5-протокол, dual auth, per-backend protocol, кросс-протокольная трансляция)
 - NFR-1 … NFR-12
 - INV-1 … INV-8
 - AC-1 … AC-28

@@ -95,21 +95,25 @@ compat:
 
 # Бэкенд-серверы.
 #
-# Работает с любым OpenAI-совместимым `/v1/*` сервером — что именно крутится
-# за URL'ом (LM Studio, Ollama, vLLM, llama.cpp, OpenRouter, Together AI,
-# Groq, OpenAI и т.п.), прокси не задумывается. Достаточно `url` и, если
-# бэкенд требует токен, `api_key`.
+# Работает с любым сервером, поддерживающим OpenAI-совместимый `/v1/*` API
+# или Anthropic Messages API `/v1/messages`. Что крутится за URL'ом
+# (LM Studio, Ollama, vLLM, llama.cpp, OpenRouter, Together AI, Groq,
+# OpenAI, Anthropic и т.п.), прокси не задумывается.
 #
 # `name` — произвольная человекочитаемая метка (видна в TUI и логах).
-# Пишите так, чтобы вы сами через месяц поняли, что это за сервер:
-# `lmstudio-desktop`, `ollama-rack`, `openrouter-cloud`.
+#
+# `type` — протокол общения с бэкендом:
+#   openai     — (по умолчанию) OpenAI-совместимый /v1/chat/completions и т.п.
+#   anthropic  — Anthropic Messages API /v1/messages
+#   ollama     — алиас для openai (Ollama предоставляет OpenAI-совместимый shim)
+#
+# Кросс-протокольная трансляция работает автоматически: клиент может
+# подключаться через OpenAI API, а бэкенд быть Anthropic — и наоборот.
+# Запросы /v1/completions и /v1/embeddings доступны только для OpenAI-бэкендов.
 #
 # `priority` — ниже число = выше предпочтение среди свободных серверов.
 # Удобно для cloud-fallback: ставьте локалкам priority 100–200, облачному
-# OpenRouter — 900, и облако подключится только когда локалки заняты.
-#
-# `type` зарезервировано для будущих native-протоколов; в MVP игнорируется.
-# Можно не указывать.
+# OpenRouter / Anthropic — 900.
 backends:
   - name: lmstudio-desktop
     url: http://127.0.0.1:1234           # LM Studio default
@@ -133,3 +137,16 @@ backends:
   #   api_key: sk-or-v1-...
   #   priority: 900                      # высокий номер = подключается, когда локалки недоступны
   #   timeout_seconds: 120
+
+  # Cloud Anthropic — раскомментировать для прямого доступа к Claude API.
+  # Клиенты с OpenAI SDK тоже смогут обращаться через этот бэкенд — прокси
+  # автоматически транслирует запросы между форматами.
+  # - name: anthropic-cloud
+  #   url: https://api.anthropic.com
+  #   type: anthropic
+  #   api_key: sk-ant-api03-...
+  #   priority: 900
+  #   timeout_seconds: 120
+  #   models:
+  #     - claude-sonnet-4-6
+  #     - claude-haiku-4-5

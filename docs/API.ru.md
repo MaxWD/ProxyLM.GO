@@ -1,6 +1,6 @@
 # ProxyLM.GO — API Specification
 
-Версия документа: 0.10.0
+Версия документа: 0.11.0
 Связанные документы: [`ARCHITECTURE.ru.md`](./ARCHITECTURE.ru.md), [`SRS.ru.md`](./SRS.ru.md)
 
 Документ описывает три группы API:
@@ -19,7 +19,10 @@
 
 ### 1.1. Общие требования
 
-- Все эндпоинты под `/v1/*` требуют заголовок `Authorization: Bearer <api_key>`. Ключ ищется в `auth.api_keys[].key`. При несовпадении — `401`.
+- Все эндпоинты под `/v1/*` требуют аутентификацию. Ключ ищется в `auth.api_keys[].key`. При несовпадении — `401`. Принимаются два стиля заголовков (в порядке приоритета):
+  1. `Authorization: Bearer <api_key>` — стандартный стиль OpenAI.
+  2. `x-api-key: <api_key>` — стиль Anthropic SDK.
+  Если оба заголовка присутствуют, приоритет у `Authorization`. Поддержка обоих стилей позволяет Anthropic SDK-клиентам аутентифицироваться так же, как к настоящему Anthropic API.
 - Заголовок `Content-Type: application/json` обязателен для POST-запросов.
 - Прокси добавляет в логи и историю поле `client_name`, соответствующее `auth.api_keys[].name`. Сам ключ нигде не логируется.
 - Неизвестные поля тела запроса передаются на бэкенд без модификации (FR-9).
@@ -120,7 +123,7 @@ data: [DONE]
 - Не буферизует тело — пересылает чанки по мере получения (через `http.ResponseWriter` + `http.Flusher`).
 - Считает `output_tokens` по числу `delta.content` (или берёт `usage` из последнего чанка).
 - При получении ошибки **до первого** проксированного чанка — может ретраить (FR-21).
-- При получении ошибки **после первого** проксированного чанка — ретрай запрещён, см. §1.6 (stream_aborted).
+- При получении ошибки **после первого** проксированного чанка — ретрай запрещён, см. §1.8 (stream_aborted).
 
 #### Совместимость `response_format` (`compat.response_format_mode`)
 
@@ -166,7 +169,130 @@ data: [DONE]
 
 Streaming для embeddings не поддерживается.
 
-### 1.5. `GET /v1/models`
+### 1.5. `POST /v1/messages` (Anthropic Messages API)
+
+#### Запрос
+
+| Параметр | HTTP-уровень |
+|----------|--------------|
+| Метод    | `POST`       |
+| Путь     | `/v1/messages` |
+| Заголовки | `Authorization: Bearer <key>` или `x-api-key: <key>`, `Content-Type: application/json` |
+
+JSON-схема тела (важные поля):
+
+| Поле           | Тип                | Обяз. | Описание |
+|----------------|--------------------|-------|----------|
+| `model`        | string             | да    | Идентификатор модели (например, `claude-3-5-sonnet-20241022`) |
+| `max_tokens`   | integer            | да    | Максимальное количество токенов для генерации |
+| `messages`     | array of message   | да    | Массив `{role: "user" \| "assistant", content: string \| array}` |
+| `system`       | string             | нет   | Системный промпт (верхнеуровневое поле, не внутри `messages`) |
+| `stream`       | boolean            | нет   | `true` → SSE-ответ. Default `false`. |
+| `temperature`  | number (0..1)      | нет   | passthrough |
+| `top_p`        | number (0..1)      | нет   | passthrough |
+| `top_k`        | integer            | нет   | passthrough |
+| `stop_sequences` | string[]         | нет   | passthrough |
+| `tools`        | array              | нет   | passthrough (формат инструментов Anthropic) |
+| `metadata`     | object             | нет   | passthrough |
+| `thinking`     | object             | нет   | Конфигурация extended thinking; passthrough только на пути Anthropic→Anthropic |
+
+Пример:
+
+```json
+{
+  "model": "claude-3-5-sonnet-20241022",
+  "max_tokens": 256,
+  "system": "Ты — полезный ассистент.",
+  "messages": [
+    {"role": "user", "content": "Привет."}
+  ]
+}
+```
+
+#### Ответ (non-streaming)
+
+Код `200 OK`. Заголовки: `Content-Type: application/json`, `X-Request-Id: <uuid>`.
+
+```json
+{
+  "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {"type": "text", "text": "Привет! Чем могу помочь?"}
+  ],
+  "model": "claude-3-5-sonnet-20241022",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 8
+  }
+}
+```
+
+#### Ответ (streaming, `stream: true`)
+
+Код `200 OK`. Заголовки: `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Request-Id: <uuid>`, `Transfer-Encoding: chunked`.
+
+Тело — последовательность именованных SSE-событий. **Формат SSE у Anthropic отличается от OpenAI**: перед строкой `data:` идёт строка `event:`.
+
+```
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_01...","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: ping
+data: {"type":"ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Привет"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"!"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":8}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+```
+
+Каждое событие разделяется пустой строкой. Поток завершается событием `event: message_stop`.
+
+#### Кросс-протокольная трансляция
+
+Прокси прозрачно транслирует между форматами OpenAI и Anthropic на основе **клиентского эндпоинта** и поля **`type` бэкенда**. Полная матрица совместимости — в FR-56. Трансляция охватывает поля запроса, поля ответа и SSE-события.
+
+| Клиентский эндпоинт | Тип бэкенда | Трансляция |
+|---------------------|-------------|------------|
+| `/v1/chat/completions` | `openai` | passthrough |
+| `/v1/chat/completions` | `anthropic` | запрос OpenAI→Anthropic; ответ Anthropic→OpenAI |
+| `/v1/messages` | `openai` | запрос Anthropic→OpenAI; ответ OpenAI→Anthropic |
+| `/v1/messages` | `anthropic` | passthrough |
+
+#### Формат ошибок Anthropic
+
+Ошибки от Anthropic-бэкендов используют другой конверт:
+
+```json
+{"type": "error", "error": {"type": "invalid_request_error", "message": "..."}}
+```
+
+При трансляции для OpenAI-клиента прокси конвертирует это в стандартный формат ошибки OpenAI (см. §1.8).
+
+#### Ограничения
+
+- `/v1/completions` и `/v1/embeddings` не транслируются на Anthropic-бэкенды — возвращается `400 invalid_request`, если бэкенд имеет `type: anthropic`.
+- Extended thinking (`thinking`, `budget_tokens`) пробрасывается только при Anthropic-клиент → Anthropic-бэкенд. При трансляции на OpenAI-бэкенд эти поля молча отбрасываются.
+
+### 1.6. `GET /v1/models`
 
 #### Запрос
 
@@ -189,7 +315,7 @@ Authorization: Bearer <key>
 
 Поле `served_by` — расширение OpenAI-схемы; клиент может его игнорировать. Список агрегируется по `ModelMap` healthy-серверов (см. SRS, FR-7, U-2).
 
-### 1.6. `GET /healthz`
+### 1.7. `GET /healthz`
 
 #### Запрос
 
@@ -209,7 +335,7 @@ GET /healthz HTTP/1.1
 
 Если daemon в режиме graceful shutdown — `503` c телом `{"status": "shutting_down"}`.
 
-### 1.7. Коды ошибок и формат тела ошибки
+### 1.8. Коды ошибок и формат тела ошибки
 
 Тело ошибки — OpenAI-совместимое:
 
@@ -470,13 +596,22 @@ Payload не требуется. Daemon отвечает обычным `state_s
 
 ### 3.2. Используемые пути
 
+**OpenAI-протокол бэкенды (`type: openai` или `type: ollama`):**
+
 | Назначение                | Метод | Путь                       | Тело                                    |
 |---------------------------|-------|----------------------------|------------------------------------------|
 | Discovery                 | GET   | `/v1/models`               | —                                        |
-| Chat completion (regular) | POST  | `/v1/chat/completions`     | тело клиента; `response_format` может быть нормализован по `compat.response_format_mode` |
-| Chat completion (stream)  | POST  | `/v1/chat/completions`     | тело + `stream: true`; `response_format` может быть нормализован; ответ через `resp.Body` (chunked reading) |
-| Text completion           | POST  | `/v1/completions`          | passthrough                              |
-| Embeddings                | POST  | `/v1/embeddings`           | passthrough                              |
+| Chat completion (regular) | POST  | `/v1/chat/completions`     | тело клиента или транслированное из Anthropic; `response_format` может быть нормализован по `compat.response_format_mode` |
+| Chat completion (stream)  | POST  | `/v1/chat/completions`     | тело + `stream: true`; ответ через `resp.Body` (chunked reading) |
+| Text completion           | POST  | `/v1/completions`          | passthrough (только для OpenAI-клиентов; не маршрутизируется на Anthropic-бэкенды) |
+| Embeddings                | POST  | `/v1/embeddings`           | passthrough (только для OpenAI-клиентов; не маршрутизируется на Anthropic-бэкенды) |
+
+**Anthropic-протокол бэкенды (`type: anthropic`):**
+
+| Назначение                   | Метод | Путь          | Тело                                                                 |
+|------------------------------|-------|---------------|----------------------------------------------------------------------|
+| Messages (regular)           | POST  | `/v1/messages` | тело клиента или транслированное из OpenAI `chat/completions` формата |
+| Messages (stream)            | POST  | `/v1/messages` | тело + `stream: true`; ответ использует формат SSE-событий Anthropic |
 
 ### 3.3. Совместимость бэкендов
 
@@ -493,8 +628,23 @@ ProxyLM.GO **не привязан к конкретному бэкенду**: �
 | **OpenAI** (облако)             | `https://api.openai.com`              | Bearer (`sk-...`)    | Multi-model; INV-2 model affinity для cloud — лишний overhead, но не ломает. Платный — рекомендуется `priority` побольше, чтобы облако работало fallback'ом. |
 | **OpenRouter** (облако)         | `https://openrouter.ai/api`           | Bearer (`sk-or-v1-`) | Multi-model (сотни моделей в `/v1/models`); см. *Известные ограничения* ниже.            |
 | **Groq / Together / Fireworks** (облако) | provider-specific          | Bearer               | Multi-model; семантика как у OpenRouter.                                                 |
+| **Anthropic** (облако)       | `https://api.anthropic.com`           | Bearer или `x-api-key` | Требуется `type: anthropic`. Discovery не выполняется (у Anthropic нет `/v1/models`); `backends[].models` укажите явно. |
 
-Конфигурация — одинаковая для всех:
+Пример конфигурации для Anthropic-бэкенда:
+
+```yaml
+- name: anthropic-claude
+  url: https://api.anthropic.com
+  type: anthropic
+  api_key: sk-ant-...
+  timeout_seconds: 600
+  priority: 10
+  models:
+    - claude-3-5-sonnet-20241022
+    - claude-3-haiku-20240307
+```
+
+Конфигурация для OpenAI-протокол бэкендов:
 
 ```yaml
 - name: <человекочитаемое-имя>
@@ -504,9 +654,9 @@ ProxyLM.GO **не привязан к конкретному бэкенду**: �
   priority: <число, меньше = выше приоритет>
 ```
 
-Поле `backends[].type` зарезервировано под будущие native-протоколы (Ollama `/api/*`, Anthropic, Gemini) и **в MVP игнорируется**. Можно не указывать.
+Поле `backends[].type` управляет wire-протоколом при взаимодействии с данным бэкендом. Допустимые значения: `openai` (по умолчанию, включает `ollama`), `anthropic`. При `type: anthropic` прокси отправляет на бэкенд запросы Anthropic Messages API и транслирует запросы/ответы клиента при необходимости.
 
-**Известные ограничения cloud-бэкендов в v0.9.x:**
+**Известные ограничения cloud-бэкендов в v0.11.x:**
 
 - Retry-политика (FR-18..FR-20) пока не парсит заголовок `Retry-After`; при массовых 429 от облака может усилить rate-limit. Запланировано в [`docs/FUTURE.md`](./FUTURE.md), пункт *429-aware retry*.
 - Discovery опрашивает `/v1/models` каждые `discovery.interval_seconds` для **всех** бэкендов; OpenRouter (~300 моделей) забьёт таблицу прокси. Обход: укажите `models:` явно в конфиге бэкенда, чтобы ограничить набор обнаруживаемых моделей.
@@ -589,7 +739,37 @@ curl -s "$PROXY/v1/models" -H "Authorization: Bearer $KEY"
 curl -s "$PROXY/healthz"
 ```
 
-### 4.7. Подключение к `/admin/stream` (через `websocat`)
+### 4.7. Anthropic Messages API (non-streaming)
+
+```bash
+curl -s "$PROXY/v1/messages" \
+  -H "x-api-key: $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20241022",
+    "max_tokens": 64,
+    "system": "Ты — полезный ассистент.",
+    "messages": [{"role": "user", "content": "Привет."}]
+  }'
+```
+
+`x-api-key` и `Authorization: Bearer` принимаются оба.
+
+### 4.8. Anthropic Messages API (streaming)
+
+```bash
+curl -N "$PROXY/v1/messages" \
+  -H "x-api-key: $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20241022",
+    "max_tokens": 64,
+    "messages": [{"role": "user", "content": "Расскажи анекдот."}],
+    "stream": true
+  }'
+```
+
+### 4.9. Подключение к `/admin/stream` (через `websocat`)
 
 ```bash
 websocat -H="Authorization: Bearer $ADMIN" "ws://localhost:8080/admin/stream"

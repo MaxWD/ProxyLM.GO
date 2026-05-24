@@ -1,7 +1,7 @@
 # ProxyLM.GO — Software Requirements Specification (SRS)
 
-Document version: 0.10.0
-Baseline: ProxyLM.GO v0.9.7
+Document version: 0.11.0
+Baseline: ProxyLM.GO v0.11.0
 Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`API.md`](./API.md), [`AGENTS.md`](./AGENTS.md)
 
 ---
@@ -10,7 +10,7 @@ Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`API.md`](./API.md),
 
 ### 1.1. Purpose
 
-ProxyLM.GO is an HTTP proxy in Go placed in front of any OpenAI-compatible LLM backend — local engines (LM Studio, Ollama, vLLM, llama.cpp) or remote APIs (OpenRouter, Groq, Together AI, OpenAI). The proxy is backend-agnostic: it operates purely on the OpenAI `/v1/*` contract and is unaware of what software is running behind the URL. The primary goal is to **serialize requests by model** on single-model backends, preventing constant model reloads into VRAM that occur when multiple clients send requests to multiple models in arbitrary order.
+ProxyLM.GO is an HTTP proxy in Go placed in front of any OpenAI-compatible or Anthropic-compatible LLM backend — local engines (LM Studio, Ollama, vLLM, llama.cpp) or remote APIs (OpenRouter, Groq, Together AI, OpenAI, Anthropic). The proxy is backend-agnostic and **multi-protocol**: it accepts both the OpenAI `/v1/*` API and the Anthropic Messages API (`/v1/messages`), and translates between the two protocols as needed when client and backend use different formats. The primary goal is to **serialize requests by model** on single-model backends, preventing constant model reloads into VRAM that occur when multiple clients send requests to multiple models in arbitrary order.
 
 Delivered as a **single portable binary**: the same executable can run as a daemon (service) or as a TUI client to a running daemon. On first run, `config.yaml` and `proxylm.db` are automatically created alongside the binary. Cross-compiles to any OS (`GOOS`/`GOARCH`) without a CGO toolchain.
 
@@ -41,7 +41,9 @@ The product applies to installations where:
 | Model swap              | Evicting the current model and loading another into VRAM                            |
 | In-flight               | A request sent to the backend whose response has not yet been fully received        |
 | OpenAI API              | REST contract `POST /v1/chat/completions` etc., standardized by OpenAI              |
-| SSE                     | Server-Sent Events; OpenAI streaming format (`data: {...}\n\n`, `data: [DONE]`)     |
+| Anthropic API           | REST contract `POST /v1/messages` etc., defined by Anthropic                        |
+| SSE                     | Server-Sent Events; OpenAI streaming format (`data: {...}\n\n`, `data: [DONE]`); Anthropic streaming uses named events (`event: <type>\ndata: {...}\n\n`) |
+| Cross-protocol translation | Conversion of request/response between OpenAI and Anthropic wire formats         |
 | TUI                     | Text User Interface (Bubble Tea-based)                                              |
 | IPC                     | Inter-process communication; here — WebSocket between daemon and TUI                |
 | Daemon                  | ProxyLM.GO server process (`proxylm serve`)                                         |
@@ -75,8 +77,8 @@ Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 
 | ID    | Requirement |
 |-------|-------------|
-| FR-1  | The proxy MUST accept HTTP requests on paths `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`, `GET /v1/models`, `GET /healthz`. |
-| FR-2  | The proxy MUST require the header `Authorization: Bearer <key>` for all paths under `/v1/*` and `/admin/*`, except `GET /healthz`. |
+| FR-1  | The proxy MUST accept HTTP requests on paths `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`, `POST /v1/messages`, `GET /v1/models`, `GET /healthz`. |
+| FR-2  | The proxy MUST accept authentication on all `/v1/*` and `/admin/*` paths (except `GET /healthz`) via either `Authorization: Bearer <key>` **or** `x-api-key: <key>`. Both styles are equivalent; the proxy extracts the key from whichever header is present (if both are present, `Authorization` takes precedence). |
 | FR-3  | The proxy MUST validate the presented key against `auth.api_keys` (for `/v1/*`) or against `auth.admin_key` (for `/admin/*`). On mismatch — `401 Unauthorized`. |
 | FR-4  | The proxy MUST log and store in history the **client name** (`auth.api_keys[].name`), not the key itself. |
 | FR-5  | The proxy MUST return `404 model_not_found` if the requested `model` is absent from all healthy servers. |
@@ -127,7 +129,7 @@ Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 
 | ID     | Requirement |
 |--------|-------------|
-| FR-28  | Each request MUST be recorded in the SQLite `requests` table with the schema from `ARCHITECTURE.md` §9. |
+| FR-28  | Each request MUST be recorded in the SQLite `requests` table with the schema from `ARCHITECTURE.md` §10. |
 | FR-29  | The `status` field MUST take values `queued`, `running`, `completed`, `failed` (see state diagram §5.1). |
 | FR-30  | A request record is created on receipt (`queued`) and updated on status transitions; the final update writes `queue_wait_ms`, `duration_ms` (`server_proc_ms`), `input_tokens`, `output_tokens`, `error`. |
 | FR-31  | The proxy MUST periodically (on startup + once a day) delete records older than `storage.history_retention_days` (default 30). |
@@ -170,6 +172,20 @@ Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 | FR-50  | Every `/v1/*` response MUST include the header `X-Request-Id` (UUIDv4). If the incoming client request already carries a valid `X-Request-Id` header, that value is reused; otherwise a new UUIDv4 is generated. The header is injected by a middleware before the handler executes. |
 | FR-51  | To request a fresh state snapshot the TUI MUST send `{"type": "request_snapshot", "time": "<RFC3339>"}` via WebSocket. The daemon MUST respond with the same `state_snapshot` envelope as on initial connect. |
 
+### 3.10. Anthropic Messages API (v0.11.0)
+
+| ID     | Requirement |
+|--------|-------------|
+| FR-52  | The proxy MUST accept `POST /v1/messages` following the Anthropic Messages API contract. Required fields: `model` (string), `max_tokens` (integer), `messages` (array). Optional fields: `system` (string), `stream` (boolean), `tools` (array), `metadata`. Unknown extra fields MUST be forwarded unchanged (FR-9 applies). |
+| FR-53  | Non-streaming `POST /v1/messages` MUST return the Anthropic response format: `{"id": "msg_...", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "..."}], "model": "...", "stop_reason": "end_turn", "usage": {"input_tokens": N, "output_tokens": N}}`. |
+| FR-54  | Streaming `POST /v1/messages` with `stream: true` MUST deliver Anthropic-format SSE events: `message_start`, `content_block_start`, `content_block_delta` (with `delta.type = "text_delta"`), `content_block_stop`, `message_delta` (with `usage.output_tokens`), `message_stop`. Each event MUST use the `event: <type>` line followed by `data: <json>` line. The stream MUST end with `event: message_stop`. |
+| FR-55  | The `backends[].type` field MUST be treated as functional (not reserved/ignored). Accepted values: `openai` (default if absent), `anthropic`, `ollama` (treated as `openai`). The value determines the wire protocol used when the proxy communicates with that backend. |
+| FR-56  | The proxy MUST implement **cross-protocol translation** for all four client/backend combinations: (1) OpenAI client → OpenAI backend: passthrough, no translation; (2) OpenAI client → Anthropic backend: translate request from OpenAI format to Anthropic Messages API format, translate response back; (3) Anthropic client → OpenAI backend: translate request from Anthropic format to OpenAI chat completions format, translate response back; (4) Anthropic client → Anthropic backend: passthrough, no translation. |
+| FR-57  | Translation from OpenAI to Anthropic format MUST map: `messages` (flattening `system` role into top-level `system`), `max_tokens`, `temperature`, `top_p`, `stop`, `stream`, `tools` (format conversion). Translation from Anthropic to OpenAI format MUST map: `system` (prepended as `system` message), `messages`, `max_tokens`, `temperature`, `top_p`, `stop_sequences` → `stop`, `stream`, `tools`. |
+| FR-58  | `/v1/completions` and `/v1/embeddings` MUST NOT be translated to Anthropic backends — if the routed backend is `type: anthropic`, the proxy MUST return `400 invalid_request` with a message indicating the endpoint is unsupported for Anthropic backends. |
+| FR-59  | Extended thinking fields (`thinking`, `budget_tokens`) are supported only on Anthropic client → Anthropic backend (passthrough). When translating to an OpenAI backend, extended thinking fields MUST be silently dropped. |
+| FR-60  | Anthropic error responses from the backend MUST be detected by the presence of `"type": "error"` in the response body, and forwarded to the client as-is (for Anthropic clients) or converted to the OpenAI error format (for OpenAI clients). The Anthropic error format is: `{"type": "error", "error": {"type": "...", "message": "..."}}`. |
+
 ---
 
 ## 4. Non-Functional Requirements (NFR)
@@ -185,7 +201,7 @@ Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 | NFR-7  | Maintainability    | Package version is set in one place — via `-ldflags "-X main.version=<ver>"` at build time; CLI `proxylm version` prints it. |
 | NFR-8  | Security           | API keys and the admin key are passed only via `Authorization: Bearer`. Keys MUST NOT be written to logs, TUI, or the database — only `client_name`. |
 | NFR-9  | Security           | The config file containing keys is read with the current user's permissions by default; permission recommendations are in the README (outside SRS). |
-| NFR-10 | API compatibility  | Requests and responses conform to OpenAI API v1 for mandatory fields. Extra fields are proxied without modification (FR-9). |
+| NFR-10 | API compatibility  | Requests and responses on `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` conform to OpenAI API v1 for mandatory fields. Requests and responses on `/v1/messages` conform to the Anthropic Messages API contract. Extra fields are proxied without modification (FR-9). |
 | NFR-11 | Testability        | Unit-test coverage of `internal/core/scheduler.go`, `internal/core/router.go`, `internal/core/retry.go` ≥ 80% lines (`go test -cover`). |
 | NFR-12 | Documentation      | All public endpoints are described in `docs/API.md`; the `/admin/stream` message format — there as well. |
 
@@ -258,7 +274,7 @@ Terminal states: `completed`, `failed`. Records remain in SQLite until `history_
 |-----------------------|-----------------|---------------------------------------------------|
 | `name`                | str             | from config                                       |
 | `url`                 | str             | base URL                                          |
-| `type`                | enum            | `openai` (only this value in MVP)                 |
+| `type`                | enum            | `openai` (default) / `anthropic` — controls the wire protocol used to communicate with the backend |
 | `healthy`             | bool            | flag                                              |
 | `current_model`       | str \| None     | model of the last processed / in-flight request   |
 | `pending`             | []Request       | in-memory queue (slice under mutex)               |
@@ -467,10 +483,10 @@ Additionally confirmed regarding scheduler behavior:
 
 ## 10. Versioning and Roadmap
 
-### Current baseline: v0.9.3 (first public release)
+### Current baseline: v0.11.0
 
 Fully implements:
-- FR-1 … FR-51 (HTTP API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics, auto-reconnect, initial healthcheck, X-Request-Id middleware, F5 protocol)
+- FR-1 … FR-60 (HTTP API including Anthropic Messages API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics, auto-reconnect, initial healthcheck, X-Request-Id middleware, F5 protocol, dual auth, per-backend protocol, cross-protocol translation)
 - NFR-1 … NFR-12
 - INV-1 … INV-8
 - AC-1 … AC-28

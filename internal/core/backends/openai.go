@@ -59,7 +59,8 @@ func NewOpenAI(name, baseURL, apiKey string, timeout time.Duration) (*OpenAI, er
 	}, nil
 }
 
-func (o *OpenAI) Name() string { return o.name }
+func (o *OpenAI) Name() string     { return o.name }
+func (o *OpenAI) Protocol() string { return "openai" }
 
 // ListModels опрашивает /v1/models. Ожидаемый формат — OpenAI:
 //

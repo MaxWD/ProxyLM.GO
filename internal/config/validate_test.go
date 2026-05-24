@@ -95,29 +95,30 @@ func TestConfig_Warnings(t *testing.T) {
 			t.Errorf("ожидалось 0 предупреждений, получено %d: %v", len(w), w)
 		}
 	})
-	t.Run("type=openai — без предупреждений", func(t *testing.T) {
+}
+
+func TestConfig_BackendTypeValidation(t *testing.T) {
+	for _, typ := range []string{"", "openai", "ollama", "anthropic"} {
+		t.Run("type="+typ+"_valid", func(t *testing.T) {
+			c := defaultValidConfig()
+			c.Backends[0].Type = typ
+			if typ == "" {
+				applyDefaults(&c)
+			}
+			if err := c.Validate(); err != nil {
+				t.Errorf("type=%q должно быть валидным, получено: %v", typ, err)
+			}
+		})
+	}
+	t.Run("type=unknown_invalid", func(t *testing.T) {
 		c := defaultValidConfig()
-		c.Backends[0].Type = "openai"
-		if w := c.Warnings(); len(w) != 0 {
-			t.Errorf("ожидалось 0 предупреждений, получено %d: %v", len(w), w)
+		c.Backends[0].Type = "gemini"
+		err := c.Validate()
+		if err == nil {
+			t.Fatal("ожидалась ошибка для type=gemini")
 		}
-	})
-	t.Run("type=ollama — одно предупреждение про reserved field", func(t *testing.T) {
-		c := defaultValidConfig()
-		c.Backends[0].Type = "ollama"
-		w := c.Warnings()
-		if len(w) != 1 {
-			t.Fatalf("ожидалось 1 предупреждение, получено %d: %v", len(w), w)
-		}
-		if !strings.Contains(w[0], "зарезервировано") || !strings.Contains(w[0], "ollama") {
-			t.Errorf("неожиданный текст: %s", w[0])
-		}
-	})
-	t.Run("type=ollama не блокирует Validate", func(t *testing.T) {
-		c := defaultValidConfig()
-		c.Backends[0].Type = "ollama"
-		if err := c.Validate(); err != nil {
-			t.Errorf("type=ollama должно быть валидным, получено: %v", err)
+		if !strings.Contains(err.Error(), "gemini") {
+			t.Errorf("ожидался текст 'gemini' в ошибке: %v", err)
 		}
 	})
 }
