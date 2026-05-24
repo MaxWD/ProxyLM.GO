@@ -5,7 +5,7 @@
 [![Go](https://img.shields.io/github/go-mod/go-version/MaxWD/ProxyLM.GO)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-OpenAI-compatible HTTP proxy for any OpenAI-compatible LLM backend — local (LM Studio, Ollama, vLLM, llama.cpp) or remote (OpenRouter, Groq, Together AI, OpenAI). Model-aware queueing, retry/failover, SSE streaming, and a Bubble Tea TUI. Single portable binary, no CGO.
+Multi-protocol LLM proxy (OpenAI + Anthropic API) for any LLM backend — local (LM Studio, Ollama, vLLM, llama.cpp) or remote (OpenRouter, Groq, Together AI, OpenAI, Anthropic). Model-aware queueing, cross-protocol translation, retry/failover, SSE streaming, and a Bubble Tea TUI. Single portable binary, no CGO.
 
 **[На русском](README.ru.md)** · English
 
@@ -13,19 +13,20 @@ OpenAI-compatible HTTP proxy for any OpenAI-compatible LLM backend — local (LM
 
 ## Overview
 
-ProxyLM.GO sits between your applications and one or more OpenAI-compatible LLM servers — local engines (LM Studio, Ollama, vLLM, llama.cpp) or remote APIs (OpenRouter, Groq, Together AI, OpenAI). To the client it looks like a standard OpenAI API endpoint; behind the scenes it manages routing, queuing, and failover across multiple backends. You point it at a URL, supply an API key if the backend needs one, and it works — regardless of what software is running on the other side.
+ProxyLM.GO sits between your applications and one or more LLM servers — local engines (LM Studio, Ollama, vLLM, llama.cpp) or remote APIs (OpenRouter, Groq, Together AI, OpenAI, Anthropic). To the client it looks like a standard OpenAI or Anthropic API endpoint; behind the scenes it manages routing, queuing, and failover across multiple backends. Cross-protocol translation is automatic: an OpenAI SDK client can transparently use an Anthropic backend, and vice versa. You point the proxy at a URL, set the backend `type` (`openai` or `anthropic`), and it works — regardless of what software is running on the other side.
 
 The primary design goal is to eliminate redundant model swaps. Each LLM occupies significant VRAM; when multiple clients request different models in an interleaved pattern, a server without a proxy spends seconds to minutes unloading and reloading models on every request. ProxyLM.GO collects incoming requests into per-server queues and **drains all pending requests for the currently loaded model before switching** — the model loads once and processes its entire backlog. Requests for the same model across multiple capable servers are distributed in parallel to keep GPU utilization high.
 
 ## Features
 
 - **Model-affinity queue** — per-server worker drains all queued requests for the current model before switching; prevents redundant model swaps (INV-1..INV-3)
-- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/healthz`
-- **Multiple backends** — route across any number of OpenAI-compatible servers; configurable priority per backend (use it to prefer local over cloud when both can serve a model)
+- **OpenAI + Anthropic API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/messages`, `/v1/models`, `/healthz`
+- **Cross-protocol translation** — clients using OpenAI SDK can reach Anthropic backends and vice versa; request/response and streaming formats are converted automatically
+- **Multiple backends** — route across any number of servers (OpenAI-compatible or Anthropic); configurable priority per backend (use it to prefer local over cloud when both can serve a model)
 - **Auto-discovery** — polls each backend's `/v1/models` at a configurable interval; marks unhealthy servers after N consecutive failures
 - **Retry and failover** — exponential backoff with rolling server exclusion; failover to another healthy backend after local retries (INV-5)
 - **SSE streaming** — transparent chunk-by-chunk proxying; no buffering, no retry after the first chunk is sent to the client (INV-6)
-- **Bearer authentication** — named API keys; client name appears in logs and history, the key itself does not
+- **Dual authentication** — accepts both `Authorization: Bearer` (OpenAI-style) and `x-api-key` (Anthropic-style); named API keys; client name appears in logs and history, the key itself does not
 - **Request history in SQLite** — pure-Go, no CGO (`modernc.org/sqlite`); configurable retention
 - **Bubble Tea TUI** — live request table, server health status, log stream; connects to the daemon over WebSocket
 - **System service** — install as Windows Service, systemd unit, or launchd job with one command
@@ -123,9 +124,20 @@ backends:
   #   api_key: sk-or-v1-...
   #   timeout_seconds: 120
   #   priority: 900          # high number = used only when locals can't serve
+
+  # Anthropic Claude API — set type: anthropic for native Anthropic protocol
+  # - name: anthropic-cloud
+  #   url: https://api.anthropic.com
+  #   type: anthropic          # uses Anthropic Messages API instead of OpenAI
+  #   api_key: sk-ant-api03-...
+  #   timeout_seconds: 120
+  #   priority: 900
+  #   models:
+  #     - claude-sonnet-4-6
+  #     - claude-haiku-4-5
 ```
 
-Any OpenAI-compatible `/v1/*` server works the same way — `url` (+ `api_key` if the backend requires one) is all you need. Pick `name` so you recognise the server later in the TUI (e.g. `lmstudio-desktop`, `ollama-rack`). Then change the placeholder keys in `auth.api_keys` and `auth.admin_key` and restart the daemon.
+Any OpenAI-compatible or Anthropic-compatible server works — `url`, `type` (defaults to `openai`), and `api_key` if needed. The `type` field selects the wire protocol: `openai` (default — works with LM Studio, Ollama, vLLM, OpenRouter, etc.) or `anthropic` (Anthropic Messages API). Cross-protocol translation is automatic: OpenAI SDK clients can use Anthropic backends and vice versa. Then change the placeholder keys in `auth.api_keys` and `auth.admin_key` and restart the daemon.
 
 ### 4. Connect the TUI
 
@@ -141,6 +153,18 @@ curl -H "Authorization: Bearer sk-proxy-replace-me-aaaaa" \
      -d '{"model":"qwen2.5:14b","messages":[{"role":"user","content":"hi"}]}' \
      http://localhost:8080/v1/chat/completions
 ```
+
+Or, using the Anthropic Messages API:
+
+```sh
+curl -H "x-api-key: sk-proxy-replace-me-aaaaa" \
+     -H "Content-Type: application/json" \
+     -H "anthropic-version: 2023-06-01" \
+     -d '{"model":"claude-sonnet-4-6","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}' \
+     http://localhost:8080/v1/messages
+```
+
+Both endpoints work regardless of the backend protocol — the proxy translates automatically.
 
 More examples (streaming, embeddings, `/v1/models`) — see [docs/API.md](docs/API.md) §4.
 
@@ -159,7 +183,7 @@ Full annotated example: [`config.example.yaml`](config.example.yaml).
 | `storage`           | `database_path`, `history_retention_days`, `vacuum_on_start`                             |
 | `tui`               | `show_completed_minutes` — how long completed requests stay visible in the table          |
 | `compat`            | `response_format_mode`: `passthrough` / `normalize_json_object` / `strict_reject`        |
-| `backends`          | List of servers: `name`, `url`, `priority`, `type`, `timeout_seconds`, `api_key`, `models` |
+| `backends`          | List of servers: `name`, `url`, `priority`, `type` (`openai`/`anthropic`), `timeout_seconds`, `api_key`, `models` |
 
 CLI flags `--host` / `--port` on the `serve` command override YAML values.
 
@@ -171,15 +195,15 @@ The `compat.response_format_mode` setting is useful for mixed backend pools:
 ## Architecture Overview
 
 ```
-  clients (service-a, service-b, ...)
-            |  HTTP / OpenAI-compatible format
+  clients (OpenAI SDK, Anthropic SDK, curl, ...)
+            |  HTTP / OpenAI or Anthropic format
             v
    +----------------------------------+
    | ProxyLM.GO daemon                |        +-----------+
-   |  AuthN -> Router -> per-server   |------->| srv1      |
+   |  Dual Auth -> Router -> per-srv  |------->| srv1 (OAI)|
    |           queues + workers       |        +-----------+
-   |           (drain current model   |        +-----------+
-   |            fully before switch)  |------->| srv2      |
+   |           + cross-protocol       |        +-----------+
+   |             translation          |------->| srv2 (Ant)|
    |  Discovery / SQLite / IPC        |        +-----------+
    +----------------+-----------------+
                     |  WebSocket /admin/stream
