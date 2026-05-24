@@ -109,7 +109,13 @@ func runDaemon(parent context.Context, cfgPath string) error {
 	backendMap := make(map[string]backends.Backend, len(cfg.Backends))
 	for _, b := range cfg.Backends {
 		timeout := time.Duration(b.TimeoutSeconds) * time.Second
-		bk, err := backends.NewOpenAI(b.Name, b.URL, b.APIKey, timeout)
+		var bk backends.Backend
+		switch b.Type {
+		case config.BackendTypeAnthropic:
+			bk, err = backends.NewAnthropic(b.Name, b.URL, b.APIKey, timeout)
+		default:
+			bk, err = backends.NewOpenAI(b.Name, b.URL, b.APIKey, timeout)
+		}
 		if err != nil {
 			return fmt.Errorf("backend %q: %w", b.Name, err)
 		}

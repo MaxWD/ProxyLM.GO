@@ -1145,6 +1145,8 @@ func displayEndpoint(ep string) string {
 		return "embeddings"
 	case "/v1/responses":
 		return "responses"
+	case "/v1/messages":
+		return "messages"
 	}
 	return ep
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"proxylm/internal/api/translate"
 	"proxylm/internal/core"
 )
 
@@ -27,6 +28,19 @@ func (h *proxyHandler) runStream(r *http.Request, w http.ResponseWriter, srv *co
 	if !ok {
 		return core.JobResult{Err: fmt.Errorf("backend %q не зарегистрирован", srv.Name)}
 	}
+
+	// Cross-protocol: OpenAI client → Anthropic backend
+	if !isOpenAIProtocol(srv) {
+		if h.endpoint != "/v1/chat/completions" {
+			return core.JobResult{Err: fmt.Errorf("endpoint %s not supported by anthropic backend %s", h.endpoint, srv.Name)}
+		}
+		translated, err := translate.OpenAIChatToAnthropicMessages(body)
+		if err != nil {
+			return core.JobResult{Err: fmt.Errorf("translate request: %w", err)}
+		}
+		return runStreamFromAnthropicBackend(r, w, bk, srv, translated, h.log)
+	}
+
 	runStart := time.Now()
 	resp, err := bk.Forward(r.Context(), h.endpoint, bytes.NewReader(body), r.Header)
 	if err != nil {

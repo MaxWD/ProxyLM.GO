@@ -78,11 +78,10 @@ type Backend struct {
 	Name     string `yaml:"name"`
 	URL      string `yaml:"url"`
 	Priority int    `yaml:"priority"`
-	// Type зарезервировано под будущие native-протоколы (Ollama /api/*,
-	// Anthropic, Gemini). В MVP игнорируется: прокси одинаково работает с любым
-	// OpenAI-совместимым /v1/* сервером (LM Studio, Ollama OpenAI-shim, vLLM,
-	// llama.cpp, OpenRouter, Groq, Together AI, OpenAI, …). Пустое значение
-	// заполняется через applyDefaults() как "openai".
+	// Type — протокол общения с бэкендом: "openai" (по умолчанию) или
+	// "anthropic" (Anthropic Messages API /v1/messages). Значение "ollama"
+	// обрабатывается как "openai" (Ollama предоставляет OpenAI-совместимый shim).
+	// Пустое значение заполняется через applyDefaults() как "openai".
 	Type           string   `yaml:"type"`
 	TimeoutSeconds int      `yaml:"timeout_seconds"`
 	APIKey         string   `yaml:"api_key"`
@@ -98,8 +97,9 @@ const (
 	StrategyPreserveModelCoverage  = "preserve_model_coverage"
 	StrategyFairShareRoundRobin    = "fair_share_round_robin"
 
-	BackendTypeOpenAI = "openai"
-	BackendTypeOllama = "ollama"
+	BackendTypeOpenAI    = "openai"
+	BackendTypeOllama    = "ollama"
+	BackendTypeAnthropic = "anthropic"
 
 	ResponseFormatPassthrough         = "passthrough"
 	ResponseFormatNormalizeJSONObject = "normalize_json_object"

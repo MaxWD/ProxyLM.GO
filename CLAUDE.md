@@ -1,6 +1,6 @@
 # ProxyLM.GO — контекст для Claude Code
 
-OpenAI-совместимый прокси на Go перед локальными LLM (LM Studio, Ollama) с model-aware queueing и TUI. Один portable-бинарник: и daemon, и TUI-клиент, и инсталлятор службы.
+Мультипротокольный LLM-прокси на Go (OpenAI + Anthropic API) перед локальными и облачными LLM с model-aware queueing и TUI. Один portable-бинарник: и daemon, и TUI-клиент, и инсталлятор службы. Кросс-протокольная трансляция: клиент OpenAI SDK → Anthropic-бэкенд и наоборот.
 
 ## Стек
 
@@ -90,8 +90,9 @@ ProxyLM.GO/
    - есть несовместимое изменение → bump MAJOR, сбросить MINOR и PATCH в 0;
    - иначе есть новый функционал → bump MINOR, сбросить PATCH в 0;
    - иначе → bump PATCH.
-3. После успешного `git commit` создаёт тег: `git tag v<new-version>` на этом коммите.
-4. В commit message включает строку `Version: v<new-version>` (для читаемости истории).
+3. **Обновляет `CHANGELOG.md`** — добавляет секцию `## [<new-version>] - <date>` с подразделами Added / Changed / Fixed / Removed (по применимости). Обновляет compare-ссылки внизу файла. Это делается **в том же коммите**, что и код, или отдельным коммитом в той же ветке — но **до создания PR**.
+4. После успешного `git commit` создаёт тег: `git tag v<new-version>` на этом коммите.
+5. В commit message включает строку `Version: v<new-version>` (для читаемости истории).
 
 Если изменения только в `docs/`, `scripts/`, `.claude/`, `*.md`, `.gitignore` — версия НЕ инкрементируется и тег НЕ ставится.
 

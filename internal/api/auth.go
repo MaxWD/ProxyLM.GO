@@ -39,13 +39,16 @@ func (r *AuthRegistry) LookupClient(key string) string { return r.keys[key] }
 // IsAdmin проверяет, совпадает ли ключ с admin_key.
 func (r *AuthRegistry) IsAdmin(key string) bool { return key != "" && key == r.adminKey }
 
-// ClientAuth — middleware для /v1/*. Требует Authorization: Bearer <key>.
+// ClientAuth — middleware для /v1/*. Принимает два стиля аутентификации:
+//   - Authorization: Bearer <key> (OpenAI-стиль)
+//   - x-api-key: <key> (Anthropic-стиль)
+//
 // При успехе кладёт client_name в context.
 func (r *AuthRegistry) ClientAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		key := extractBearer(req)
+		key := extractKey(req)
 		if key == "" {
-			writeJSONError(w, http.StatusUnauthorized, "missing Authorization Bearer")
+			writeJSONError(w, http.StatusUnauthorized, "missing api key")
 			return
 		}
 		name := r.LookupClient(key)
@@ -82,6 +85,19 @@ func ClientFromContext(ctx context.Context) string {
 func RequestIDFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(ctxRequestID).(string); ok {
 		return v
+	}
+	return ""
+}
+
+// extractKey извлекает API-ключ из запроса, поддерживая оба стиля:
+//   - Authorization: Bearer <key> (OpenAI)
+//   - x-api-key: <key> (Anthropic)
+func extractKey(req *http.Request) string {
+	if bearer := extractBearer(req); bearer != "" {
+		return bearer
+	}
+	if key := req.Header.Get("X-Api-Key"); key != "" {
+		return key
 	}
 	return ""
 }

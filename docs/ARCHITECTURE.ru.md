@@ -2,11 +2,14 @@
 
 ## 1. Назначение
 
-Прокси-сервер на Go перед локальными LLM-серверами (LM Studio, Ollama). Главная задача — **сериализовать запросы по моделям**, чтобы избежать постоянной выгрузки/загрузки моделей в VRAM.
+Прокси-сервер на Go перед локальными и удалёнными LLM-серверами (LM Studio, Ollama, Anthropic, OpenAI и т. д.). Главная задача — **сериализовать запросы по моделям**, чтобы избежать постоянной выгрузки/загрузки моделей в VRAM.
 
 Основные свойства:
 - OpenAI-совместимый API на входе (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`)
-- Поддержка streaming (SSE)
+- Anthropic Messages API на входе (`/v1/messages`) — Anthropic SDK-клиенты подключаются без изменения кода
+- **Кросс-протокольная трансляция:** все четыре комбинации клиент/бэкенд обрабатываются прозрачно (OpenAI↔OpenAI, OpenAI↔Anthropic, Anthropic↔OpenAI, Anthropic↔Anthropic)
+- **Двойная аутентификация:** принимаются оба стиля `Authorization: Bearer` и `x-api-key`
+- Поддержка streaming (SSE — формат `data:` OpenAI и формат `event:`/`data:` Anthropic)
 - Несколько бэкенд-серверов; знает какие модели где есть (авто-обнаружение через `/v1/models`)
 - Маршрутизация: model affinity + least-busy
 - Retry + failover на другой сервер с той же моделью
@@ -20,14 +23,15 @@
 ```
 ┌──────────────────────────────────────────────────────────┐
 │ Клиенты (внутренние сервисы)                             │
-│ service-a, service-b, ...                                │
+│ service-a (OpenAI SDK), service-b (Anthropic SDK), ...   │
 └──────────────────────┬───────────────────────────────────┘
-                       │ HTTP, OpenAI-совместимый формат
+                       │ HTTP (OpenAI /v1/* или Anthropic /v1/messages)
                        ▼
 ┌──────────────────────────────────────────────────────────┐
 │ ProxyLM.GO Daemon  (net/http + chi + goroutines)         │
 │                                                          │
-│  HTTP API ─► AuthN ─► Router ─► PerServerQueue           │
+│  HTTP API ─► AuthN ─► Translate? ─► Router ─► Queue     │
+│  (OpenAI+Anthropic)  (Bearer/x-api-key)  (model)        │
 │                          │                               │
 │                          │ выбор: какой сервер для       │
 │                          │   этой (model)                │
@@ -40,6 +44,7 @@
 │                  └────────┬─────────┘     не отпускаем"  │
 │                           │                              │
 │                  Backend client (*http.Client)           │
+│                  (openai.go или anthropic.go)            │
 │                  retry + failover                        │
 │                           │                              │
 │  Discovery ──► ModelMap   │   SQLite history             │
@@ -47,11 +52,11 @@
 │                           │                              │
 │  IPC server (WebSocket) ◀─┴─►  TUI client (Bubble Tea)   │
 └─────────────────────┬────────────────────────────────────┘
-                      │ HTTP (OpenAI/Ollama API)
+                      │ HTTP (OpenAI /v1/* или Anthropic /v1/messages)
                       ▼
 ┌──────────────────────────────────────────────────────────┐
 │ Backend LLM серверы                                      │
-│ srv1 (LM Studio), srv2 (Ollama), ...                     │
+│ srv1 (LM Studio/OpenAI), srv2 (Ollama), srv3 (Anthropic) │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -186,7 +191,45 @@ Streaming-нюанс: если ошибка приходит **до первог
 - Параллельно прокси считает `output_tokens` (по `delta.content` или из `usage` финального чанка) и отправляет события в IPC-publisher для TUI.
 - `input_tokens`: берём из последнего чанка с `usage` (LM Studio/Ollama OpenAI-shim возвращают usage в финальном `[DONE]`-чанке); fallback-подсчёт через библиотеку токенизации — отложен на v0.2 (U-1).
 
-## 7. Discovery
+## 7. Кросс-протокольная трансляция
+
+В v0.11.0 ProxyLM.GO стал мультипротокольным. Слой трансляции находится между HTTP-хендлером и воркером планировщика, а также между воркером и backend-клиентом.
+
+### Матрица трансляций
+
+| Клиентский эндпоинт    | `type` бэкенда | Действие |
+|------------------------|----------------|----------|
+| `/v1/chat/completions` | `openai`       | Passthrough — трансляция отсутствует |
+| `/v1/chat/completions` | `anthropic`    | Запрос: OpenAI→Anthropic; Ответ: Anthropic→OpenAI |
+| `/v1/messages`         | `openai`       | Запрос: Anthropic→OpenAI; Ответ: OpenAI→Anthropic |
+| `/v1/messages`         | `anthropic`    | Passthrough — трансляция отсутствует |
+
+`/v1/completions` и `/v1/embeddings` никогда не маршрутизируются на бэкенды `type: anthropic` (возвращается `400`).
+
+### Пакет `internal/api/translate/`
+
+Три файла реализуют логику трансляции:
+
+- `request.go` — конвертирует структуры запросов между OpenAI `ChatCompletionRequest` и Anthropic `MessagesRequest`. Ключевые маппинги: `messages[].role`, извлечение/добавление system-промпта, `max_tokens`, `stop`/`stop_sequences`, различия форматов инструментов.
+- `response.go` — конвертирует структуры не-streaming ответов. Обрабатывает content blocks (`content[].type = "text"`), `stop_reason`/`finish_reason`, переименование полей `usage`.
+- `stream.go` — определяет интерфейс `StreamTranslator`, используемый streaming-хендлерами. Stateful: отслеживает последовательность событий `message_start` → `content_block_*` → `message_stop`.
+
+### Streaming с трансляцией (`internal/api/streaming_translate.go`)
+
+Для streaming-путей, требующих трансляции, прокси использует `streaming_translate.go` вместо обычного `streaming.go`. Он оборачивает построчный SSE-ридер и применяет `StreamTranslator` к каждому событию перед отправкой клиенту. Stateful-транслятор необходим, поскольку SSE Anthropic принципиально отличается от SSE OpenAI:
+
+- **OpenAI SSE:** `data: <json-chunk>\n\n`, завершается `data: [DONE]\n\n`.
+- **Anthropic SSE:** `event: <type>\ndata: <json>\n\n` — именованные события; несколько типов событий на сообщение.
+
+Правила трансляции для направления `Anthropic→OpenAI`: накапливать текст `content_block_delta` в синтетический чанк `choices[0].delta.content`; маппить `message_start.usage.input_tokens` → `usage.prompt_tokens` первого чанка; маппить `message_delta.usage.output_tokens` → `usage` последнего чанка; эмитировать `data: [DONE]` при `message_stop`.
+
+Правила трансляции для направления `OpenAI→Anthropic`: оборачивать каждый `choices[0].delta.content` в событие `content_block_delta`; синтезировать `message_start` перед первым чанком; эмитировать `message_stop` после `data: [DONE]`.
+
+### Anthropic Backend client (`internal/core/backends/anthropic.go`)
+
+Реализует интерфейс `Backend` для бэкендов с `type: anthropic`. Отправляет запросы на `<url>/v1/messages` используя wire-формат Anthropic Messages API. Аутентификация: устанавливает и `Authorization: Bearer <api_key>`, и `x-api-key: <api_key>` для максимальной совместимости с Anthropic-совместимыми сервисами. Инварианты планировщика INV-1..INV-8 не изменились — `anthropic.go`-бэкенд участвует в той же per-server очереди и воркер-цикле, что и `openai.go`.
+
+## 8. Discovery
 
 - **Initial healthcheck:** при старте daemon'а, до начала приёма HTTP-запросов, выполняется один синхронный poll `GET /v1/models` для каждого backend-сервера, независимо от `discovery.enabled`. Серверы с явно указанным непустым списком `backends[].models` помечаются healthy сразу без poll'а.
 - Раз в `discovery.interval_seconds` (default 30s) опрашиваем `/v1/models` каждого сервера.
@@ -195,7 +238,7 @@ Streaming-нюанс: если ошибка приходит **до первог
 - При недоступности сервера N циклов подряд → флаг `unhealthy.Store(false)`.
 - Discovery-цикл получает `context.Context`, корректно завершается при shutdown.
 
-## 8. TUI ↔ Daemon (IPC)
+## 9. TUI ↔ Daemon (IPC)
 
 Daemon поднимает дополнительный WebSocket-эндпоинт (`/admin/stream`) на основном HTTP-порту (либо отдельном порту, см. конфиг).
 
@@ -209,7 +252,7 @@ TUI (Bubble Tea) подключается через тот же бинарни�
 
 Publisher на стороне daemon — отдельная goroutine с входящим `chan Event`; core-модули (scheduler, router, retry) шлют события неблокирующе (с защитой от backpressure: drop при переполнении буфера, в лог — `event_drop`).
 
-## 9. БД (SQLite)
+## 10. БД (SQLite)
 
 Драйвер: **`modernc.org/sqlite`** — pure-Go, без CGO. Доступ через стандартный пакет `database/sql` (драйвер регистрируется через `import _ "modernc.org/sqlite"`).
 
@@ -254,7 +297,7 @@ ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0;
 
 Запись истории — асинхронная: горутина-писатель читает из `chan HistoryEvent`, делает batch-инсерты (или одиночные с PRAGMA `synchronous = NORMAL`).
 
-## 10. Конфиг
+## 11. Конфиг
 
 См. `config.example.yaml`. Секции: `proxy`, `auth`, `routing`, `retry`, `discovery`, `storage`, `tui`, `compat`, `backends`.
 
@@ -266,7 +309,7 @@ ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0;
 
 БД: `storage.database_path` (по умолчанию — `./proxylm.db` относительно бинарника).
 
-## 11. Команды CLI
+## 12. Команды CLI
 
 ```
 proxylm serve   [--config config.yaml] [--host ...] [--port ...]
@@ -283,7 +326,7 @@ proxylm version
 
 Все команды реализованы через `spf13/cobra`. `service *` использует `github.com/kardianos/service` — единый API под Windows Service, systemd, launchd, OpenRC, SysV.
 
-## 12. Структура кода
+## 13. Структура кода
 
 ```
 ProxyLM.GO/
@@ -312,14 +355,21 @@ ProxyLM.GO/
 │   │   ├── perf.go               # PerfTracker: линейная регрессия (server, model) → PerfStats/ModelSummary
 │   │   └── backends/
 │   │       ├── backend.go        # интерфейс Backend
-│   │       └── openai.go         # клиент к OpenAI-совместимым (LM Studio, Ollama)
+│   │       ├── openai.go         # клиент к OpenAI-совместимым (LM Studio, Ollama и т. д.)
+│   │       └── anthropic.go      # клиент к Anthropic-совместимым (type: anthropic)
 │   ├── api/
 │   │   ├── server.go             # net/http + chi, lifecycle, graceful shutdown
-│   │   ├── auth.go               # middleware Bearer
-│   │   ├── routes_openai.go      # /v1/*
+│   │   ├── auth.go               # middleware Bearer + x-api-key (двойная аутентификация)
+│   │   ├── routes_openai.go      # /v1/chat/completions, /v1/completions, /v1/embeddings, /v1/models
+│   │   ├── routes_anthropic.go   # хендлер /v1/messages (Anthropic Messages API)
 │   │   ├── routes_admin.go       # /admin/stream (WebSocket)
 │   │   ├── routes_health.go      # /healthz
-│   │   └── streaming.go          # SSE-проксирование + token counting
+│   │   ├── streaming.go          # SSE-проксирование + token counting (протокол OpenAI)
+│   │   ├── streaming_translate.go # SSE-проксирование с кросс-протокольной трансляцией
+│   │   └── translate/
+│   │       ├── request.go        # трансляция структур запросов OpenAI↔Anthropic
+│   │       ├── response.go       # трансляция не-streaming ответов OpenAI↔Anthropic
+│   │       └── stream.go         # интерфейс StreamTranslator + stateful трансляция событий
 │   ├── storage/
 │   │   ├── db.go                 # подключение, миграции (//go:embed migrations/*.sql)
 │   │   ├── history.go            # запись/чтение requests (async writer)
@@ -348,7 +398,7 @@ ProxyLM.GO/
 
 Тесты пакетов лежат рядом с кодом (Go convention: `scheduler.go` + `scheduler_test.go`).
 
-## 13. Стек
+## 14. Стек
 
 | Слой           | Библиотека                                    |
 |----------------|-----------------------------------------------|
@@ -370,7 +420,7 @@ Go ≥ 1.25 фактически требуется к компилятору (�
 
 Зависимости минимизированы: всё ядро HTTP-server/client — stdlib. Сторонние библиотеки — только там, где stdlib неудобен или отсутствует (WebSocket, TUI, SQLite, CLI, YAML).
 
-## 14. ASCII-мокап TUI
+## 15. ASCII-мокап TUI
 
 ```
 ┌─ ProxyLM.GO v0.7.0 ──────────────────────────────────────────────────────────────────────────┐
@@ -425,7 +475,7 @@ TUI поддерживает три именованных панели: `paneHe
 
 `F1` открывает help-overlay со списком хоткеев. `Esc` / `F1` / `q` закрывают overlay.
 
-## 15. Сборка и распространение
+## 16. Сборка и распространение
 
 **Однострочная сборка:**
 ```bash
@@ -443,7 +493,7 @@ GOOS=darwin  GOARCH=arm64 go build -o bin/proxylm-darwin-arm64 .
 
 Поскольку SQLite-драйвер — pure-Go, **CGO_ENABLED=0** допустимо (и предпочтительно для статической компиляции).
 
-## 16. Метрики производительности (регрессия)
+## 17. Метрики производительности (регрессия)
 
 Модуль `internal/core/perf.go` оценивает производительность сервера по паре `(server_name, model)` методом линейной регрессии. Все наблюдения хранятся в памяти (`[]perfObservation`) — при рестарте daemon'а история обнуляется.
 
@@ -496,9 +546,9 @@ type ModelSummary struct {
 
 Метод `ServerSummary(server string) []ModelSummary` возвращает все модели сервера, отсортированные по `Samples DESC` — используется для server-detail modal в TUI.
 
-В IPC `ServerState` перф-поля (см. `API.md` §2.2) заполняются через `buildSnapshot`: `tok_in_per_sec = 1000 / KInMsTok` (нули и отрицательные → 0), аналогично `tok_out_per_sec`.
+В IPC `ServerState` перф-поля (см. `API.ru.md` §2.2) заполняются через `buildSnapshot`: `tok_in_per_sec = 1000 / KInMsTok` (нули и отрицательные → 0), аналогично `tok_out_per_sec`.
 
-## 17. Нерешённые вопросы / отложено на будущее
+## 18. Нерешённые вопросы / отложено на будущее
 
 - Метрики Prometheus (`/metrics`).
 - Web UI вместо/помимо TUI.

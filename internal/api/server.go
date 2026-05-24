@@ -80,7 +80,7 @@ func (s *Server) router() http.Handler {
 
 	r.Get("/healthz", healthzHandler(s.servers))
 
-	// /v1/* — клиентский OpenAI-API
+	// /v1/* — клиентский API (OpenAI + Anthropic)
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(s.auth.ClientAuth)
 		r.Use(requestIDMiddleware) // X-Request-Id в response headers
@@ -89,6 +89,8 @@ func (s *Server) router() http.Handler {
 			h := newProxyHandler("/v1"+endpoint, s.sched, s.backends, s.history, s.compat, s.log)
 			r.Post(endpoint, h.ServeHTTP)
 		}
+		ah := newAnthropicHandler(s.sched, s.backends, s.history, s.log)
+		r.Post("/messages", ah.ServeHTTP)
 	})
 
 	// /admin/* — IPC. AdminHandler регистрируется через SetAdminStream.
