@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-05-24
+
+### Added
+
+- **Anthropic Messages API endpoint** (`POST /v1/messages`). Clients using the Anthropic SDK can now connect to ProxyLM.GO directly. Request validation enforces the Anthropic contract: `model` and `max_tokens` are required; streaming uses the Anthropic SSE event format (`event: <type>\ndata: {...}`). Error responses follow the Anthropic error shape (`{"type":"error","error":{...}}`).
+- **Cross-protocol translation layer** (`internal/api/translate/`). All four client↔backend protocol combinations work transparently:
+  - OpenAI client → OpenAI backend (passthrough, unchanged)
+  - OpenAI client → Anthropic backend (request + response translated)
+  - Anthropic client → OpenAI backend (request + response translated)
+  - Anthropic client → Anthropic backend (passthrough)
+  Translation covers non-streaming responses, streaming SSE format conversion, system prompt extraction/injection, tool/function call format mapping, finish reason mapping, and usage field renaming (`prompt_tokens` ↔ `input_tokens`).
+- **Anthropic backend client** (`internal/core/backends/anthropic.go`). Implements the `Backend` interface with `x-api-key` + `anthropic-version` authentication. Used when `backends[].type: anthropic`.
+- **Dual authentication** on all `/v1/*` endpoints. Both `Authorization: Bearer <key>` (OpenAI-style) and `x-api-key: <key>` (Anthropic-style) are now accepted; `Authorization` takes precedence when both are present.
+- **`Backend.Protocol()` method** added to the `Backend` interface. Returns `"openai"` or `"anthropic"`.
+- **Unit tests**: 14 new tests in `internal/api/translate/` covering request translation (both directions), response translation (both directions, including roundtrip), streaming translation (OpenAI→Anthropic and Anthropic→OpenAI SSE event sequences), edge cases (empty input, model propagation).
+
+### Changed
+
+- **`backends[].type` is now functional**. Previously reserved and ignored (advisory only), the `type` field now selects the wire protocol for communicating with the backend: `openai` (default), `anthropic`, or `ollama` (alias for `openai`). Existing configs with `type: openai`, `type: ollama`, or no `type` field continue to work without modification.
+- **`Config.Warnings()`** no longer emits advisory messages about the `type` field being reserved — the field is now functional.
+- **`Config.Validate()`** now rejects unknown `type` values (only `""`, `openai`, `ollama`, `anthropic` are accepted).
+- **`cmd/serve.go`** creates `backends.Anthropic` instances for `type: anthropic` backends instead of always creating `backends.OpenAI`.
+- **TUI** `displayEndpoint` recognizes `/v1/messages` → `"messages"` in the per-model stats table.
+- **`config.example.yaml`**: `type` field documentation updated from "reserved / ignored" to protocol selector; added commented-out Anthropic cloud backend example.
+- **`docs/SRS.md` / `docs/SRS.ru.md`**: new §3.10 with FR-52..FR-60 covering Anthropic API, cross-protocol translation, and dual auth. FR-1 updated to include `/v1/messages`. FR-2 updated for dual auth. Document version → 0.11.0.
+- **`docs/API.md` / `docs/API.ru.md`**: new §1.5 `POST /v1/messages` with request/response schema, streaming events, translation matrix, and error format. Auth section updated for dual auth. Document version → 0.11.0.
+- **`docs/ARCHITECTURE.md` / `docs/ARCHITECTURE.ru.md`**: new §7 "Cross-Protocol Translation" describing the translation matrix, `internal/api/translate/` package, and streaming translator mechanics. Updated system diagram and code structure section. Document version → 0.11.0.
+- **`README.md` / `README.ru.md`**: updated to reflect multi-protocol capabilities — description, features list, architecture diagram, Quick Start with Anthropic curl example, configuration table.
+
+### Limitations
+
+- `/v1/completions` and `/v1/embeddings` are not translatable to Anthropic backends (no Anthropic equivalent) — routed to such a backend, they return an error; the scheduler retries on other servers.
+- Extended thinking (Anthropic-only) is passed through in Anthropic→Anthropic mode; stripped in cross-protocol mode.
+- `POST /v1/messages/count_tokens` is not implemented (deferred).
+- Prompt caching (`cache_control`) is passed through in same-protocol mode; stripped in cross-protocol mode.
+
 ## [0.10.0] - 2026-05-19
 
 ### Added
@@ -129,7 +165,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.7...v0.10.0
 [0.9.7]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.5...v0.9.6
