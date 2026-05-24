@@ -231,6 +231,7 @@ func (h *anthropicHandler) runStream(r *http.Request, w http.ResponseWriter, srv
 	return runStreamWithTranslator(r, w, bk, srv, backendPath, requestBody, needTranslate, h.log)
 }
 
+//nolint:contextcheck // detached context: запись в БД должна пережить разрыв клиента
 func (h *anthropicHandler) persistRecord(rec *core.RequestRecord, phase string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
