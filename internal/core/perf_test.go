@@ -92,6 +92,41 @@ func TestPerfTracker_FitsKnownCoefficients(t *testing.T) {
 	}
 }
 
+// TestPerfTracker_TwoStageTLoadFromSingleReload: реалистичный профиль —
+// много «чистых» наблюдений loaded=0 и ОДНО loaded=1. Двухэтапная оценка
+// (v0.12.0) должна устойчиво восстановить t_load из единственного reload'а:
+// токенные коэффициенты берутся по чистым точкам, t_load — как остаток
+// загруженной точки. Раньше совместный 3-var NNLS по одному остатку часто
+// «прибивал» t_load к 0 → в TUI был «—», хотя load-время физически есть.
+func TestPerfTracker_TwoStageTLoadFromSingleReload(t *testing.T) {
+	p := NewPerfTracker()
+	// Чистая токенная формула: t = 8*in + 12*out. Load добавляет 700 мс.
+	p.Record("a", "m1", "/v1/chat/completions", 100, 50, 8*100+12*50, false)
+	p.Record("a", "m1", "/v1/chat/completions", 200, 100, 8*200+12*100, false)
+	p.Record("a", "m1", "/v1/chat/completions", 50, 150, 8*50+12*150, false)
+	p.Record("a", "m1", "/v1/chat/completions", 300, 40, 8*300+12*40, false)
+	// Единственное наблюдение с reload.
+	p.Record("a", "m1", "/v1/chat/completions", 120, 60, 700+8*120+12*60, true)
+
+	st := p.Snapshot("a", "m1", "/v1/chat/completions")
+	if !st.OK {
+		t.Fatalf("регрессия не fit: %+v", st)
+	}
+	if st.Loaded != 1 {
+		t.Errorf("Loaded = %d, want 1", st.Loaded)
+	}
+	approx := func(got, want, tol float64) bool { return math.Abs(got-want) < tol }
+	if !approx(st.TLoadMs, 700, 5.0) {
+		t.Errorf("t_load = %v, want ~700 (±5) из единственного reload-наблюдения", st.TLoadMs)
+	}
+	if !approx(st.KInMsTok, 8, 0.1) {
+		t.Errorf("k_in = %v, want ~8", st.KInMsTok)
+	}
+	if !approx(st.KOutMsTok, 12, 0.1) {
+		t.Errorf("k_out = %v, want ~12", st.KOutMsTok)
+	}
+}
+
 // TestPerfTracker_NoLoadedFallsBackTo2Vars: все loaded=false → решаем 2×2,
 // TLoadMs=0, OK=true.
 func TestPerfTracker_NoLoadedFallsBackTo2Vars(t *testing.T) {

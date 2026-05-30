@@ -431,6 +431,7 @@ Sent once immediately after connection, and again in response to a `request_snap
         "perf_samples": 12,
         "perf_ok": true,
         "t_load_ms": 4200.0,
+        "t_load_loaded": 3,
         "tok_in_per_sec": 0.0,
         "tok_out_per_sec": 38.5,
         "r_squared": 0.94,
@@ -509,6 +510,7 @@ Sent once immediately after connection, and again in response to a `request_snap
 | `perf_samples` | int | number of observations in the regression for `current_model`; omitted if 0 |
 | `perf_ok` | bool | `true` if regression is computed (≥ 3 observations, `X^T X` is non-singular); omitted if false |
 | `t_load_ms` | float64 | estimated model load time (ms); omitted if 0 |
+| `t_load_loaded` | int | number of reload observations (`loaded=1`) behind the header `t_load_ms` estimate; the TUI marks `< 3` as low-confidence (trailing `*`) and `0` as `—` (unknown); omitted if 0 (v0.12.0) |
 | `tok_in_per_sec` | float64 | prompt-token throughput (tok/s); omitted if 0 |
 | `tok_out_per_sec` | float64 | completion-token throughput (tok/s); omitted if 0 |
 | `r_squared` | float64 | coefficient of determination R² of header-level regression, [0,1]; omitted if 0 (no fit) |

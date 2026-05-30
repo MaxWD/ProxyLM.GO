@@ -74,6 +74,7 @@ var (
 	colorWhite       = lipgloss.Color("15") // bright white
 	colorBlue        = lipgloss.Color("4")  // blue — фон выделенной строки
 	colorMagenta     = lipgloss.Color("5")  // magenta — retry counter
+	colorTeal        = lipgloss.Color("6")  // teal/cyan (non-bright) — перф-метрики
 )
 
 // Стили виджетов. Палитра соответствует утверждённому дизайн-документу.
@@ -130,6 +131,11 @@ var (
 
 	// Retry-suffix "(N/M)" в running-строке.
 	StyleRetry = lipgloss.NewStyle().Foreground(colorMagenta)
+
+	// StylePerf — перф-метрики сервера (t_load · ↓in · ↑out) в шапке. Отдельный
+	// teal-цвет, чтобы значения визуально отличались от прочего «тусклого»
+	// контента (StyleDim) и читались как самостоятельный блок (v0.12.0).
+	StylePerf = lipgloss.NewStyle().Foreground(colorTeal)
 
 	// Разное.
 	StyleDim      = lipgloss.NewStyle().Foreground(colorDimmed)

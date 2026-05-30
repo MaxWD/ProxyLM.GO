@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-30
+
+### Added
+
+- **Two-stage `t_load` estimation in `PerfTracker`**. Because INV-2 keeps a model loaded until its queue drains, model reloads are rare — a steady-state server typically yields a *single* `loaded=1` observation among hundreds of `loaded=0`. The previous joint 3-variable NNLS determined `t_load` from essentially one residual and frequently collapsed it to `0` on the slightest noise, which surfaced in the TUI as `—` even though load time always physically exists. When ≥ 2 clean `loaded=0` observations are available, `fitRegression` now estimates the token coefficients (`k_in`, `k_out`) from those clean points, then derives `t_load` as the clamped mean of the residuals over `loaded=1` observations. This recovers a stable `t_load` from a single reload. Falls back to the joint 3-variable NNLS in the degenerate case of fewer than two clean points.
+- **Models overlay in the TUI** (hotkey `m`). Lists all discovered models on the currently selected server in a centered overlay, with the active model marked `▶`. Long lists collapse to `… (+N more)`. Closes on `m` / `Esc` / `q`. Added to the help overlay (`F1`) and footer.
+- **`t_load` confidence marker in the TUI**. `ipc.ServerState` gained `t_load_loaded` (number of reload observations behind the header `t_load` estimate). The TUI now renders three distinct cases: `—` (no reload ever observed — genuinely unknown), `1.4s*` (estimate exists but rests on `< 3` reload samples — low confidence), and `1.4s` (≥ 3 samples — confident).
+
+### Changed
+
+- **TUI server performance metrics are now rendered in a distinct teal color** (`StylePerf`) instead of the generic dim gray, so `t_load · ↓tok/s · ↑tok/s` reads as its own block. The duplicated metric-rendering logic across the header chip, selected chip, and Info pane was centralized into `serverMetricText` / `fmtTLoad`.
+- **TUI strings standardized to English**. The slow-server alert is now `!!! SLOW !!!` (was Russian), and the footer / Info-pane hints use English (`Tab switch pane`, `Click select`, `m Models`).
+
+### Fixed
+
+- **`t_load` no longer shows `—` for servers that have served at least one reload**. See the two-stage estimation above.
+
 ## [0.11.0] - 2026-05-24
 
 ### Added
@@ -165,7 +182,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.7...v0.10.0
 [0.9.7]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.6...v0.9.7

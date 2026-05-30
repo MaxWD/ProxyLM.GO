@@ -441,14 +441,15 @@ Dependencies are minimized: all core HTTP server/client code is stdlib. Third-pa
 │ Model        qwen2.5:14b           Completed 14:01:08   Output tok  82                      │
 │ Server       srv1       Status    completed (1/3)       RM  —                               │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
-   F1 Help  Tab Header/Requests/Info  F5 Refresh  F10 Quit
+   F1 Help  Tab panes  F5 Refresh  m Models  / Filter  q/F10 Quit
 ```
 
 Changes relative to v0.1.0:
 
 - Column **RM** (Reload Model) between `Server` and `Queued`: `✓` if the request was dispatched with a model switch (`model_reloaded = true`), `—` otherwise.
 - Queue glyph `…` (U+2026, single cell character) instead of `⏳` (emoji wide character, 2 cells) — fixes column shifting in terminals that render emoji as two cells wide.
-- Server header shows regression metrics: `t_load · ↓tok_in/s · ↑tok_out/s`. If `PerfOK=false` or model is not loaded — the metrics line is empty; if there are no reload observations — `t_load` is replaced with `—`.
+- Server header shows regression metrics in a distinct teal color: `t_load · ↓tok_in/s · ↑tok_out/s`. If `PerfOK=false` or model is not loaded — the metrics line is empty. The `t_load` field distinguishes three cases (v0.12.0): `—` (no reload ever observed — genuinely unknown), `1.4s*` (estimate based on fewer than 3 reload samples — low confidence), and `1.4s` (≥ 3 samples — confident).
+- **Models overlay** (hotkey `m`, v0.12.0): a centered overlay listing all discovered models on the selected server, with the active model marked `▶`. Closes on `m` / `Esc` / `q`.
 - Active server in the header is marked with `▸`.
 
 Bubble Tea architecture: `Model` holds a snapshot of `[]ServerView`, `[]RequestRow`, and detail state. `Update(msg)` handles three sources:
@@ -522,9 +523,21 @@ Parameters θ = (t_load, b, c) minimize Σ(t_all − fit)². Solved via normal e
 
 | Condition | System size | Result |
 |-----------|-------------|--------|
-| Minimum `perfMinSamples = 3` observations; at least one with `loaded=1`; 3×3 non-singular | 3×3 | `PerfStats{OK: true, TLoadMs, KInMsTok, KOutMsTok}` |
+| ≥ `perfMinSamples = 3` observations; at least one `loaded=1`; ≥ 2 clean `loaded=0` | **two-stage** (v0.12.0) | `OK: true`, `TLoadMs` from reload residuals |
+| ≥ 3 observations; at least one `loaded=1`; < 2 clean `loaded=0` | 3×3 NNLS (joint, fallback) | `OK: true`, `TLoadMs, KInMsTok, KOutMsTok` |
 | ≥ 3 observations; all with `loaded=0` or 3×3 singular | 2×2 (fallback without `t_load`) | `OK: true`, `TLoadMs = 0` |
 | < 3 observations | — | `OK: false` |
+
+### Two-stage `t_load` estimation (v0.12.0)
+
+INV-2 keeps a model loaded until its queue drains, so reloads are rare: a steady-state server typically yields a **single** `loaded=1` observation among hundreds of `loaded=0`. A joint 3-variable NNLS determines `t_load` from essentially one residual — high variance — and frequently collapses it to `0` on noise, which surfaced in the TUI as `—` even though load time always physically exists.
+
+When ≥ 2 clean `loaded=0` observations are present, `fitRegression` instead:
+
+1. Fits the token coefficients `k_in`, `k_out` from the clean `loaded=0` points (abundant and uncontaminated by load time) via 2-variable NNLS.
+2. Estimates `t_load` as the clamped (≥ 0) mean of the residuals `t_all − k_in·in − k_out·out` over the `loaded=1` observations.
+
+This recovers a stable `t_load` from a single reload. The TUI marks the estimate's confidence via `ServerState.t_load_loaded` (number of reload observations): `< 3` → trailing `*`.
 
 ### Public types
 

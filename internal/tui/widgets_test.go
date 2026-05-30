@@ -7,6 +7,31 @@ import (
 	"proxylm/internal/ipc"
 )
 
+// TestFmtTLoad — маркер уверенности оценки t_load (v0.12.0):
+// loaded==0 → «—»; 0<loaded<min → значение со «*»; loaded≥min → чистое значение.
+func TestFmtTLoad(t *testing.T) {
+	tests := []struct {
+		name    string
+		tLoadMs float64
+		loaded  int
+		want    string
+	}{
+		{"no reload observed", 0, 0, "—"},
+		{"reload observed but value zero still marked", 0, 1, "0ms*"},
+		{"single reload → low confidence marker", 1400, 1, "1.4s*"},
+		{"two reloads → still low confidence", 1400, 2, "1.4s*"},
+		{"enough reloads → confident", 1400, 3, "1.4s"},
+		{"many reloads → confident", 850, 10, "850ms"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := fmtTLoad(tt.tLoadMs, tt.loaded); got != tt.want {
+				t.Errorf("fmtTLoad(%v, %d) = %q, want %q", tt.tLoadMs, tt.loaded, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestRequestRowColor — table-driven unit test для функции определения цвета строки
 // по статусу + INV-2 контекст (needsSwap).
 func TestRequestRowColor(t *testing.T) {

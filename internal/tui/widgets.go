@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -346,7 +347,7 @@ func renderServerChip(s ipc.ServerState, flash, selected bool) string {
 		line := strings.Join(parts, " ")
 		rendered := StyleSelected.Render(line)
 		if s.Slow {
-			rendered += " " + StyleSlow.Render(" !!! МЕДЛЕННО !!! ")
+			rendered += " " + StyleSlow.Render(" !!! SLOW !!! ")
 		}
 		return rendered
 	}
@@ -390,45 +391,63 @@ func renderServerChip(s ipc.ServerState, flash, selected bool) string {
 	}
 	line := strings.Join(parts, " ")
 	if s.Slow {
-		line += " " + StyleSlow.Render(" !!! МЕДЛЕННО !!! ")
+		line += " " + StyleSlow.Render(" !!! SLOW !!! ")
 	}
 	return line
 }
 
-// renderServerMetricPlain — версия renderServerMetric без StyleDim-окраски,
-// для selected-режима (где вложенный стиль сломал бы общий фон). Возвращает
-// строку без ANSI кроме glyph'ов (которые и так чистый UTF-8).
-func renderServerMetricPlain(s ipc.ServerState) string {
+// tLoadConfidentMin — порог числа reload-наблюдений (loaded=1), ниже которого
+// оценка t_load помечается «*» как низкоуверенная. При меньшем числе точек
+// двухэтапная оценка ещё опирается на 1–2 остатка и может заметно «гулять».
+const tLoadConfidentMin = 3
+
+// fmtTLoad форматирует оценку t_load с учётом числа reload-наблюдений (v0.12.0):
+//
+//	loaded == 0           → «—»   (reload вообще не наблюдался — оценить нельзя)
+//	0 < loaded < min      → «1.4s*» (оценка есть, но по малому числу точек)
+//	loaded ≥ min          → «1.4s»  (надёжная оценка)
+//
+// Это разводит два прежде неразличимых случая «—»: честное отсутствие данных и
+// нестабильную оценку при единственном reload.
+func fmtTLoad(tLoadMs float64, loaded int) string {
+	if loaded <= 0 {
+		return "—"
+	}
+	s := fmtMs(int64(tLoadMs))
+	if loaded < tLoadConfidentMin {
+		s += "*"
+	}
+	return s
+}
+
+// serverMetricText собирает plain-строку "t_load · ↓N tok/s · ↑M tok/s" без
+// ANSI-окраски (кроме glyph'ов). Используется и в selected-режиме (где вложенный
+// стиль сломал бы общий фон), и как основа для окрашенной renderServerMetric.
+// Пустая строка, если регрессия не отдала результат (PerfOK=false / модель не
+// загружена).
+func serverMetricText(s ipc.ServerState) string {
 	if !s.PerfOK || s.CurrentModel == "" {
 		return ""
 	}
-	tLoadStr := "—"
-	if s.TLoadMs > 0 {
-		tLoadStr = fmtMs(int64(s.TLoadMs))
-	}
 	in := fmtTokPerSec(s.TokInPerSec)
 	out := fmtTokPerSec(s.TokOutPerSec)
-	return tLoadStr + " · " + GlyphTokIn() + in + " · " + GlyphTokOut() + out
+	return fmtTLoad(s.TLoadMs, s.TLoadLoaded) + " · " + GlyphTokIn() + in + " · " + GlyphTokOut() + out
+}
+
+// renderServerMetricPlain — неокрашенная метрика для selected-чипа.
+func renderServerMetricPlain(s ipc.ServerState) string {
+	return serverMetricText(s)
 }
 
 // renderServerMetric форматирует строку производительности для текущей модели
-// сервера. Формат: "t_load · ↓N tok/s · ↑M tok/s" — три значения регрессии.
-// Если регрессия не отдала результат (PerfOK=false, samples < 3, либо модель
-// не загружена) — пустая строка.
-//
-// Если ни одной задачи на этой модели не сопровождалась reload'ом
-// (PerfOK=true, но TLoadMs==0), часть t_load заменяется на «—».
+// сервера и красит её StylePerf (teal), чтобы перф-значения визуально
+// выделялись на фоне прочего контента. Пустая строка — если данных нет.
 func renderServerMetric(s ipc.ServerState) string {
-	if !s.PerfOK || s.CurrentModel == "" {
+	text := serverMetricText(s)
+	if text == "" {
 		return ""
 	}
-	tLoadStr := "—"
-	if s.TLoadMs > 0 {
-		tLoadStr = fmtMs(int64(s.TLoadMs))
-	}
-	in := fmtTokPerSec(s.TokInPerSec)
-	out := fmtTokPerSec(s.TokOutPerSec)
-	return StyleDim.Render(tLoadStr + " · " + GlyphTokIn() + in + " · " + GlyphTokOut() + out)
+	return StylePerf.Render(text)
 }
 
 // fmtTokPerSec форматирует tok/s; для невалидных значений — прочерк.
@@ -905,7 +924,7 @@ func renderInfoPane(
 		content = renderInfoServer(*srv, innerW)
 	default:
 		title = "Info"
-		content = StyleDim.Render("Tab — переключение pane    ←↑↓→ — навигация    Enter/Click — выбор")
+		content = StyleDim.Render("Tab switch pane    ↑↓ navigate    Enter/Click select    m models")
 	}
 	vp.SetContent(content)
 
@@ -917,7 +936,7 @@ func renderInfoPane(
 	}
 	titleStr := StyleTitle.Render(title)
 	if srv != nil && kind == infoKindServer && srv.Slow {
-		titleStr += "   " + StyleSlow.Render(" !!! МЕДЛЕННО !!! ")
+		titleStr += "   " + StyleSlow.Render(" !!! SLOW !!! ")
 	}
 	return borderStyle.Width(width - 2).Render(titleStr + "\n" + vp.View())
 }
@@ -1017,9 +1036,7 @@ func renderInfoServer(s ipc.ServerState, innerW int) string {
 	tokIn := "—"
 	tokOut := "—"
 	if s.PerfOK {
-		if s.TLoadMs > 0 {
-			tLoadStr = fmtMs(int64(s.TLoadMs))
-		}
+		tLoadStr = fmtTLoad(s.TLoadMs, s.TLoadLoaded)
 		if s.TokInPerSec > 0 {
 			tokIn = fmt.Sprintf("%.1f tok/s", s.TokInPerSec)
 		}
@@ -1080,9 +1097,7 @@ func renderInfoServer(s ipc.ServerState, innerW int) string {
 		to := "—"
 		r2 := "—"
 		if ms.OK {
-			if ms.TLoadMs > 0 {
-				tLoad = fmtMs(int64(ms.TLoadMs))
-			}
+			tLoad = fmtTLoad(ms.TLoadMs, ms.Loaded)
 			if ms.TokInPerSec > 0 {
 				if ms.KInCI > 0 {
 					ci := tokPerSecCIHalf(ms.TokInPerSec, ms.KInCI)
@@ -1206,7 +1221,7 @@ func renderFooter(showFilter bool, width int) string {
 		// Narrow terminal — show minimal hints only.
 		text = "F1 Help · q Quit"
 	} else {
-		text = "F1 Help   F5 Refresh   / Filter   Tab Header/Requests/Info   Click — выбор   q/F10 Quit"
+		text = "F1 Help   F5 Refresh   / Filter   m Models   Tab panes   Click select   q/F10 Quit"
 	}
 	return StyleFooter.Width(width - 2).Render(text)
 }
@@ -1234,6 +1249,7 @@ var helpItems = []helpItem{
 	{"PgUp/PgDn", "page up / page down"},
 	{"Home/End", "jump to first / last row"},
 	{"Enter", "show details in Info pane"},
+	{"m", "list models on the selected server"},
 	{"/", "filter requests (model / client / server / status)"},
 	{"Esc", "cancel filter / close overlay"},
 	{"mouse wheel", "scroll pane under cursor; select server in header"},
@@ -1269,6 +1285,52 @@ func renderHelpOverlay(termW, termH int) string {
 	content := StyleHelpBorder.Render(sb.String())
 
 	// Центрируем в экране.
+	return lipgloss.Place(termW, termH, lipgloss.Center, lipgloss.Center, content)
+}
+
+// ---- ModelsOverlay ----------------------------------------------------------
+
+// modelsOverlayMaxRows — сколько имён моделей показываем в оверлее, прежде чем
+// схлопнуть остаток в строку «… (+N more)». Защита от переполнения экрана при
+// сервере с десятками моделей.
+const modelsOverlayMaxRows = 24
+
+// renderModelsOverlay показывает список моделей выбранного сервера по центру
+// экрана (хоткей m). Текущая загруженная модель помечается «▶». Список
+// сортируется лексикографически для стабильного порядка между снапшотами.
+func renderModelsOverlay(s ipc.ServerState, termW, termH int) string {
+	var sb strings.Builder
+	sb.WriteString(StyleModalTitle.Render(fmt.Sprintf("%s — models (%d)", s.Name, len(s.Models))))
+	sb.WriteString("\n\n")
+
+	if len(s.Models) == 0 {
+		sb.WriteString(StyleDim.Render("(no models discovered yet)"))
+	} else {
+		models := make([]string, len(s.Models))
+		copy(models, s.Models)
+		sort.Strings(models)
+
+		shown := models
+		var overflow int
+		if len(shown) > modelsOverlayMaxRows {
+			overflow = len(shown) - modelsOverlayMaxRows
+			shown = shown[:modelsOverlayMaxRows]
+		}
+		for _, name := range shown {
+			if name == s.CurrentModel {
+				sb.WriteString(StyleStatusRunning.Render(GlyphRunning()+" ") + StyleHeader.Render(name) + "\n")
+			} else {
+				sb.WriteString("  " + name + "\n")
+			}
+		}
+		if overflow > 0 {
+			sb.WriteString(StyleDim.Render(fmt.Sprintf("  … (+%d more)", overflow)) + "\n")
+		}
+	}
+	sb.WriteString("\n")
+	sb.WriteString(StyleDim.Render("Press m, Esc or q to close"))
+
+	content := StyleHelpBorder.Render(sb.String())
 	return lipgloss.Place(termW, termH, lipgloss.Center, lipgloss.Center, content)
 }
 

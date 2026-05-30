@@ -210,6 +210,7 @@ func (h *Hub) buildSnapshot(ctx context.Context) Envelope {
 					state.PerfOK = best.OK
 					if best.OK {
 						state.TLoadMs = best.TLoadMs
+						state.TLoadLoaded = best.Loaded
 						state.TokInPerSec = tokPerSec(best.KInMsTok)
 						state.TokOutPerSec = tokPerSec(best.KOutMsTok)
 						state.RSquared = best.RSquared
