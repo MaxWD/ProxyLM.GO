@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-05-30
+
+### Changed
+
+- **TUI color of performance metrics corrected**. v0.12.0 tinted the *entire* server performance metric (`t_load · ↓tok/s · ↑tok/s`) teal in the server-list header — that was not the intended target. The header metric is reverted to the neutral dim color. Instead, in the server-detail Info pane (bottom panel) per-model table, only the **`±margin` part** of each `tok/s` value (the 95% confidence-interval error bound) is now tinted teal, so the point estimate stays readable while the uncertainty stands out. ANSI-aware right-justified padding (`padLeftDisplay`) keeps the table columns aligned; the new `styleCIMargin` helper colors only the `±…` suffix. `StylePerf` was renamed to `StyleCI` accordingly.
+
 ## [0.12.0] - 2026-05-30
 
 ### Added
@@ -182,7 +188,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.9.7...v0.10.0

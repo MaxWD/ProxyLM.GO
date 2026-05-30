@@ -132,10 +132,10 @@ var (
 	// Retry-suffix "(N/M)" в running-строке.
 	StyleRetry = lipgloss.NewStyle().Foreground(colorMagenta)
 
-	// StylePerf — перф-метрики сервера (t_load · ↓in · ↑out) в шапке. Отдельный
-	// teal-цвет, чтобы значения визуально отличались от прочего «тусклого»
-	// контента (StyleDim) и читались как самостоятельный блок (v0.12.0).
-	StylePerf = lipgloss.NewStyle().Foreground(colorTeal)
+	// StyleCI — цвет для значений погрешности (±CI) в per-model таблице
+	// server-detail (InfoPane). Суффикс «±<margin>» красится teal, чтобы
+	// оператор сразу видел, что это доверительный интервал, а не само значение.
+	StyleCI = lipgloss.NewStyle().Foreground(colorTeal)
 
 	// Разное.
 	StyleDim      = lipgloss.NewStyle().Foreground(colorDimmed)
