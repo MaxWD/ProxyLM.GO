@@ -440,14 +440,14 @@ func renderServerMetricPlain(s ipc.ServerState) string {
 }
 
 // renderServerMetric форматирует строку производительности для текущей модели
-// сервера и красит её StylePerf (teal), чтобы перф-значения визуально
-// выделялись на фоне прочего контента. Пустая строка — если данных нет.
+// сервера и красит её StyleDim (тусклый серый) — тот же тон, что у прочего
+// вспомогательного контента в header-chip. Пустая строка — если данных нет.
 func renderServerMetric(s ipc.ServerState) string {
 	text := serverMetricText(s)
 	if text == "" {
 		return ""
 	}
-	return StylePerf.Render(text)
+	return StyleDim.Render(text)
 }
 
 // fmtTokPerSec форматирует tok/s; для невалидных значений — прочерк.
@@ -1116,15 +1116,25 @@ func renderInfoServer(s ipc.ServerState, innerW int) string {
 			}
 			r2 = fmt.Sprintf("%.2f", ms.RSquared)
 		}
-		row := fmt.Sprintf("  %-20s %-16s %5d %4d %7s %12s %12s %5s",
-			truncStr(ms.Model, 20), truncStr(displayEndpoint(ms.Endpoint), 16),
-			ms.Samples, ms.Loaded, tLoad, ti, to, r2)
 		// Подсвечиваем строки с degraded fit, чтобы оператор видел, какие
-		// оценки сейчас нельзя считать надёжными.
+		// оценки сейчас нельзя считать надёжными. Для degraded используем
+		// единый plain fmt.Sprintf + StyleFlash (вложенный StyleCI сбросил бы
+		// жёлтый фон через \x1b[0m). Для остальных строк красим только суффикс
+		// «±<margin>» через StyleCI, сохраняя выравнивание с padLeftDisplay.
 		if ms.OK && ms.FitQuality == "degraded" {
-			row = StyleFlash.Render(row)
+			row := fmt.Sprintf("  %-20s %-16s %5d %4d %7s %12s %12s %5s",
+				truncStr(ms.Model, 20), truncStr(displayEndpoint(ms.Endpoint), 16),
+				ms.Samples, ms.Loaded, tLoad, ti, to, r2)
+			sb.WriteString(StyleFlash.Render(row))
+		} else {
+			left := fmt.Sprintf("  %-20s %-16s %5d %4d %7s ",
+				truncStr(ms.Model, 20), truncStr(displayEndpoint(ms.Endpoint), 16),
+				ms.Samples, ms.Loaded, tLoad)
+			tiCell := padLeftDisplay(styleCIMargin(ti), len([]rune(ti)), 12)
+			toCell := padLeftDisplay(styleCIMargin(to), len([]rune(to)), 12)
+			row := left + tiCell + " " + toCell + " " + fmt.Sprintf("%5s", r2)
+			sb.WriteString(row)
 		}
-		sb.WriteString(row)
 		sb.WriteByte('\n')
 	}
 	return sb.String()
@@ -1185,6 +1195,28 @@ func tokPerSecCIHalf(tokPerSec, kCI float64) float64 {
 		return tokPerSec
 	}
 	return (1000.0/upper - 1000.0/lower) / 2.0
+}
+
+// styleCIMargin красит суффикс "±<margin>" значения tok/s стилем StyleCI,
+// оставляя ведущее значение как есть. Строки без "±" (чистое значение или "—")
+// возвращаются без изменений. '±' (U+00B1) — двухбайтовый rune; IndexRune даёт
+// корректный байтовый индекс начала суффикса.
+func styleCIMargin(s string) string {
+	i := strings.IndexRune(s, '±')
+	if i < 0 {
+		return s
+	}
+	return s[:i] + StyleCI.Render(s[i:])
+}
+
+// padLeftDisplay правоориентированно дополняет (возможно ANSI-)строку до ширины n,
+// считая ведущие пробелы по ВИДИМОЙ ширине plainW (rune-длине неокрашенного
+// значения) — ANSI-байты в подсчёт не входят. Аналог "%Ns" для styled-значений.
+func padLeftDisplay(styled string, plainW, n int) string {
+	if plainW >= n {
+		return styled
+	}
+	return strings.Repeat(" ", n-plainW) + styled
 }
 
 // padDisplay — pad ИЛИ truncate с учётом ANSI-escape'ов. Для plain-строк

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -304,6 +305,47 @@ func TestRequestMatchesFilter(t *testing.T) {
 			got := requestMatchesFilter(r, tc.filter)
 			if got != tc.want {
 				t.Errorf("requestMatchesFilter(filter=%q): got %v, want %v", tc.filter, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStyleCIMargin проверяет, что styleCIMargin красит суффикс «±<margin>»,
+// сохраняя ведущее значение, и не трогает строки без «±» (plain / «—» / пустые).
+//
+// Проверки специально dep-free и независимы от color-profile lipgloss: «ведущая
+// часть сохранена как префикс» и «суффикс ±… присутствует» истинны и когда цвет
+// активен (ANSI вставляется ПЕРЕД «±», подстрока остаётся непрерывной), и когда
+// рендерер вне TTY возвращает plain. Это надёжнее, чем форсить TrueColor и
+// ассертить конкретные escape-коды.
+func TestStyleCIMargin(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		wantSame   bool   // true → результат должен совпадать со входом (нет «±»)
+		wantPrefix string // ведущая часть до «±», должна сохраниться
+		wantInfix  string // суффикс «±…», должен присутствовать
+	}{
+		{name: "value with CI suffix preserved", input: "38.5±5.1", wantPrefix: "38.5", wantInfix: "±5.1"},
+		{name: "plain value without ± unchanged", input: "38.5", wantSame: true},
+		{name: "dash unchanged", input: "—", wantSame: true},
+		{name: "empty string unchanged", input: "", wantSame: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := styleCIMargin(tc.input)
+			if tc.wantSame {
+				if got != tc.input {
+					t.Errorf("styleCIMargin(%q) = %q, want unchanged", tc.input, got)
+				}
+				return
+			}
+			if !strings.HasPrefix(got, tc.wantPrefix) {
+				t.Errorf("styleCIMargin(%q) = %q: does not start with %q", tc.input, got, tc.wantPrefix)
+			}
+			if !strings.Contains(got, tc.wantInfix) {
+				t.Errorf("styleCIMargin(%q) = %q: does not contain %q", tc.input, got, tc.wantInfix)
 			}
 		})
 	}

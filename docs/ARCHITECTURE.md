@@ -448,7 +448,8 @@ Changes relative to v0.1.0:
 
 - Column **RM** (Reload Model) between `Server` and `Queued`: `✓` if the request was dispatched with a model switch (`model_reloaded = true`), `—` otherwise.
 - Queue glyph `…` (U+2026, single cell character) instead of `⏳` (emoji wide character, 2 cells) — fixes column shifting in terminals that render emoji as two cells wide.
-- Server header shows regression metrics in a distinct teal color: `t_load · ↓tok_in/s · ↑tok_out/s`. If `PerfOK=false` or model is not loaded — the metrics line is empty. The `t_load` field distinguishes three cases (v0.12.0): `—` (no reload ever observed — genuinely unknown), `1.4s*` (estimate based on fewer than 3 reload samples — low confidence), and `1.4s` (≥ 3 samples — confident).
+- Server header shows regression metrics: `t_load · ↓tok_in/s · ↑tok_out/s`. If `PerfOK=false` or model is not loaded — the metrics line is empty. The `t_load` field distinguishes three cases (v0.12.0): `—` (no reload ever observed — genuinely unknown), `1.4s*` (estimate based on fewer than 3 reload samples — low confidence), and `1.4s` (≥ 3 samples — confident).
+- In the server-detail Info pane (bottom panel), the per-model table renders `tok/s` as `value±margin`; only the `±margin` part (the 95% CI error bound) is tinted (teal) so the point estimate stays readable while the uncertainty stands out (v0.12.1). Header-row metrics in the server list keep the neutral dim color.
 - **Models overlay** (hotkey `m`, v0.12.0): a centered overlay listing all discovered models on the selected server, with the active model marked `▶`. Closes on `m` / `Esc` / `q`.
 - Active server in the header is marked with `▸`.
 
