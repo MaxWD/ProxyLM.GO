@@ -259,6 +259,56 @@ func fitRegression(obs []perfObservation) PerfStats {
 		fillFitQuality(&stats, obs, false /*hasLoadCol*/)
 		return stats
 	}
+
+	// Loaded ≥ 1: устойчивая ДВУХЭТАПНАЯ оценка (v0.12.0).
+	//
+	// Мотивация: из-за INV-2 (дренируем текущую модель до конца, прежде чем
+	// переключать) события reload РЕДКИ — на установившемся профиле сервера
+	// обычно ровно одно наблюдение loaded=1 на сотни loaded=0. Совместный 3-var
+	// NNLS определяет t_load фактически по одному остатку: дисперсия огромна, и
+	// NNLS регулярно «прибивает» его к 0 на границе при малейшем шуме → t_load
+	// показывался как «—», хотя физически load-время всегда есть.
+	//
+	// Двухэтапный подход устойчивее:
+	//   Этап 1: токенные коэффициенты k_in, k_out оцениваются по «чистым»
+	//           наблюдениям loaded=0 (их обычно много, и они не загрязнены
+	//           load-временем).
+	//   Этап 2: t_load = clamped-среднее остатков (t_all − k_in·in − k_out·out)
+	//           по наблюдениям loaded=1.
+	// Это даёт стабильную оценку t_load даже при единственном reload-наблюдении.
+	//
+	// Если «чистых» точек loaded=0 < 2 (вырожденный случай «почти всё с
+	// reload» — при частом чередовании моделей), two-stage не определит токенные
+	// коэффициенты надёжно, и мы fall back на прежний совместный 3-var NNLS.
+	loaded0 := make([]perfObservation, 0, len(obs))
+	for _, o := range obs {
+		if !o.loaded {
+			loaded0 = append(loaded0, o)
+		}
+	}
+	if len(loaded0) >= 2 {
+		if k1, k2, ok := solveNNLS2(loaded0); ok {
+			var sum float64
+			var n int
+			for _, o := range obs {
+				if o.loaded {
+					sum += float64(o.totalMs) - k1*float64(o.in) - k2*float64(o.out)
+					n++
+				}
+			}
+			tLoad := 0.0
+			if n > 0 {
+				tLoad = clampNonNeg(sum / float64(n))
+			}
+			stats.TLoadMs = tLoad
+			stats.KInMsTok = k1
+			stats.KOutMsTok = k2
+			stats.OK = true
+			fillFitQuality(&stats, obs, true /*hasLoadCol*/)
+			return stats
+		}
+	}
+
 	a, k1, k2, ok := solveNNLS3(obs)
 	if !ok {
 		return stats

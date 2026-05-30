@@ -101,6 +101,9 @@ type model struct {
 
 	// Help overlay
 	showHelp bool
+
+	// Models overlay — список моделей выбранного в шапке сервера (хоткей m).
+	showModels bool
 }
 
 // Run starts the TUI with an already-dialled WebSocket client.
@@ -464,6 +467,17 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Models overlay перехватывает все клавиши кроме закрывающих (m / Esc / q).
+	if m.showModels {
+		switch {
+		case key.Matches(msg, keys.Models),
+			key.Matches(msg, keys.Esc),
+			key.Matches(msg, keys.Quit):
+			m.showModels = false
+		}
+		return m, nil
+	}
+
 	// Filter input mode.
 	if m.filterActive {
 		switch {
@@ -492,6 +506,14 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Help):
 		m.showHelp = true
+		return m, nil
+
+	case key.Matches(msg, keys.Models):
+		// Показываем модели выбранного в шапке сервера; если серверов нет —
+		// no-op (оверлей бессмыслен).
+		if len(m.servers) > 0 {
+			m.showModels = true
+		}
 		return m, nil
 
 	case key.Matches(msg, keys.Refresh):
@@ -858,6 +880,11 @@ func (m *model) View() string {
 	// Help overlay — рендерится поверх всего содержимого.
 	if m.showHelp {
 		return renderHelpOverlay(m.width, m.height)
+	}
+
+	// Models overlay — список моделей выбранного сервера.
+	if m.showModels && len(m.servers) > 0 {
+		return renderModelsOverlay(m.servers[clampedIdx], m.width, m.height)
 	}
 
 	return base

@@ -7,6 +7,7 @@ type keyMap struct {
 	Quit     key.Binding
 	Refresh  key.Binding
 	Help     key.Binding
+	Models   key.Binding
 	Filter   key.Binding
 	Tab      key.Binding
 	Enter    key.Binding
@@ -31,6 +32,10 @@ var keys = keyMap{
 	Help: key.NewBinding(
 		key.WithKeys("f1"),
 		key.WithHelp("F1", "help"),
+	),
+	Models: key.NewBinding(
+		key.WithKeys("m"),
+		key.WithHelp("m", "models on selected server"),
 	),
 	Filter: key.NewBinding(
 		key.WithKeys("/"),

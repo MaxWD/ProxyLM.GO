@@ -431,6 +431,7 @@ Sec-WebSocket-Key: ...
         "perf_samples": 12,
         "perf_ok": true,
         "t_load_ms": 4200.0,
+        "t_load_loaded": 3,
         "tok_in_per_sec": 0.0,
         "tok_out_per_sec": 38.5,
         "r_squared": 0.94,
@@ -509,6 +510,7 @@ Sec-WebSocket-Key: ...
 | `perf_samples` | int | число наблюдений в регрессии для `current_model`; опускается если 0 |
 | `perf_ok` | bool | `true` если регрессия рассчитана (≥ 3 наблюдений, `X^T X` не сингулярна); опускается если false |
 | `t_load_ms` | float64 | оценка времени загрузки (мс); опускается если 0 |
+| `t_load_loaded` | int | число reload-наблюдений (`loaded=1`), на которых построена header-оценка `t_load_ms`; TUI помечает `< 3` как низкоуверенную (завершающая `*`), а `0` как `—` (неизвестно); опускается если 0 (v0.12.0) |
 | `tok_in_per_sec` | float64 | пропускная способность по prompt-токенам (tok/s); опускается если 0 |
 | `tok_out_per_sec` | float64 | пропускная способность по completion-токенам (tok/s); опускается если 0 |
 | `r_squared` | float64 | коэффициент детерминации R² header-регрессии, [0,1]; опускается если 0 (нет fit'а) |

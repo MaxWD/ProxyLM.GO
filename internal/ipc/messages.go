@@ -45,6 +45,12 @@ type ServerState struct {
 	// TLoadMs — оценка времени загрузки модели (мс). 0, если ни одного запроса
 	// этой модели не сопровождался reload'ом (см. RequestState.ModelReloaded).
 	TLoadMs float64 `json:"t_load_ms,omitempty"`
+	// TLoadLoaded — число reload-наблюдений (loaded=1), на которых построена
+	// оценка t_load для header-метрики (пара server, current_model). TUI
+	// использует его, чтобы отличить «reload вообще не наблюдался» (=0 → «—»)
+	// от «есть оценка, но по малому числу точек» (>0, но < порога → значение со
+	// звёздочкой как маркер низкой уверенности). Введено в v0.12.0.
+	TLoadLoaded int `json:"t_load_loaded,omitempty"`
 	// TokInPerSec / TokOutPerSec — производительности по входным и выходным
 	// токенам, токенов в секунду. Преобразование 1000 / k_in_ms_tok.
 	TokInPerSec  float64 `json:"tok_in_per_sec,omitempty"`
