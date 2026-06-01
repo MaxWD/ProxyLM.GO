@@ -29,6 +29,7 @@ type Server struct {
 	backends map[string]backends.Backend
 	servers  []*core.ServerInfo
 	history  *storage.History
+	liveTail *core.LiveTail
 	log      *slog.Logger
 	srv      *http.Server
 
@@ -47,6 +48,7 @@ type Deps struct {
 	Servers  []*core.ServerInfo
 	History  *storage.History
 	Compat   config.Compat
+	LiveTail *core.LiveTail
 	Log      *slog.Logger
 }
 
@@ -64,6 +66,7 @@ func New(cfg config.Proxy, d Deps) *Server {
 		backends: d.Backends,
 		servers:  d.Servers,
 		history:  d.History,
+		liveTail: d.LiveTail,
 		log:      log,
 	}
 }
@@ -86,7 +89,7 @@ func (s *Server) router() http.Handler {
 		r.Use(requestIDMiddleware) // X-Request-Id в response headers
 		r.Get("/models", listModelsHandler(s.servers))
 		for _, endpoint := range []string{"/chat/completions", "/completions", "/embeddings"} {
-			h := newProxyHandler("/v1"+endpoint, s.sched, s.backends, s.history, s.compat, s.log)
+			h := newProxyHandler("/v1"+endpoint, s.sched, s.backends, s.history, s.compat, s.liveTail, s.log)
 			r.Post(endpoint, h.ServeHTTP)
 		}
 		ah := newAnthropicHandler(s.sched, s.backends, s.history, s.log)

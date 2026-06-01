@@ -23,11 +23,15 @@ import (
 //
 // Streaming реализуется через bufio.Scanner с увеличенным буфером (SSE-чанки от LLM
 // могут быть крупными — особенно при стрим-режиме с tool_calls).
-func (h *proxyHandler) runStream(r *http.Request, w http.ResponseWriter, srv *core.ServerInfo, body []byte) core.JobResult {
+func (h *proxyHandler) runStream(r *http.Request, w http.ResponseWriter, srv *core.ServerInfo, body []byte, reqID string) core.JobResult {
 	bk, ok := h.backends[srv.Name]
 	if !ok {
 		return core.JobResult{Err: fmt.Errorf("backend %q не зарегистрирован", srv.Name)}
 	}
+	// «Хвост» генерации виден в TUI только пока запрос выполняется; чистим по
+	// выходу из стрима (успех, ошибка или cancel) — иначе в памяти останется
+	// контент завершённого запроса.
+	defer h.liveTail.Delete(reqID)
 
 	// Cross-protocol: OpenAI client → Anthropic backend
 	if !isOpenAIProtocol(srv) {
@@ -107,6 +111,10 @@ func (h *proxyHandler) runStream(r *http.Request, w http.ResponseWriter, srv *co
 			if pt, ot, ok := extractUsage(data); ok {
 				promptTokens, outputTokens = pt, ot
 			}
+			// Накапливаем «хвост» генерации для TUI (только in-flight, в памяти).
+			if delta := extractDeltaContent(data); delta != "" {
+				h.liveTail.Append(reqID, delta)
+			}
 		}
 
 		// Уважаем cancel клиента (он может отключиться посреди стрима).
@@ -162,6 +170,28 @@ func trimDataPrefix(line []byte) ([]byte, bool) {
 		rest = rest[1:]
 	}
 	return rest, true
+}
+
+// extractDeltaContent извлекает приращение текста из SSE-чанка OpenAI-формата.
+// Поддерживает оба варианта: chat (choices[].delta.content) и legacy completions
+// (choices[].text). Возвращает "" если контента нет (служебные чанки, role-делты,
+// tool_calls без текста). Используется для «хвоста» генерации в TUI.
+func extractDeltaContent(data []byte) string {
+	var p struct {
+		Choices []struct {
+			Delta struct {
+				Content string `json:"content"`
+			} `json:"delta"`
+			Text string `json:"text"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(data, &p); err != nil || len(p.Choices) == 0 {
+		return ""
+	}
+	if c := p.Choices[0].Delta.Content; c != "" {
+		return c
+	}
+	return p.Choices[0].Text
 }
 
 // extractUsage пытается распарсить data-чанк как JSON с полем usage.

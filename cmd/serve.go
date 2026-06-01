@@ -114,7 +114,14 @@ func runDaemon(parent context.Context, cfgPath string) error {
 		case config.BackendTypeAnthropic:
 			bk, err = backends.NewAnthropic(b.Name, b.URL, b.APIKey, timeout)
 		default:
-			bk, err = backends.NewOpenAI(b.Name, b.URL, b.APIKey, timeout)
+			var o *backends.OpenAI
+			o, err = backends.NewOpenAI(b.Name, b.URL, b.APIKey, timeout)
+			if o != nil {
+				// type → kind нативной пробы загруженных моделей (ollama/lmstudio/
+				// llamacpp). Для "openai"/пусто проба отключена (no-op).
+				o.SetProbeKind(b.Type)
+				bk = o
+			}
 		}
 		if err != nil {
 			return fmt.Errorf("backend %q: %w", b.Name, err)
@@ -162,7 +169,10 @@ func runDaemon(parent context.Context, cfgPath string) error {
 	}
 
 	// 6) IPC Hub (WebSocket publisher) + HTTP API
-	hub := ipc.NewHub(daemonVersion, servers, history, 1*time.Second, cfg.Retry.MaxAttempts, cfg.TUI.ShowCompletedMinutes, perf, log)
+	// liveTail — общий in-memory стор «хвоста» генерации: пишется streaming-
+	// обработчиком, читается Hub'ом при сборке snapshot'а. В БД/логи не попадает.
+	liveTail := core.NewLiveTail()
+	hub := ipc.NewHub(daemonVersion, servers, history, 1*time.Second, cfg.Retry.MaxAttempts, cfg.TUI.ShowCompletedMinutes, perf, liveTail, log)
 	go hub.Run(ctx)
 
 	auth := api.NewAuthRegistry(cfg.Auth)
@@ -173,6 +183,7 @@ func runDaemon(parent context.Context, cfgPath string) error {
 		Servers:  servers,
 		History:  history,
 		Compat:   cfg.Compat,
+		LiveTail: liveTail,
 		Log:      log,
 	})
 	srv.SetAdminStream(hub.Handler())
