@@ -26,3 +26,16 @@ type Backend interface {
 	// Возвращает *http.Response с открытым Body, который вызывающий обязан закрыть.
 	Forward(ctx context.Context, path string, body io.Reader, headers http.Header) (*http.Response, error)
 }
+
+// LoadedModelsProber — опциональная способность бэкенда сообщить, какие модели
+// реально загружены в память (VRAM/RAM) прямо сейчас. Реализуется только теми
+// бэкендами, у которых есть нативный эндпоинт (Ollama /api/ps, LM Studio
+// /api/v0/models state, llama.cpp /models status). Discovery делает type-assert
+// к этому интерфейсу — бэкенды без него (cloud / generic openai) не пробуются.
+//
+// supported=false означает «этот бэкенд пробу не поддерживает» (даже если err
+// nil); err != nil — проба поддерживается, но запрос упал (сеть/HTTP). Введено
+// в v0.13.0.
+type LoadedModelsProber interface {
+	LoadedModels(ctx context.Context) (models []string, supported bool, err error)
+}

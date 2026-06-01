@@ -96,6 +96,18 @@ type ServerInfo struct {
 	// обновляются в Scheduler.dispatch перед стартом Run.
 	LastDispatchedModel   string
 	ConsecutiveModelCount int
+
+	// loadedModels — снимок реально загруженных в память моделей бэкенда,
+	// обновляется discovery через нативную пробу (см. backends.LoadedModelsProber).
+	// nil-снимок ⇒ проба ещё не выполнялась; probed=false ⇒ тип бэкенда пробу не
+	// поддерживает. Читается без блокировок через atomic.Pointer. Введено в v0.13.0.
+	loadedModels atomic.Pointer[loadedModelsState]
+}
+
+// loadedModelsState — неизменяемый снимок результата пробы загруженных моделей.
+type loadedModelsState struct {
+	models []string
+	probed bool
 }
 
 // NewServerInfo создаёт ServerInfo с инициализированными atomic-полями и каналом Notify.
@@ -142,4 +154,22 @@ func (s *ServerInfo) SetCurrentModel(model string) {
 	}
 	m := model
 	s.CurrentModel.Store(&m)
+}
+
+// SetLoadedModels атомарно сохраняет снимок реально загруженных моделей.
+// probed=true помечает, что бэкенд поддерживает пробу (даже если models пуст).
+func (s *ServerInfo) SetLoadedModels(models []string, probed bool) {
+	st := &loadedModelsState{models: append([]string(nil), models...), probed: probed}
+	s.loadedModels.Store(st)
+}
+
+// LoadedModelsSnapshot возвращает последний снимок загруженных моделей и флаг,
+// поддерживается ли проба этим бэкендом. (nil, false) — пробы ещё не было или
+// тип бэкенда её не поддерживает.
+func (s *ServerInfo) LoadedModelsSnapshot() (models []string, probed bool) {
+	st := s.loadedModels.Load()
+	if st == nil {
+		return nil, false
+	}
+	return st.models, st.probed
 }

@@ -31,6 +31,10 @@ type OpenAI struct {
 	baseURL string // без хвостового '/'
 	apiKey  string
 	client  *http.Client
+	// probeKind — тип нативной пробы загруженных моделей: "ollama" | "lmstudio"
+	// | "llamacpp" | "" (нет пробы). Заполняется из config.backends[].type через
+	// SetProbeKind. Управляет методом LoadedModels (см. loaded_models.go).
+	probeKind string
 }
 
 // NewOpenAI создаёт клиент с настроенным timeout и keep-alive пулом.
@@ -61,6 +65,11 @@ func NewOpenAI(name, baseURL, apiKey string, timeout time.Duration) (*OpenAI, er
 
 func (o *OpenAI) Name() string     { return o.name }
 func (o *OpenAI) Protocol() string { return "openai" }
+
+// SetProbeKind задаёт тип нативной пробы загруженных моделей по типу бэкенда из
+// конфига ("ollama" | "lmstudio" | "llamacpp"). Пустая строка или "openai"
+// отключают пробу. Вызывается один раз при сборке в cmd/serve.go.
+func (o *OpenAI) SetProbeKind(kind string) { o.probeKind = kind }
 
 // ListModels опрашивает /v1/models. Ожидаемый формат — OpenAI:
 //

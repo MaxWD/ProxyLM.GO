@@ -26,6 +26,7 @@ type Hub struct {
 	maxAttempts          int
 	showCompletedMinutes int
 	perf                 *core.PerfTracker
+	liveTail             *core.LiveTail
 
 	mu      sync.RWMutex
 	clients map[*hubClient]struct{}
@@ -52,7 +53,7 @@ func (c *hubClient) closeConn(code websocket.StatusCode, reason string) {
 // TUI в Hello, чтобы тот скрывал завершённые записи через указанный интервал.
 // perf — опционально; если передан, ServerState будет содержать TokensPerSec/TtftMs
 // для пары (server, current_model). nil допустим — поля просто останутся пустыми.
-func NewHub(version string, servers []*core.ServerInfo, history *storage.History, snapshotEvery time.Duration, maxAttempts, showCompletedMinutes int, perf *core.PerfTracker, log *slog.Logger) *Hub {
+func NewHub(version string, servers []*core.ServerInfo, history *storage.History, snapshotEvery time.Duration, maxAttempts, showCompletedMinutes int, perf *core.PerfTracker, liveTail *core.LiveTail, log *slog.Logger) *Hub {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -68,6 +69,7 @@ func NewHub(version string, servers []*core.ServerInfo, history *storage.History
 		maxAttempts:          maxAttempts,
 		showCompletedMinutes: showCompletedMinutes,
 		perf:                 perf,
+		liveTail:             liveTail,
 		clients:              make(map[*hubClient]struct{}),
 	}
 }
@@ -193,8 +195,13 @@ func (h *Hub) buildSnapshot(ctx context.Context) Envelope {
 			CurrentModel: current,
 			QueueDepth:   queueDepth,
 			Models:       models,
+			Priority:     s.Priority,
 			Slow:         s.LastSlow.Load(),
 			FailureCount: s.FailureCount.Load(),
+		}
+		if loaded, probed := s.LoadedModelsSnapshot(); probed {
+			state.LoadedModels = loaded
+			state.LoadedModelsProbed = true
 		}
 		// Метрики для шапки — пара (server, current_model). Если у пары есть
 		// статистика на нескольких endpoint'ах (с v0.10.0 ключ включает endpoint),
@@ -251,6 +258,12 @@ func (h *Hub) buildSnapshot(ctx context.Context) Envelope {
 			if !r.StartedAt.IsZero() && !r.CreatedAt.IsZero() && r.StartedAt.After(r.CreatedAt) {
 				queueWait = r.StartedAt.Sub(r.CreatedAt).Milliseconds()
 			}
+			// «Хвост» генерации — только для выполняющихся streaming-запросов;
+			// берётся из in-memory LiveTail (в БД его нет).
+			var lastTokens string
+			if r.Stream && r.Status == core.StatusRunning {
+				lastTokens = h.liveTail.Get(r.ID)
+			}
 			requests = append(requests, RequestState{
 				ID:               r.ID,
 				ClientName:       r.ClientName,
@@ -271,6 +284,7 @@ func (h *Hub) buildSnapshot(ctx context.Context) Envelope {
 				ModelReloaded:    r.ModelReloaded,
 				LastFailedServer: r.LastFailedServer,
 				ErrorMessage:     r.ErrorMessage,
+				LastTokens:       lastTokens,
 			})
 		}
 	}

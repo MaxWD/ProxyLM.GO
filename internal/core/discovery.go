@@ -185,6 +185,9 @@ func (d *Discovery) pollOne(ctx context.Context, e *discoveryEntry) {
 		// pending'и из очереди ждали бы случайного триггера.
 		e.server.Wake()
 	}
+	// Проба реально загруженных в память моделей (опционально, по типу бэкенда).
+	// Ошибка пробы НЕ влияет на healthy — это вспомогательная наблюдаемость.
+	d.probeLoadedModels(ctx, e)
 	if len(e.explicitModels) > 0 {
 		// Список фиксирован в конфиге — не перезаписываем.
 		return
@@ -192,6 +195,27 @@ func (d *Discovery) pollOne(ctx context.Context, e *discoveryEntry) {
 	e.server.Lock()
 	e.server.Models = toModelInfos(models)
 	e.server.Unlock()
+}
+
+// probeLoadedModels опрашивает нативный эндпоинт бэкенда (если он реализует
+// LoadedModelsProber) и сохраняет снимок реально загруженных моделей в
+// ServerInfo. Бэкенды без пробы пропускаются молча.
+func (d *Discovery) probeLoadedModels(ctx context.Context, e *discoveryEntry) {
+	prober, ok := e.backend.(backends.LoadedModelsProber)
+	if !ok {
+		return
+	}
+	loaded, supported, err := prober.LoadedModels(ctx)
+	if !supported {
+		return
+	}
+	if err != nil {
+		d.log.Debug("discovery: проба загруженных моделей не удалась",
+			"server", e.server.Name, "error", err.Error())
+		// Не затираем прошлый снимок при разовой ошибке сети.
+		return
+	}
+	e.server.SetLoadedModels(loaded, true)
 }
 
 func toModelInfos(names []string) []ModelInfo {
