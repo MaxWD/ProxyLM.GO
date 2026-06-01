@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -83,6 +84,13 @@ type model struct {
 	// model flash tracking: serverName -> flashEntry
 	flashMap map[string]flashEntry
 
+	// animPhase — счётчик фаз анимации пульса лампы работающих серверов.
+	// Инкрементируется animTick'ом (~160ms). animRunning защищает от запуска
+	// нескольких параллельных тикеров: тик работает только пока есть in-flight
+	// сервер, иначе останавливается (экономия перерисовок на простое).
+	animPhase   int
+	animRunning bool
+
 	// filter
 	filterActive bool
 	filterInput  textinput.Model
@@ -104,6 +112,11 @@ type model struct {
 
 	// Models overlay — список моделей выбранного в шапке сервера (хоткей m).
 	showModels bool
+
+	// showTail — показывать ли «хвост» генерации (последние токены) для
+	// выбранного streaming-запроса в InfoPane. По умолчанию false (приватность —
+	// это контент ответа модели). Переключается хоткеем t.
+	showTail bool
 }
 
 // Run starts the TUI with an already-dialled WebSocket client.
@@ -165,8 +178,15 @@ type connRestoredMsg struct{}
 // tickMsg is sent every second for elapsed-time refresh and flash expiry.
 type tickMsg time.Time
 
+// animTickMsg — частый тик (~160ms) для анимации пульса лампы работающих
+// серверов. Активен только пока есть in-flight сервер (см. maybeStartAnim).
+type animTickMsg time.Time
+
 // refreshDoneMsg — визуальный сигнал «refresh sent» отработал (500ms).
 type refreshDoneMsg struct{}
+
+// animTickInterval — шаг анимации пульса. 4 кадра × 160ms ≈ 640ms на полный цикл.
+const animTickInterval = 160 * time.Millisecond
 
 // ---- Init -------------------------------------------------------------------
 
@@ -181,6 +201,35 @@ func tickEvery() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+func animTick() tea.Cmd {
+	return tea.Tick(animTickInterval, func(t time.Time) tea.Msg {
+		return animTickMsg(t)
+	})
+}
+
+// anyInFlight возвращает true, если хотя бы один сервер сейчас обрабатывает запрос.
+func (m *model) anyInFlight() bool {
+	for _, s := range m.servers {
+		if s.Healthy && s.InFlight {
+			return true
+		}
+	}
+	return false
+}
+
+// maybeStartAnim запускает анимационный тик, если есть работающий сервер и тик
+// ещё не запущен. Возвращает nil, если тик не нужен (всё простаивает).
+func (m *model) maybeStartAnim() tea.Cmd {
+	if m.animRunning {
+		return nil
+	}
+	if m.anyInFlight() {
+		m.animRunning = true
+		return animTick()
+	}
+	return nil
 }
 
 // ---- waitForMessage ---------------------------------------------------------
@@ -224,7 +273,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// TTL может сократить visibleRequests — клампим selectedIdx, чтобы курсор
 		// не остался за пределами списка.
 		m.clampSelected()
-		return m, tickEvery()
+		// Если появился работающий сервер, а анимация не запущена — запускаем
+		// (страховка на случай, если snapshot пришёл без смены числа серверов).
+		return m, tea.Batch(tickEvery(), m.maybeStartAnim())
+
+	case animTickMsg:
+		m.animPhase++
+		if m.anyInFlight() {
+			return m, animTick()
+		}
+		// Никто не работает — останавливаем частый тик до следующего in-flight.
+		m.animRunning = false
+		return m, nil
 
 	case recvMsg:
 		if msg.err != nil {
@@ -252,7 +312,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Diff/snapshot могли убрать выбранную строку — клампим.
 		m.clampSelected()
-		return m, m.waitForMessage()
+		// Новый snapshot мог принести in-flight сервер — стартуем пульс-анимацию.
+		return m, tea.Batch(m.waitForMessage(), m.maybeStartAnim())
 
 	case connLostMsg:
 		m.connStatus = connStateReconnecting
@@ -438,6 +499,9 @@ func (m *model) handleEnvelope(env ipc.Envelope, payload json.RawMessage) error 
 }
 
 // applyServerList replaces m.servers and tracks model changes for flash.
+// Серверы сортируются по приоритету (меньше число = выше предпочтение, наверху),
+// tiebreak по имени — порядок стабилен между снапшотами, что важно и для
+// индексных цветов (ServerColorByIndex), и для курсора selectedServerIdx.
 func (m *model) applyServerList(incoming []ipc.ServerState) {
 	now := time.Now()
 	oldByName := make(map[string]ipc.ServerState, len(m.servers))
@@ -451,6 +515,12 @@ func (m *model) applyServerList(incoming []ipc.ServerState) {
 			}
 		}
 	}
+	sort.SliceStable(incoming, func(i, j int) bool {
+		if incoming[i].Priority != incoming[j].Priority {
+			return incoming[i].Priority < incoming[j].Priority
+		}
+		return incoming[i].Name < incoming[j].Name
+	})
 	m.servers = incoming
 }
 
@@ -514,6 +584,11 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.servers) > 0 {
 			m.showModels = true
 		}
+		return m, nil
+
+	case key.Matches(msg, keys.Tail):
+		// Тогл «хвоста» генерации в InfoPane (контент ответа — по явному запросу).
+		m.showTail = !m.showTail
 		return m, nil
 
 	case key.Matches(msg, keys.Refresh):
@@ -813,6 +888,14 @@ func (m *model) View() string {
 		flashModels[name] = true
 	}
 
+	// Карта цветов серверов: serverName → позиция в отсортированном списке.
+	// Назначает различимые цвета по индексу (см. ServerColorByIndex) и
+	// переиспользуется в шапке и в колонке Server таблицы запросов.
+	colorIdx := make(map[string]int, len(m.servers))
+	for i, s := range m.servers {
+		colorIdx[s.Name] = i
+	}
+
 	// Collect requests slice from map.
 	reqSlice := make([]ipc.RequestState, 0, len(m.requests))
 	for _, r := range m.requests {
@@ -837,8 +920,8 @@ func (m *model) View() string {
 	title := StyleTitle.Render("Proxy") + StyleHeader.Render("LM.GO") + StyleTitle.Render(" "+ver)
 
 	// Panels.
-	header := renderHeaderBar(m.servers, reqSlice, flashModels, m.ttlMinutes, m.width,
-		m.activePane == paneHeader, clampedIdx)
+	header := renderHeaderBar(m.servers, reqSlice, flashModels, colorIdx, m.animPhase,
+		m.ttlMinutes, m.width, m.activePane == paneHeader, clampedIdx)
 
 	var reqPanel string
 	if !m.snapshotReceived {
@@ -848,6 +931,7 @@ func (m *model) View() string {
 			&m.reqViewport,
 			reqSlice,
 			m.servers,
+			colorIdx,
 			m.selectedIdx,
 			m.filterText,
 			m.width,
@@ -863,6 +947,7 @@ func (m *model) View() string {
 		m.infoKind,
 		m.lookupInfoRequest(),
 		m.lookupInfoServer(),
+		m.showTail,
 		m.width,
 	)
 

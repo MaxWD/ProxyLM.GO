@@ -8,6 +8,7 @@ type keyMap struct {
 	Refresh  key.Binding
 	Help     key.Binding
 	Models   key.Binding
+	Tail     key.Binding
 	Filter   key.Binding
 	Tab      key.Binding
 	Enter    key.Binding
@@ -36,6 +37,10 @@ var keys = keyMap{
 	Models: key.NewBinding(
 		key.WithKeys("m"),
 		key.WithHelp("m", "models on selected server"),
+	),
+	Tail: key.NewBinding(
+		key.WithKeys("t"),
+		key.WithHelp("t", "toggle generation tail (streaming)"),
 	),
 	Filter: key.NewBinding(
 		key.WithKeys("/"),
