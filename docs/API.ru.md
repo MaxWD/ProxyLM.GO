@@ -1,6 +1,6 @@
 # ProxyLM.GO — API Specification
 
-Версия документа: 0.11.0
+Версия документа: 0.13.0
 Связанные документы: [`ARCHITECTURE.ru.md`](./ARCHITECTURE.ru.md), [`SRS.ru.md`](./SRS.ru.md)
 
 Документ описывает три группы API:
@@ -428,6 +428,9 @@ Sec-WebSocket-Key: ...
         "current_model": "qwen2.5:14b",
         "queue_depth": 2,
         "models": ["qwen2.5:14b", "llama3.1:8b"],
+        "priority": 100,
+        "loaded_models": ["qwen2.5:14b"],
+        "loaded_models_probed": true,
         "perf_samples": 12,
         "perf_ok": true,
         "t_load_ms": 4200.0,
@@ -489,7 +492,8 @@ Sec-WebSocket-Key: ...
         "max_attempts": 3,
         "queue_wait_ms": 120,
         "model_reloaded": false,
-        "last_failed_server": ""
+        "last_failed_server": "",
+        "last_tokens": ""
       }
     ]
   }
@@ -507,6 +511,9 @@ Sec-WebSocket-Key: ...
 | `current_model` | string | загруженная / in-flight модель; пустая строка если нет |
 | `queue_depth` | int | число запросов в `pending` |
 | `models` | string[] | известные модели сервера |
+| `priority` | int | приоритет сервера из конфига (`backends[].priority`); меньше = выше предпочтение. TUI сортирует сервера по возрастанию этого значения (v0.13.0) |
+| `loaded_models` | string[] | модели, реально находящиеся в памяти прямо сейчас, по данным нативной пробы (Ollama `/api/ps`, LM Studio `/api/v1/models`, llama.cpp `/models`); опускается если пусто/не поддерживается. Отличается от `current_model` (что прокси отправил последним) (v0.13.0) |
+| `loaded_models_probed` | bool | `true` если бэкенд поддерживает пробу загруженных моделей (`type: ollama` / `lmstudio` / `llamacpp`); отличает «проба не поддерживается» (`n/a`) от «поддерживается, но память пуста»; опускается если false (v0.13.0) |
 | `perf_samples` | int | число наблюдений в регрессии для `current_model`; опускается если 0 |
 | `perf_ok` | bool | `true` если регрессия рассчитана (≥ 3 наблюдений, `X^T X` не сингулярна); опускается если false |
 | `t_load_ms` | float64 | оценка времени загрузки (мс); опускается если 0 |
@@ -562,6 +569,7 @@ Sec-WebSocket-Key: ...
 | `model_reloaded` | bool | `true` если при dispatch произошла смена модели; опускается если false |
 | `last_failed_server` | string | имя сервера, на котором упала предыдущая попытка; пустая строка если ещё не было неудач; опускается если пусто |
 | `error_message` | string | последнее сообщение об ошибке для `failed`-запросов; опускается если пусто |
+| `last_tokens` | string | «хвост» генерации: последние ~160 сгенерированных символов для выполняющегося **streaming**-запроса. Присутствует только при `status=running` + `stream=true`; хранится только в памяти (в БД и логи не пишется); опускается если пусто (v0.13.0) |
 
 ### 2.3. Сообщения клиент → серверу
 

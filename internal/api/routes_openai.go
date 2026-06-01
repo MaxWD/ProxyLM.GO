@@ -35,16 +35,18 @@ type proxyHandler struct {
 	backends map[string]backends.Backend
 	history  *storage.History
 	compat   config.Compat
+	liveTail *core.LiveTail // «хвост» генерации для streaming (опционально, nil-safe)
 	log      *slog.Logger
 }
 
-func newProxyHandler(endpoint string, sched *core.Scheduler, bks map[string]backends.Backend, history *storage.History, compat config.Compat, log *slog.Logger) *proxyHandler {
+func newProxyHandler(endpoint string, sched *core.Scheduler, bks map[string]backends.Backend, history *storage.History, compat config.Compat, liveTail *core.LiveTail, log *slog.Logger) *proxyHandler {
 	return &proxyHandler{
 		endpoint: endpoint,
 		sched:    sched,
 		backends: bks,
 		history:  history,
 		compat:   compat,
+		liveTail: liveTail,
 		log:      log,
 	}
 }
@@ -105,7 +107,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			var result core.JobResult
 			if stream {
-				result = h.runStream(r, w, srv, body)
+				result = h.runStream(r, w, srv, body, rec.ID)
 			} else {
 				result = h.runNonStream(r, w, srv, body)
 			}

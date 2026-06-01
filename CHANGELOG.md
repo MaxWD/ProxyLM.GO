@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-01
+
+### Added
+
+- **Distinct per-server colors in the TUI**. Server chips are now colored by their index in the priority-sorted list against an expanded 12-color palette (was a 5-color FNV hash of the name, which collided into repeats at 3–4 servers). Colors are now distinct for up to 12 servers and stable across snapshots. The request table's `Server` column reuses the same color via a shared `serverName → index` map. `ServerColor(name)` was replaced by `ServerColorByIndex(idx)` / `serverColorFor(name, index)`.
+- **Pulsing in-flight indicator**. A healthy server that is actively processing a request now shows a *pulsing* lamp (`●` brightness breathing over ~640 ms via a 4-frame ANSI cycle); an idle server shows a steady lamp. This makes "working vs idle" obvious — previously, once `current_model` was set it stayed displayed and the two states were indistinguishable. Driven by a fast animation tick (~160 ms) that runs **only while at least one server is in-flight** (no redraw churn on an idle dashboard).
+- **Priority-ordered server list**. `ipc.ServerState` gained `priority`; the TUI sorts servers ascending by priority (lower number = higher preference, on top), tiebreak by name. Order is now deterministic instead of following config order.
+- **Loaded-model probe (real VRAM/RAM state)**. Backends of `type: ollama` / `lmstudio` / `llamacpp` are now probed via their native management endpoint (Ollama `GET /api/ps`, LM Studio `GET /api/v1/models` `loaded_instances`, llama.cpp `GET /models` `status`) during discovery to learn which models are *actually loaded in memory* — distinct from `current_model` (what the proxy last dispatched). Surfaced in the server-detail Info pane (`In memory: …` / `n/a` / `— (none)`) and as an `⏏` marker on the server chip when the proxy's `current_model` is no longer resident (idle-unloaded). Opt-in: plain `openai` and `anthropic` backends are never probed. Implemented via the optional `backends.LoadedModelsProber` interface (no change to the core `Backend` contract). New `ipc.ServerState` fields: `loaded_models`, `loaded_models_probed`.
+- **Generation tail in the TUI** (hotkey `t`). For an in-flight **streaming** request, the last ~160 generated characters are captured in-memory and shown in the request Info pane on demand. Hidden by default (it is response content — privacy); the tail is never written to the database or logs. New `ipc.RequestState.last_tokens` field, fed by an in-memory `core.LiveTail` store written by the streaming relay and overlaid onto running streaming requests in the IPC snapshot.
+
+### Changed
+
+- **`backends[].type`** now accepts `lmstudio` and `llamacpp` in addition to `openai` / `ollama` / `anthropic`. All non-anthropic types speak the OpenAI-compatible protocol; `ollama` / `lmstudio` / `llamacpp` additionally enable the loaded-model probe. `Config.Validate()` accepts the new values.
+
 ## [0.12.1] - 2026-05-30
 
 ### Changed
@@ -188,7 +202,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.10.0...v0.11.0

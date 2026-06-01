@@ -37,6 +37,24 @@ type ServerState struct {
 	QueueDepth   int      `json:"queue_depth"`
 	Models       []string `json:"models"`
 
+	// Priority — приоритет сервера из config.backends[].priority (меньше число =
+	// выше предпочтение). Передаётся в TUI для сортировки серверов в шапке:
+	// самый приоритетный (минимальный) — наверху. Введено в v0.13.0.
+	Priority int `json:"priority"`
+
+	// LoadedModels — модели, реально находящиеся в памяти бэкенда (VRAM/RAM),
+	// по данным нативной пробы (Ollama /api/ps, LM Studio /api/v0/models state,
+	// llama.cpp /models status). nil ⇒ проба не поддерживается этим типом
+	// бэкенда (cloud / openai). Пустой непустой-nil слайс ⇒ проба поддерживается,
+	// но в памяти сейчас ничего нет. TUI отличает «прокси думает X, но в памяти
+	// его нет» (выгрузка по idle). Введено в v0.13.0.
+	LoadedModels []string `json:"loaded_models,omitempty"`
+	// LoadedModelsProbed — true, если бэкенд поддерживает пробу загруженных
+	// моделей (тип ollama/lmstudio/llamacpp). Нужно, чтобы отличить «проба не
+	// поддерживается» (LoadedModels=nil, Probed=false → «n/a») от «поддерживается,
+	// но память пуста» (LoadedModels=[], Probed=true → «—»). Введено в v0.13.0.
+	LoadedModelsProbed bool `json:"loaded_models_probed,omitempty"`
+
 	// PerfSamples — число замеров для регрессии на паре (Name, CurrentModel).
 	// 0 ⇒ нет данных. perf_min_samples=3 — порог, ниже которого регрессия не
 	// отдаётся (PerfOK=false). omitempty убирает поля у серверов без статистики.
@@ -135,6 +153,11 @@ type RequestState struct {
 	LastFailedServer string `json:"last_failed_server,omitempty"`
 	// ErrorMessage — последняя ошибка (для failed-строк); пусто для completed/queued.
 	ErrorMessage string `json:"error_message,omitempty"`
+	// LastTokens — «хвост» генерации: последние сгенерированные символы для
+	// in-flight streaming-запроса. Заполняется только для running+stream и
+	// только в памяти (в БД/логи не пишется — приватность). TUI показывает его
+	// в InfoPane по тоглу (хоткей t). Введено в v0.13.0.
+	LastTokens string `json:"last_tokens,omitempty"`
 }
 
 // StateSnapshotPayload — полный снимок состояния (отправляется при подключении и периодически).

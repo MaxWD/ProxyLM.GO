@@ -102,10 +102,17 @@ compat:
 #
 # `name` — произвольная человекочитаемая метка (видна в TUI и логах).
 #
-# `type` — протокол общения с бэкендом:
+# `type` — тип бэкенда:
 #   openai     — (по умолчанию) OpenAI-совместимый /v1/chat/completions и т.п.
 #   anthropic  — Anthropic Messages API /v1/messages
-#   ollama     — алиас для openai (Ollama предоставляет OpenAI-совместимый shim)
+#   ollama     — OpenAI-совместимый shim + проба загруженных моделей (/api/ps)
+#   lmstudio   — OpenAI-совместимый + проба загруженных моделей (/api/v1/models)
+#   llamacpp   — OpenAI-совместимый + проба загруженных моделей (/models)
+#
+# Для ollama/lmstudio/llamacpp прокси дополнительно опрашивает нативный
+# эндпоинт, чтобы знать, какие модели РЕАЛЬНО загружены в память (VRAM/RAM)
+# прямо сейчас — это видно в TUI (панель сервера, строка «In memory») и
+# помогает заметить idle-выгрузку. Для openai/anthropic проба отключена.
 #
 # Кросс-протокольная трансляция работает автоматически: клиент может
 # подключаться через OpenAI API, а бэкенд быть Anthropic — и наоборот.
@@ -117,6 +124,7 @@ compat:
 backends:
   - name: lmstudio-desktop
     url: http://127.0.0.1:1234           # LM Studio default
+    type: lmstudio                       # включает пробу загруженных моделей
     priority: 100
     timeout_seconds: 600
     api_key: null                        # null если auth не требуется
@@ -127,6 +135,7 @@ backends:
 
   - name: ollama-rack
     url: http://127.0.0.1:11434          # Ollama default (OpenAI-совместимый shim на /v1/*)
+    type: ollama                         # включает пробу загруженных моделей (/api/ps)
     priority: 200
     timeout_seconds: 600
 

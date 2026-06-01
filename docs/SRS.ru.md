@@ -1,6 +1,6 @@
 # ProxyLM.GO — Software Requirements Specification (SRS)
 
-Версия документа: 0.11.0
+Версия документа: 0.13.0
 Базовая линия: ProxyLM.GO v0.11.0
 Связанные документы: [`ARCHITECTURE.ru.md`](./ARCHITECTURE.ru.md), [`API.ru.md`](./API.ru.md), [`AGENTS.ru.md`](./AGENTS.ru.md)
 
@@ -185,6 +185,16 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 | FR-58  | `/v1/completions` и `/v1/embeddings` НЕ ДОЛЖНЫ транслироваться на Anthropic-бэкенды — если маршрутизированный бэкенд имеет `type: anthropic`, прокси ДОЛЖЕН возвращать `400 invalid_request` с сообщением о том, что эндпоинт не поддерживается для Anthropic-бэкендов. |
 | FR-59  | Поля extended thinking (`thinking`, `budget_tokens`) поддерживаются только при прохождении Anthropic-клиент → Anthropic-бэкенд (passthrough). При трансляции на OpenAI-бэкенд поля extended thinking ДОЛЖНЫ молча отбрасываться. |
 | FR-60  | Ответы об ошибках от Anthropic-бэкенда ДОЛЖНЫ определяться по наличию `"type": "error"` в теле ответа и пробрасываться клиенту как есть (для Anthropic-клиентов) либо конвертироваться в формат ошибки OpenAI (для OpenAI-клиентов). Формат ошибки Anthropic: `{"type": "error", "error": {"type": "...", "message": "..."}}`. |
+
+### 3.11. Наблюдаемость TUI и типы бэкендов (v0.13.0)
+
+| ID     | Требование |
+|--------|------------|
+| FR-61  | `backends[].type` ДОЛЖЕН дополнительно принимать `lmstudio` и `llamacpp` (наряду с `openai` / `ollama` / `anthropic`). Все типы, кроме `anthropic`, используют OpenAI-совместимый протокол; `ollama` / `lmstudio` / `llamacpp` дополнительно включают пробу загруженных моделей (FR-62). `Config.Validate()` ДОЛЖЕН отвергать любое другое значение. |
+| FR-62  | Для бэкендов типа `ollama` / `lmstudio` / `llamacpp` discovery ДОЛЖЕН опрашивать модели, реально находящиеся в памяти, через нативный эндпоинт бэкенда (Ollama `GET /api/ps`; LM Studio `GET /api/v1/models`, модели с непустым `loaded_instances`; llama.cpp `GET /models`, модели с `status == "loaded"`). Результат ДОЛЖЕН публиковаться как `ServerState.loaded_models` с `loaded_models_probed = true`. Бэкенды типа `openai` / `anthropic` пробоваться НЕ ДОЛЖНЫ (`loaded_models_probed = false`). Ошибка пробы НЕ ДОЛЖНА помечать сервер unhealthy и НЕ ДОЛЖНА затирать прошлый снимок. |
+| FR-63  | `ServerState` ДОЛЖЕН содержать `priority` (из `backends[].priority`). TUI ДОЛЖЕН сортировать сервера по возрастанию `priority` (меньше = выше предпочтение, наверху), tiebreak по имени, независимо от порядка в конфиге. |
+| FR-64  | TUI ДОЛЖЕН красить каждый чип сервера (и колонку `Server` в таблице запросов) по индексу сервера в отсортированном по приоритету списке из палитры ≥ 10 различимых цветов, чтобы разные сервера визуально различались до размера палитры. Healthy-сервер с `in_flight = true` ДОЛЖЕН отрисовывать *пульсирующую* лампу статуса (анимация яркости); простаивающий healthy-сервер — ровную. Если у пробуемого сервера `current_model` отсутствует в `loaded_models`, TUI ДОЛЖЕН пометить её как выгруженную (например, маркером `⏏`). |
+| FR-65  | `RequestState` ДОЛЖЕН содержать `last_tokens` — завершающий сгенерированный текст (≤ ~160 символов) выполняющегося **streaming**-запроса (`status = running`, `stream = true`). Он ДОЛЖЕН храниться только в памяти и НЕ ДОЛЖЕН персиститься в БД или писаться в логи. TUI ДОЛЖЕН скрывать его по умолчанию и показывать только по явному тоглу (хоткей `t`) в Info-панели запроса. |
 
 ---
 
@@ -486,7 +496,7 @@ ProxyLM.GO **не** предполагает экспозицию во внеш�
 ### Базовая линия: v0.11.0
 
 Полностью реализованы:
-- FR-1 … FR-60 (HTTP API включая Anthropic Messages API, планировщик, маршрутизация, retry, discovery, история, TUI/IPC, CLI, метрики производительности, авто-переподключение, initial healthcheck, X-Request-Id middleware, F5-протокол, dual auth, per-backend protocol, кросс-протокольная трансляция)
+- FR-1 … FR-65 (HTTP API включая Anthropic Messages API, планировщик, маршрутизация, retry, discovery, история, TUI/IPC, CLI, метрики производительности, авто-переподключение, initial healthcheck, X-Request-Id middleware, F5-протокол, dual auth, per-backend protocol, кросс-протокольная трансляция, проба загруженных моделей, сортировка по приоритету, различимые цвета, пульсирующая лампа работы, хвост генерации)
 - NFR-1 … NFR-12
 - INV-1 … INV-8
 - AC-1 … AC-28

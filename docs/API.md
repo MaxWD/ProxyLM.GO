@@ -1,6 +1,6 @@
 # ProxyLM.GO — API Specification
 
-Document version: 0.11.0
+Document version: 0.13.0
 Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`SRS.md`](./SRS.md)
 
 This document describes three API groups:
@@ -428,6 +428,9 @@ Sent once immediately after connection, and again in response to a `request_snap
         "current_model": "qwen2.5:14b",
         "queue_depth": 2,
         "models": ["qwen2.5:14b", "llama3.1:8b"],
+        "priority": 100,
+        "loaded_models": ["qwen2.5:14b"],
+        "loaded_models_probed": true,
         "perf_samples": 12,
         "perf_ok": true,
         "t_load_ms": 4200.0,
@@ -489,7 +492,8 @@ Sent once immediately after connection, and again in response to a `request_snap
         "max_attempts": 3,
         "queue_wait_ms": 120,
         "model_reloaded": false,
-        "last_failed_server": ""
+        "last_failed_server": "",
+        "last_tokens": ""
       }
     ]
   }
@@ -507,6 +511,9 @@ Sent once immediately after connection, and again in response to a `request_snap
 | `current_model` | string | loaded / in-flight model; empty string if none |
 | `queue_depth` | int | number of requests in `pending` |
 | `models` | string[] | known models of the server |
+| `priority` | int | server priority from config (`backends[].priority`); lower = higher preference. The TUI sorts servers ascending by this value (v0.13.0) |
+| `loaded_models` | string[] | models actually resident in memory right now, from the native probe (Ollama `/api/ps`, LM Studio `/api/v1/models`, llama.cpp `/models`); omitted if empty/unsupported. Distinct from `current_model` (what the proxy last dispatched) (v0.13.0) |
+| `loaded_models_probed` | bool | `true` if the backend supports the loaded-model probe (`type: ollama` / `lmstudio` / `llamacpp`); distinguishes "probe unsupported" (`n/a`) from "supported but memory empty"; omitted if false (v0.13.0) |
 | `perf_samples` | int | number of observations in the regression for `current_model`; omitted if 0 |
 | `perf_ok` | bool | `true` if regression is computed (≥ 3 observations, `X^T X` is non-singular); omitted if false |
 | `t_load_ms` | float64 | estimated model load time (ms); omitted if 0 |
@@ -562,6 +569,7 @@ Tracks a single `(model, endpoint)` bucket on this server. Endpoint became part 
 | `model_reloaded` | bool | `true` if a model switch occurred at dispatch time; omitted if false |
 | `last_failed_server` | string | name of the server where the previous attempt failed; empty if no failed attempt yet; omitted if empty |
 | `error_message` | string | last error message for `failed` requests; omitted if empty |
+| `last_tokens` | string | generation tail: the last ~160 generated characters for an in-flight **streaming** request. Present only for `status=running` + `stream=true`; kept in memory only (never persisted to the database or logs); omitted if empty (v0.13.0) |
 
 ### 2.3. Client → server messages
 

@@ -177,9 +177,9 @@ func validateBackends(bs []Backend) error {
 			return fmt.Errorf("backends[%q].url: %w", b.Name, err)
 		}
 		switch b.Type {
-		case "", BackendTypeOpenAI, BackendTypeOllama, BackendTypeAnthropic:
+		case "", BackendTypeOpenAI, BackendTypeOllama, BackendTypeLMStudio, BackendTypeLlamaCpp, BackendTypeAnthropic:
 		default:
-			return fmt.Errorf("backends[%q].type: ожидалось openai|ollama|anthropic, получено %q", b.Name, b.Type)
+			return fmt.Errorf("backends[%q].type: ожидалось openai|ollama|lmstudio|llamacpp|anthropic, получено %q", b.Name, b.Type)
 		}
 		if b.TimeoutSeconds < 1 {
 			return fmt.Errorf("backends[%q].timeout_seconds ≥ 1, получено %d", b.Name, b.TimeoutSeconds)

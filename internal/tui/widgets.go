@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -244,6 +245,8 @@ func renderHeaderBar(
 	servers []ipc.ServerState,
 	requests []ipc.RequestState,
 	flashModels map[string]bool,
+	colorIdx map[string]int,
+	animPhase int,
 	ttlMinutes int,
 	width int,
 	headerActive bool,
@@ -255,7 +258,7 @@ func renderHeaderBar(
 	var chipLines []string
 	for i, s := range servers {
 		selected := headerActive && i == selectedIdx
-		chipLines = append(chipLines, renderServerChip(s, flashModels[s.Name], selected))
+		chipLines = append(chipLines, renderServerChip(s, flashModels[s.Name], selected, colorIdx, animPhase))
 	}
 	serversBlock := strings.Join(chipLines, "\n")
 
@@ -320,7 +323,30 @@ func headerHeight(numServers int) int {
 	return 2 + rows + 1
 }
 
-func renderServerChip(s ipc.ServerState, flash, selected bool) string {
+// currentModelUnloaded возвращает true, если сервер поддерживает пробу
+// загруженных моделей, current_model непуста, но в памяти её сейчас нет
+// (выгрузилась по idle). Это сигнал «следующий запрос потребует reload».
+func currentModelUnloaded(s ipc.ServerState) bool {
+	if !s.LoadedModelsProbed || s.CurrentModel == "" {
+		return false
+	}
+	return !slices.Contains(s.LoadedModels, s.CurrentModel)
+}
+
+// loadedModelsText форматирует список реально загруженных в память моделей для
+// InfoPane: "n/a" (проба не поддерживается), "— (none)" (поддерживается, память
+// пуста) или перечисление через запятую.
+func loadedModelsText(s ipc.ServerState) string {
+	if !s.LoadedModelsProbed {
+		return "n/a"
+	}
+	if len(s.LoadedModels) == 0 {
+		return "— (none)"
+	}
+	return strings.Join(s.LoadedModels, ", ")
+}
+
+func renderServerChip(s ipc.ServerState, flash, selected bool, colorIdx map[string]int, animPhase int) string {
 	// Selected-режим: full-row highlight через StyleSelected (как у задач в
 	// RequestTable). Вложенные стили (ServerColor, lampStyle, StyleFlash)
 	// здесь не используем — иначе их \x1b[0m сбросит фон. Slow-алерт всё-таки
@@ -336,6 +362,8 @@ func renderServerChip(s ipc.ServerState, flash, selected bool) string {
 		model := s.CurrentModel
 		if model == "" {
 			model = "idle"
+		} else if currentModelUnloaded(s) {
+			model += " " + GlyphUnloaded()
 		}
 		parts := []string{truncStr(s.Name, 12), lamp, model}
 		if s.QueueDepth > 0 {
@@ -358,7 +386,11 @@ func renderServerChip(s ipc.ServerState, flash, selected bool) string {
 	if s.Healthy {
 		lamp = GlyphHealthy()
 		if s.InFlight {
-			lampStyle = StyleServerInFlight
+			// Работающий сервер — пульсирующая лампа (яркость «дышит» по фазе
+			// анимации). Простаивающий — ровный StyleServerHealthy. Это даёт
+			// наглядную разницу «работает / простаивает», которой не было,
+			// пока CurrentModel оставался заполненным и после завершения работы.
+			lampStyle = pulseStyle(animPhase)
 		} else {
 			lampStyle = StyleServerHealthy
 		}
@@ -375,13 +407,18 @@ func renderServerChip(s ipc.ServerState, flash, selected bool) string {
 	if flash {
 		modelStr = StyleFlash.Render(model)
 	}
+	// Маркер выгрузки: прокси считает current_model загруженной, но нативная
+	// проба её в памяти не нашла (idle-unload) — следующий запрос вызовет reload.
+	if currentModelUnloaded(s) {
+		modelStr += " " + StyleDim.Render(GlyphUnloaded())
+	}
 
 	queueInfo := ""
 	if s.QueueDepth > 0 {
 		queueInfo = StyleDim.Render(fmt.Sprintf("[Q:%d]", s.QueueDepth))
 	}
 
-	nameStr := ServerColor(s.Name).Render(truncStr(s.Name, 12))
+	nameStr := serverColorFor(s.Name, colorIdx).Render(truncStr(s.Name, 12))
 	parts := []string{nameStr, lampStyle.Render(lamp), modelStr}
 	if queueInfo != "" {
 		parts = append(parts, queueInfo)
@@ -579,6 +616,7 @@ func renderRequestTable(
 	vp *viewport.Model,
 	requests []ipc.RequestState,
 	servers []ipc.ServerState,
+	colorIdx map[string]int,
 	selectedIdx int,
 	filter string,
 	width int,
@@ -613,7 +651,7 @@ func renderRequestTable(
 	for i, r := range visible {
 		needsSwap := calcNeedsSwap(r, servers)
 		isSelected := i == selectedIdx && activePane == paneRequests
-		line := renderRequestRow(r, cw, showEndpoint, compact, isSelected, needsSwap, now)
+		line := renderRequestRow(r, cw, colorIdx, showEndpoint, compact, isSelected, needsSwap, now)
 		rowLines = append(rowLines, line)
 	}
 
@@ -701,6 +739,7 @@ func serverDisplay(r ipc.RequestState) (string, bool) {
 func renderRequestRow(
 	r ipc.RequestState,
 	cw colWidths,
+	colorIdx map[string]int,
 	showEndpoint bool,
 	compact bool,
 	selected bool,
@@ -811,14 +850,15 @@ func renderRequestRow(
 			retrySuffix
 	}
 
-	// Не-selected: серверная колонка раскрашивается ServerColor (стабильный hash)
-	// или StyleServerFailed при провале; остальные — общим rowStyle. Каждая
-	// колонка рендерится отдельно, иначе вложенный \x1b[0m сбросит rowStyle.
+	// Не-selected: серверная колонка раскрашивается serverColorFor (цвет по
+	// индексу сервера в отсортированном списке, стабильный) или StyleServerFailed
+	// при провале; остальные — общим rowStyle. Каждая колонка рендерится отдельно,
+	// иначе вложенный \x1b[0m сбросит rowStyle.
 	var serverColored string
 	if srvFailed {
 		serverColored = StyleServerFailed.Render(serverPlain)
 	} else {
-		serverColored = ServerColor(r.ServerName).Render(serverPlain)
+		serverColored = serverColorFor(r.ServerName, colorIdx).Render(serverPlain)
 	}
 	styledParts := []string{
 		rowStyle.Render(pad(idStr, cw.id)),
@@ -907,6 +947,7 @@ func renderInfoPane(
 	kind infoKind,
 	req *ipc.RequestState,
 	srv *ipc.ServerState,
+	showTail bool,
 	width int,
 ) string {
 	innerW := width - 6 // border (2) + padding (2) + safety (2)
@@ -918,7 +959,7 @@ func renderInfoPane(
 	switch {
 	case kind == infoKindRequest && req != nil:
 		title = "Info — Request " + shortID(req.ID)
-		content = renderInfoRequest(*req, innerW)
+		content = renderInfoRequest(*req, showTail, innerW)
 	case kind == infoKindServer && srv != nil:
 		title = "Info — Server " + srv.Name
 		content = renderInfoServer(*srv, innerW)
@@ -942,8 +983,9 @@ func renderInfoPane(
 }
 
 // renderInfoRequest рендерит детали запроса в двухколоночной сетке.
-// innerW — доступная ширина (внутренняя, без рамки).
-func renderInfoRequest(r ipc.RequestState, innerW int) string {
+// innerW — доступная ширина (внутренняя, без рамки). showTail — показывать ли
+// «хвост» генерации (последние токены) для выполняющегося streaming-запроса.
+func renderInfoRequest(r ipc.RequestState, showTail bool, innerW int) string {
 	labelW := 12
 	halfW := innerW / 2
 	if halfW < labelW+10 {
@@ -1008,6 +1050,24 @@ func renderInfoRequest(r ipc.RequestState, innerW int) string {
 		sb.WriteString(StyleColHeader.Render("Error:"))
 		sb.WriteString(" ")
 		sb.WriteString(StyleStatusFailed.Render(truncStr(r.ErrorMessage, innerW-7)))
+	}
+	// «Хвост» генерации — по тоглу (хоткей t). Только для выполняющегося
+	// streaming-запроса: для остальных строка-подсказка, почему хвоста нет.
+	if showTail {
+		running := r.Status == "running" || r.Status == "in_progress"
+		sb.WriteByte('\n')
+		sb.WriteString(StyleColHeader.Render("Generation tail:"))
+		sb.WriteByte('\n')
+		switch {
+		case !r.Stream:
+			sb.WriteString(StyleDim.Render("  (non-streaming request — no live tail)"))
+		case !running:
+			sb.WriteString(StyleDim.Render("  (not running)"))
+		case r.LastTokens == "":
+			sb.WriteString(StyleDim.Render("  …"))
+		default:
+			sb.WriteString(StyleStatusRunning.Render("  " + truncStr(r.LastTokens, innerW-3)))
+		}
 	}
 	return sb.String()
 }
@@ -1077,6 +1137,18 @@ func renderInfoServer(s ipc.ServerState, innerW int) string {
 		sb.WriteString(padDisplay(rightV, valW))
 		sb.WriteByte('\n')
 	}
+
+	// Реально загруженные в память модели (нативная проба ollama/lmstudio/
+	// llamacpp). Отдельной строкой, т.к. список может быть длинным. "n/a" —
+	// бэкенд пробу не поддерживает; "— (none)" — поддерживает, но память пуста.
+	loadedStr := loadedModelsText(s)
+	if currentModelUnloaded(s) {
+		loadedStr += "   " + StyleFlash.Render(GlyphUnloaded()+" current model not in memory")
+	}
+	sb.WriteString(StyleColHeader.Render(pad("In memory", labelW)))
+	sb.WriteString(" ")
+	sb.WriteString(padDisplay(loadedStr, innerW-labelW-1))
+	sb.WriteByte('\n')
 
 	// Per-(model, endpoint) таблица (v0.10.0).
 	// Endpoint выводится отдельной колонкой; R² + CI — диагностика fit'а.
@@ -1253,7 +1325,7 @@ func renderFooter(showFilter bool, width int) string {
 		// Narrow terminal — show minimal hints only.
 		text = "F1 Help · q Quit"
 	} else {
-		text = "F1 Help   F5 Refresh   / Filter   m Models   Tab panes   Click select   q/F10 Quit"
+		text = "F1 Help   F5 Refresh   / Filter   m Models   t Tail   Tab panes   q/F10 Quit"
 	}
 	return StyleFooter.Width(width - 2).Render(text)
 }
@@ -1282,6 +1354,7 @@ var helpItems = []helpItem{
 	{"Home/End", "jump to first / last row"},
 	{"Enter", "show details in Info pane"},
 	{"m", "list models on the selected server"},
+	{"t", "toggle generation tail for the selected streaming request"},
 	{"/", "filter requests (model / client / server / status)"},
 	{"Esc", "cancel filter / close overlay"},
 	{"mouse wheel", "scroll pane under cursor; select server in header"},

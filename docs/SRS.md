@@ -1,6 +1,6 @@
 # ProxyLM.GO — Software Requirements Specification (SRS)
 
-Document version: 0.11.0
+Document version: 0.13.0
 Baseline: ProxyLM.GO v0.11.0
 Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`API.md`](./API.md), [`AGENTS.md`](./AGENTS.md)
 
@@ -185,6 +185,16 @@ Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 | FR-58  | `/v1/completions` and `/v1/embeddings` MUST NOT be translated to Anthropic backends — if the routed backend is `type: anthropic`, the proxy MUST return `400 invalid_request` with a message indicating the endpoint is unsupported for Anthropic backends. |
 | FR-59  | Extended thinking fields (`thinking`, `budget_tokens`) are supported only on Anthropic client → Anthropic backend (passthrough). When translating to an OpenAI backend, extended thinking fields MUST be silently dropped. |
 | FR-60  | Anthropic error responses from the backend MUST be detected by the presence of `"type": "error"` in the response body, and forwarded to the client as-is (for Anthropic clients) or converted to the OpenAI error format (for OpenAI clients). The Anthropic error format is: `{"type": "error", "error": {"type": "...", "message": "..."}}`. |
+
+### 3.11. TUI observability & backend types (v0.13.0)
+
+| ID     | Requirement |
+|--------|-------------|
+| FR-61  | `backends[].type` MUST additionally accept `lmstudio` and `llamacpp` (alongside `openai` / `ollama` / `anthropic`). All non-`anthropic` types use the OpenAI-compatible protocol; `ollama` / `lmstudio` / `llamacpp` additionally enable the loaded-model probe (FR-62). `Config.Validate()` MUST reject any other value. |
+| FR-62  | For backends of type `ollama` / `lmstudio` / `llamacpp`, discovery MUST probe the model(s) currently resident in memory via the backend's native endpoint (Ollama `GET /api/ps`; LM Studio `GET /api/v1/models`, models with a non-empty `loaded_instances`; llama.cpp `GET /models`, models with `status == "loaded"`). The result MUST be published as `ServerState.loaded_models` with `loaded_models_probed = true`. Backends of type `openai` / `anthropic` MUST NOT be probed (`loaded_models_probed = false`). A probe failure MUST NOT mark the server unhealthy nor discard the previous snapshot. |
+| FR-63  | `ServerState` MUST include `priority` (from `backends[].priority`). The TUI MUST sort servers ascending by `priority` (lower = higher preference, displayed on top), with name as the tiebreaker, independent of config order. |
+| FR-64  | The TUI MUST color each server chip (and the request table's `Server` column) by the server's index in the priority-sorted list against a palette of ≥ 10 distinct colors, so that distinct servers are visually distinguishable up to the palette size. A healthy server with `in_flight = true` MUST render a *pulsing* status lamp (animated brightness); an idle healthy server MUST render a steady lamp. When a probed server's `current_model` is not present in `loaded_models`, the TUI MUST mark it as unloaded (e.g. an `⏏` marker). |
+| FR-65  | `RequestState` MUST include `last_tokens` — the trailing generated text (≤ ~160 characters) of an in-flight **streaming** request (`status = running`, `stream = true`). It MUST be held in memory only and MUST NOT be persisted to the database or written to logs. The TUI MUST hide it by default and reveal it only on an explicit toggle (hotkey `t`) in the request Info pane. |
 
 ---
 
@@ -486,7 +496,7 @@ Additionally confirmed regarding scheduler behavior:
 ### Current baseline: v0.11.0
 
 Fully implements:
-- FR-1 … FR-60 (HTTP API including Anthropic Messages API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics, auto-reconnect, initial healthcheck, X-Request-Id middleware, F5 protocol, dual auth, per-backend protocol, cross-protocol translation)
+- FR-1 … FR-65 (HTTP API including Anthropic Messages API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics, auto-reconnect, initial healthcheck, X-Request-Id middleware, F5 protocol, dual auth, per-backend protocol, cross-protocol translation, loaded-model probe, priority sort, distinct colors, pulsing in-flight lamp, generation tail)
 - NFR-1 … NFR-12
 - INV-1 … INV-8
 - AC-1 … AC-28
