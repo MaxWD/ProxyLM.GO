@@ -78,10 +78,14 @@ type Backend struct {
 	Name     string `yaml:"name"`
 	URL      string `yaml:"url"`
 	Priority int    `yaml:"priority"`
-	// Type — протокол общения с бэкендом: "openai" (по умолчанию) или
-	// "anthropic" (Anthropic Messages API /v1/messages). Значение "ollama"
-	// обрабатывается как "openai" (Ollama предоставляет OpenAI-совместимый shim).
-	// Пустое значение заполняется через applyDefaults() как "openai".
+	// Type — тип бэкенда. По протоколу делится на два класса:
+	//   - "anthropic" — Anthropic Messages API (/v1/messages);
+	//   - всё остальное — OpenAI-совместимый протокол (/v1/*).
+	// Значения "ollama" | "lmstudio" | "llamacpp" работают по OpenAI-протоколу
+	// (эти серверы дают OpenAI-совместимый shim), но дополнительно включают
+	// нативную пробу реально загруженных в память моделей (Ollama /api/ps,
+	// LM Studio /api/v0/models, llama.cpp /models). "openai" (по умолчанию) —
+	// без такой пробы. Пустое значение заполняется applyDefaults() как "openai".
 	Type           string   `yaml:"type"`
 	TimeoutSeconds int      `yaml:"timeout_seconds"`
 	APIKey         string   `yaml:"api_key"`
@@ -99,6 +103,8 @@ const (
 
 	BackendTypeOpenAI    = "openai"
 	BackendTypeOllama    = "ollama"
+	BackendTypeLMStudio  = "lmstudio"
+	BackendTypeLlamaCpp  = "llamacpp"
 	BackendTypeAnthropic = "anthropic"
 
 	ResponseFormatPassthrough         = "passthrough"

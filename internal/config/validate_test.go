@@ -98,7 +98,7 @@ func TestConfig_Warnings(t *testing.T) {
 }
 
 func TestConfig_BackendTypeValidation(t *testing.T) {
-	for _, typ := range []string{"", "openai", "ollama", "anthropic"} {
+	for _, typ := range []string{"", "openai", "ollama", "lmstudio", "llamacpp", "anthropic"} {
 		t.Run("type="+typ+"_valid", func(t *testing.T) {
 			c := defaultValidConfig()
 			c.Backends[0].Type = typ
