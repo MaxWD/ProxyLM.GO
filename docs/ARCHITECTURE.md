@@ -237,6 +237,7 @@ Implements the `Backend` interface for backends with `type: anthropic`. Sends re
 - Used by the router.
 - If a server is unreachable for N consecutive cycles → `unhealthy.Store(false)`.
 - The discovery loop receives a `context.Context` and shuts down cleanly on shutdown.
+- **Loaded-model probe (v0.13.0):** in the same poll cycle, backends that implement the optional `backends.LoadedModelsProber` interface are additionally queried for the models *currently resident in memory*. The probe is type-driven (`backends[].type`): Ollama → `GET /api/ps`, LM Studio → `GET /api/v1/models` (models with a non-empty `loaded_instances`), llama.cpp → `GET /models` (filter `status==loaded`). Plain `openai` and `anthropic` backends don't implement it and are skipped. The result is stored on `ServerInfo` via `SetLoadedModels` (atomic) and published as `ServerState.loaded_models` / `loaded_models_probed`. A probe failure is non-fatal — it never flips `healthy` and leaves the previous snapshot intact.
 
 ## 9. TUI ↔ Daemon (IPC)
 
@@ -441,7 +442,7 @@ Dependencies are minimized: all core HTTP server/client code is stdlib. Third-pa
 │ Model        qwen2.5:14b           Completed 14:01:08   Output tok  82                      │
 │ Server       srv1       Status    completed (1/3)       RM  —                               │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
-   F1 Help  Tab panes  F5 Refresh  m Models  / Filter  q/F10 Quit
+   F1 Help  Tab panes  F5 Refresh  m Models  t Tail  / Filter  q/F10 Quit
 ```
 
 Changes relative to v0.1.0:
@@ -452,6 +453,11 @@ Changes relative to v0.1.0:
 - In the server-detail Info pane (bottom panel), the per-model table renders `tok/s` as `value±margin`; only the `±margin` part (the 95% CI error bound) is tinted (teal) so the point estimate stays readable while the uncertainty stands out (v0.12.1). Header-row metrics in the server list keep the neutral dim color.
 - **Models overlay** (hotkey `m`, v0.12.0): a centered overlay listing all discovered models on the selected server, with the active model marked `▶`. Closes on `m` / `Esc` / `q`.
 - Active server in the header is marked with `▸`.
+- **Distinct per-server colors** (v0.13.0): each server chip (and the request table's `Server` column) is colored by the server's index in the priority-sorted list against a 12-color palette, replacing the former name-hash that collided into repeats at 3–4 servers.
+- **Pulsing in-flight lamp** (v0.13.0): a healthy server actively processing a request shows a `●` whose brightness *pulses* (~640 ms cycle); an idle server shows a steady `●`. Driven by a ~160 ms animation tick that runs only while at least one server is in-flight.
+- **Servers sorted by priority** (v0.13.0): ascending by `ServerState.priority` (lower = higher preference, on top), tiebreak by name — deterministic order, independent of config order.
+- **Loaded-model indicator** (v0.13.0): the server-detail Info pane shows `In memory: …` (models actually resident per the native probe), `n/a` (backend doesn't support the probe), or `— (none)`. When the proxy's `current_model` is no longer resident (idle-unloaded) the chip marks it with `⏏`.
+- **Generation tail** (hotkey `t`, v0.13.0): for an in-flight streaming request the request Info pane can show the last ~160 generated characters (`last_tokens`). Hidden by default (response content — privacy); kept in memory only.
 
 Bubble Tea architecture: `Model` holds a snapshot of `[]ServerView`, `[]RequestRow`, and detail state. `Update(msg)` handles three sources:
 1. WebSocket messages (`state_snapshot`) — via `tea.Cmd` with a reader goroutine.
