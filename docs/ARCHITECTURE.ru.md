@@ -15,7 +15,7 @@
 - Retry + failover на другой сервер с той же моделью
 - Аутентификация по API-ключам
 - Консольный TUI в стиле btop (отдельный клиент к daemon'у)
-- Встроенный read-only Web UI (`/ui/*`), зеркалирующий дашборд TUI для браузеров в локальной сети — см. §19
+- Read-only Web UI dashboard для браузеров, зеркалирующий TUI, отдаваемый отдельной клиентской командой (`proxylm web`), а не daemon'ом — см. §19
 - История запросов в SQLite; наблюдения perf-регрессии тоже персистятся (см. §10, §17)
 - **Один portable-бинарник:** один и тот же исполняемый файл — и daemon, и TUI-клиент, и инсталлятор службы. Кросс-компиляция под любую OS без CGO.
 
@@ -371,6 +371,7 @@ ProxyLM.GO/
 │   ├── root.go
 │   ├── serve.go
 │   ├── tui.go
+│   ├── web.go                    # `proxylm web` — локальный HTTP-сервер + запуск браузера (v0.14.0, см. §19)
 │   ├── config.go
 │   ├── service.go
 │   └── version.go
@@ -389,7 +390,7 @@ ProxyLM.GO/
 │   │       ├── openai.go         # клиент к OpenAI-совместимым (LM Studio, Ollama и т. д.)
 │   │       └── anthropic.go      # клиент к Anthropic-совместимым (type: anthropic)
 │   ├── api/
-│   │   ├── server.go             # net/http + chi, lifecycle, graceful shutdown; монтирует /ui/* (webui.Handler) вне auth
+│   │   ├── server.go             # net/http + chi, lifecycle, graceful shutdown; не отдаёт маршрутов Web UI (см. cmd/web.go, §19)
 │   │   ├── auth.go               # middleware Bearer + x-api-key (двойная аутентификация); канал admin-токена через Sec-WebSocket-Protocol (v0.14.0)
 │   │   ├── routes_openai.go      # /v1/chat/completions, /v1/completions, /v1/embeddings, /v1/models
 │   │   ├── routes_anthropic.go   # хендлер /v1/messages (Anthropic Messages API)
@@ -418,8 +419,8 @@ ProxyLM.GO/
 │   │   ├── widgets.go            # HeaderBar, RequestTable, InfoPane (lipgloss + bubbles)
 │   │   ├── styles.go             # lipgloss-стили
 │   │   └── keys.go               # хоткеи (F5, F10, q, /)
-│   ├── webui/                    # встроенный read-only Web UI (v0.14.0, см. §19)
-│   │   ├── webui.go              # //go:embed static; http.Handler с принудительным Cache-Control: no-cache
+│   ├── webui/                    # статический фронтенд для `proxylm web` (v0.14.0, см. §19)
+│   │   ├── webui.go              # //go:embed static; http.Handler + ConfigJS; используется cmd/web.go, не daemon'ом
 │   │   └── static/               # index.html, app.js, style.css — vanilla JS, без build-шага
 │   └── service/
 │       └── service.go            # kardianos/service интеграция
@@ -603,11 +604,19 @@ type ModelSummary struct {
 
 В IPC `ServerState` перф-поля (см. `API.ru.md` §2.2) заполняются через `buildSnapshot`: `tok_in_per_sec = 1000 / KInMsTok` (нули и отрицательные → 0), аналогично `tok_out_per_sec`.
 
-## 19. Встроенный Web UI
+## 19. Web UI (`proxylm web`)
 
-`internal/webui` встраивает небольшой статический фронтенд (`index.html`, `app.js`, `style.css`) через `//go:embed static` и отдаёт его через `webui.Handler()`, смонтированный на `/ui/*` в `internal/api/server.go` (`GET /ui` редиректит на `/ui/`). Хендлер оборачивает `http.FileServerFS` через `cacheControlWriter`, который принудительно ставит `Cache-Control: no-cache` на каждый ответ — бинарник (а вместе с ним встроенный фронтенд) может быть заменён пересборкой в любой момент, поэтому браузер не должен кэшировать `index.html`/`app.js` через рестарты.
+`internal/webui` встраивает небольшой статический фронтенд (`index.html`, `app.js`, `style.css`) через `//go:embed static` и предоставляет его через `webui.Handler()` — тонкую обёртку над `http.FileServerFS` с `cacheControlWriter`, который принудительно ставит `Cache-Control: no-cache` на каждый ответ, поскольку бинарник (а вместе с ним встроенный фронтенд) может быть заменён пересборкой в любой момент, и браузер не должен кэшировать `index.html`/`app.js` через рестарты.
 
-`/ui/*` находится **вне** обеих групп middleware — `ClientAuth` и `AdminAuth`: статические ассеты сами по себе не несут секретов и живых данных. Все живые данные получаются собственным WebSocket-соединением страницы к `/admin/stream`, аутентифицируемым отдельно (см. ниже). Модель угроз идентична TUI, подключающемуся по `ws://` в локальной сети: кто может достучаться до HTTP-порта — может загрузить страницу, но только владелец `auth.admin_key` может открыть WebSocket и увидеть живое состояние — статическая страница по дизайну не несёт секретов.
+Daemon (`internal/api/server.go`) **не** монтирует этот хендлер и вообще не отдаёт маршрутов Web UI — `GET /ui`/`GET /ui/*` там обычные 404. Вместо этого `cmd/web.go` реализует отдельную клиентскую команду, `proxylm web`, структурно аналогичную `proxylm tui`:
+
+```
+proxylm web --connect ws://localhost:8080 --token sk-admin-... --listen 127.0.0.1:8081 [--no-open]
+```
+
+Она поднимает собственный локальный `net/http`-сервер (по умолчанию `--listen 127.0.0.1:8081`) с двумя маршрутами: `/` → `webui.Handler()` (встроенный статический фронтенд) и `/config.js` → небольшой генерируемый скрипт, `webui.ConfigJS(wsURL, token)`, производящий `window.PROXYLM = {"ws":"ws://host:port/admin/stream","token":"..."}` (`token` опускается через `omitempty`, если `--token` не задан). `--connect` нормализуется функцией `adminStreamURL`: она принимает `ws://`, `wss://`, `http://` или `https://` (конвертируя `http(s)` в `ws(s)`) и добавляет `/admin/stream`, если он ещё не указан. Если не передан `--no-open`, команда открывает корневой URL локального сервера в браузере по умолчанию для ОС (best-effort — неудача запуска браузера не фатальна, поскольку URL уже напечатан в stdout).
+
+Локальный HTTP-сервер, запускаемый `proxylm web`, **не требует собственной аутентификации**: статические ассеты и `config.js` сами по себе не несут секретов и живых данных (admin-ключ, если передан через `--token`, попадает только в ту одну вкладку браузера, которая загрузила страницу с этого локального сервера, и никогда не персистится на стороне сервера дольше памяти процесса). Все живые данные получаются собственным WebSocket-соединением страницы к `/admin/stream` daemon'а, аутентифицируемым отдельно (см. ниже). Модель угроз идентична TUI, подключающемуся по `ws://` в локальной сети: кто может достучаться до HTTP-порта daemon'а и владеет `auth.admin_key` — может открыть WebSocket и увидеть живое состояние; сам локальный сервер Web UI не добавляет новой поверхности атаки на daemon, поскольку общается с ним исключительно через этот единственный WebSocket.
 
 ### Браузерный канал аутентификации для `/admin/stream`
 

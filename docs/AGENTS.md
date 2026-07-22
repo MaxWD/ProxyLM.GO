@@ -78,7 +78,7 @@ Each role below is a separate executor (sub-agent) to whom a portion of the work
 - `internal/storage/history.go` — async writer via channel, cleanup by retention.
 - `internal/logging/slog.go` — `log/slog` setup (JSON handler, levels).
 - `internal/ipc/server.go` — WebSocket publisher (`coder/websocket`).
-- `internal/webui/*` — embedded read-only Web UI: `webui.go` (`//go:embed static`, `http.Handler` with `Cache-Control: no-cache`) and the static frontend itself (vanilla HTML/CSS/JS, no build step); mounted at `/ui/*` in `internal/api/server.go` outside the auth middleware groups.
+- `internal/webui/*` — static frontend for the Web UI: `webui.go` (`//go:embed static`, `http.Handler` with `Cache-Control: no-cache`, `ConfigJS`) and the static frontend itself (vanilla HTML/CSS/JS, no build step). Consumed by `cmd/web.go` (`proxylm web`, owned by go-devops-cli) — the daemon itself mounts no Web UI routes.
 - Unit tests for scheduler/router/retry (table-driven, coverage ≥ 80%).
 
 **Implementation priority:** non-streaming end-to-end path first, then streaming.
@@ -111,7 +111,7 @@ Each role below is a separate executor (sub-agent) to whom a portion of the work
 
 **Responsibilities:**
 - `main.go` — entry point, cobra root initialization.
-- `cmd/*.go` — `serve`, `tui`, `config init|validate`, `service install|uninstall|start|stop|status`, `version`. Uses `spf13/cobra`.
+- `cmd/*.go` — `serve`, `tui`, `web`, `config init|validate`, `service install|uninstall|start|stop|status`, `version`. Uses `spf13/cobra`.
 - `internal/service/service.go` — integration with `github.com/kardianos/service` (Windows Service / systemd / launchd).
 - `scripts/build.ps1`, `scripts/build.sh`, `scripts/build-all.ps1` — build and cross-compilation (`GOOS`/`GOARCH`).
 - `README.md` (root) — project description, downloading the pre-built binary, quick start (3 commands: place → `./proxylm serve` → `./proxylm tui`), TUI screenshot/mockup, link to `docs/ARCHITECTURE.md` for details. Section on `service install` for Windows and Linux.

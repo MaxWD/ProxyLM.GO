@@ -78,7 +78,7 @@
 - `internal/storage/history.go` — async writer через канал, чистка по retention.
 - `internal/logging/slog.go` — `log/slog` setup (JSON handler, уровни).
 - `internal/ipc/server.go` — WebSocket publisher (`coder/websocket`).
-- `internal/webui/*` — встроенный read-only Web UI: `webui.go` (`//go:embed static`, `http.Handler` с `Cache-Control: no-cache`) и сам статический фронтенд (vanilla HTML/CSS/JS, без build-шага); монтируется на `/ui/*` в `internal/api/server.go` вне групп middleware аутентификации.
+- `internal/webui/*` — статический фронтенд для Web UI: `webui.go` (`//go:embed static`, `http.Handler` с `Cache-Control: no-cache`, `ConfigJS`) и сам статический фронтенд (vanilla HTML/CSS/JS, без build-шага). Используется `cmd/web.go` (`proxylm web`, владелец — go-devops-cli) — сам daemon не монтирует маршрутов Web UI.
 - Юнит-тесты на scheduler/router/retry (table-driven, coverage ≥ 80%).
 
 **Приоритет реализации:** сначала непотоковый путь end-to-end, затем streaming.
@@ -111,7 +111,7 @@
 
 **Ответственность:**
 - `main.go` — entry point, инициализация cobra root.
-- `cmd/*.go` — `serve`, `tui`, `config init|validate`, `service install|uninstall|start|stop|status`, `version`. Используется `spf13/cobra`.
+- `cmd/*.go` — `serve`, `tui`, `web`, `config init|validate`, `service install|uninstall|start|stop|status`, `version`. Используется `spf13/cobra`.
 - `internal/service/service.go` — интеграция с `github.com/kardianos/service` (Windows Service / systemd / launchd).
 - `scripts/build.ps1`, `scripts/build.sh`, `scripts/build-all.ps1` — сборка и кросс-компиляция (`GOOS`/`GOARCH`).
 - `README.md` (в корне) — описание проекта, скачивание готового бинарника, быстрый старт (3 команды: положить → `./proxylm serve` → `./proxylm tui`), скриншот/мокап TUI, ссылка на `docs/ARCHITECTURE.ru.md` для деталей. Раздел про `service install` под Windows и Linux.

@@ -379,16 +379,19 @@ data: [DONE]
 
 The client must detect the presence of `error` in an SSE chunk. History record — `failed`.
 
-### 1.9. `GET /ui` and `/ui/*` (embedded Web UI, v0.14.0)
+### 1.9. Web UI (not a daemon endpoint, v0.14.0)
 
-`GET /ui` returns `301 Moved Permanently` to `/ui/`. `GET /ui/*` serves the embedded static frontend (`index.html`, `app.js`, `style.css`) — a read-only dashboard mirroring the TUI (see `ARCHITECTURE.md` §19).
+The daemon itself exposes no Web UI routes: `GET /ui` and any `GET /ui/*` are undefined paths and return a plain `404`, same as any other unknown route.
 
-These paths require **no authentication** — they carry no secrets and no live data by themselves; the page's own JavaScript opens a separate authenticated WebSocket connection to `/admin/stream` (§2.1) to fetch live state. Every response includes `Cache-Control: no-cache` so a rebuilt binary's frontend is never served stale from the browser cache.
+The read-only browser dashboard is a separate local client, the `proxylm web` command (see `ARCHITECTURE.md` §19), analogous to `proxylm tui`. It embeds the same static frontend (`index.html`, `app.js`, `style.css`) in the single `proxylm` binary, runs its own local HTTP server, and serves it with `Cache-Control: no-cache` on every response:
 
 ```bash
-curl -s http://localhost:8080/ui/          # returns index.html
-curl -sI http://localhost:8080/ui          # 301 -> /ui/
+proxylm web --connect ws://localhost:8080 --token sk-admin-... --listen 127.0.0.1:8081
 ```
+
+This opens `http://127.0.0.1:8081/` in the default browser (unless `--no-open`). The command also serves a generated `/config.js` (`window.PROXYLM = {"ws":"...","token":"..."}`) so the page knows which daemon `/admin/stream` to connect to and, if `--token` was given, connects automatically. `--connect` accepts `ws://`, `wss://`, `http://`, or `https://` and normalizes it to the `/admin/stream` WebSocket URL.
+
+The local server requires **no authentication of its own** — it carries no secrets and no live data by itself; the page's own JavaScript opens a separate authenticated WebSocket connection to the daemon's `/admin/stream` (§2.1) to fetch live state.
 
 ---
 

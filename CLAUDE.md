@@ -33,16 +33,16 @@ ProxyLM.GO/
 ├── go.mod
 ├── main.go                       # cobra root, версия через -ldflags
 ├── config.example.yaml           # шаблон, embedded в бинарник
-├── cmd/                          # cobra-команды (serve, tui, config, service, version)
+├── cmd/                          # cobra-команды (serve, tui, web, config, service, version)
 ├── internal/
 │   ├── config/                   # YAML + валидация + autogen
 │   ├── logging/                  # log/slog setup
 │   ├── core/                     # scheduler, router, retry, discovery, backends/
-│   ├── api/                      # net/http + chi: /v1/*, /admin/stream, /healthz, streaming
+│   ├── api/                      # net/http + chi: /v1/*, /admin/stream, /healthz, streaming (никаких Web UI роутов)
 │   ├── storage/                  # database/sql + modernc.org/sqlite + migrations//go:embed
 │   ├── ipc/                      # WS publisher (server.go) + client (для TUI)
 │   ├── tui/                      # Bubble Tea Model/Update/View
-│   ├── webui/                    # embedded read-only Web UI (go:embed static/)
+│   ├── webui/                    # статический фронтенд (go:embed static/) для команды `proxylm web` — daemon его не отдаёт
 │   └── service/                  # kardianos/service install/lifecycle
 ├── scripts/                      # build.{ps1,sh}, build-all.ps1
 ├── docs/                         # ARCHITECTURE, SRS, API, AGENTS

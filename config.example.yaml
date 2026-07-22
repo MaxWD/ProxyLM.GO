@@ -19,7 +19,7 @@ auth:
       key: sk-proxy-replace-me-aaaaa
     - name: service-b
       key: sk-proxy-replace-me-bbbbb
-  # Отдельный ключ для подключения TUI, Web UI (/ui) и админ-эндпоинтов
+  # Отдельный ключ для подключения `proxylm tui`, `proxylm web` и админ-эндпоинтов
   admin_key: sk-admin-replace-me
 
 # Стратегия маршрутизации:

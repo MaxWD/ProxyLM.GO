@@ -213,7 +213,7 @@ Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 
 | ID     | Requirement |
 |--------|-------------|
-| FR-69  | The daemon MUST serve a browser-based dashboard from statically embedded assets (built into the binary at compile time) at `GET /ui/*`, with `GET /ui` redirecting to `/ui/`. Responses under `/ui/*` MUST include `Cache-Control: no-cache`. The `/ui/*` path MUST NOT require authentication at the HTTP layer — the static assets alone carry no secrets and no live data; all live state is obtained by the page's own WebSocket connection to `/admin/stream`, authenticated per FR-70. |
+| FR-69  | The daemon itself MUST NOT serve any Web UI routes (`GET /ui` and `GET /ui/*` MUST return `404`, as for any other undefined path). The browser-based dashboard MUST instead be served by a dedicated client command, `proxylm web`, analogous to `proxylm tui`: it embeds the same statically built frontend assets (built into the single binary at compile time), runs its own local HTTP server (`--listen`, default `127.0.0.1:8081`), and serves them with `Cache-Control: no-cache` on every response. `proxylm web` MUST accept `--connect` (daemon `ws://`/`wss://`/`http://`/`https://` address, normalized to the `/admin/stream` WebSocket URL), an optional `--token` (admin key, injected into the served page so it can auto-connect), and `--no-open` (skip opening the default browser; otherwise the command MUST open it automatically after the local server starts). The command's local HTTP server MUST NOT require authentication of its own — it serves no secrets and no live data; all live state is obtained by the page's own WebSocket connection to the daemon's `/admin/stream`, authenticated per FR-70. |
 | FR-70  | The `/admin/stream` WebSocket handshake MUST accept the admin key via an additional channel — an entry of the form `proxylm-token.<base64url-no-padding(admin_key)>` in the `Sec-WebSocket-Protocol` request header — alongside the existing `Authorization: Bearer <admin_key>` mechanism (FR-33). If both are present on the same request, `Authorization: Bearer` MUST take precedence. The admin key value transmitted via either channel MUST NEVER be written to logs. The server MUST negotiate `proxylm-admin` as the selected WebSocket subprotocol; the token entry MUST NEVER be selected as the negotiated subprotocol. Existing TUI clients, which authenticate only via `Authorization: Bearer` and offer no subprotocols, MUST be unaffected. |
 | FR-71  | The embedded Web UI MUST be strictly read-only: it MUST NOT provide any control that mutates daemon state (no request cancellation, no configuration edits, no server enable/disable, no admin-key management beyond storing it locally in the browser for reuse). It MUST display the same categories of live state as the TUI — server list (health, current model, queue depth, priority order, performance metric), request table with TTL-based hiding of completed/failed records per `tui.show_completed_minutes` (FR-36), and detail views for a selected server (per-model performance breakdown, FR-41) or request (including the generation tail, FR-65) — and MUST reconnect automatically with exponential backoff on WebSocket disconnection, mirroring FR-48. |
 
@@ -451,7 +451,7 @@ The baseline is considered complete when **all** items below are satisfied:
 
 ## 8. Out of Scope (deferred to FUTURE)
 
-The following are explicitly **not** implemented in the v0.9.3 baseline. Note: a strictly read-only embedded Web UI dashboard shipped in v0.14.0 (§3.14, FR-69..FR-71) — it is not a general-purpose read-write web management interface, and the items below remain out of scope regardless of it.
+The following are explicitly **not** implemented in the v0.9.3 baseline. Note: a strictly read-only Web UI dashboard, served by the local `proxylm web` client command rather than the daemon, shipped in v0.14.0 (§3.14, FR-69..FR-71) — it is not a general-purpose read-write web management interface, and the items below remain out of scope regardless of it.
 
 - Prometheus metrics / `GET /metrics`.
 - Native Ollama API endpoints (`/api/generate`, `/api/chat`) — OpenAI shim only.
@@ -516,7 +516,7 @@ Additionally confirmed regarding scheduler behavior:
 ### Current baseline: v0.11.0
 
 Fully implements:
-- FR-1 … FR-71 (HTTP API including Anthropic Messages API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics, auto-reconnect, initial healthcheck, X-Request-Id middleware, F5 protocol, dual auth, per-backend protocol, cross-protocol translation, loaded-model probe, priority sort, distinct colors, pulsing in-flight lamp, generation tail, perf statistics persistence, strict `/v1/models` shape validation, embedded read-only Web UI)
+- FR-1 … FR-71 (HTTP API including Anthropic Messages API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics, auto-reconnect, initial healthcheck, X-Request-Id middleware, F5 protocol, dual auth, per-backend protocol, cross-protocol translation, loaded-model probe, priority sort, distinct colors, pulsing in-flight lamp, generation tail, perf statistics persistence, strict `/v1/models` shape validation, read-only Web UI via `proxylm web`)
 - NFR-1 … NFR-12
 - INV-1 … INV-8
 - AC-1 … AC-28

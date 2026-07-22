@@ -5,7 +5,7 @@
 [![Go](https://img.shields.io/github/go-mod/go-version/MaxWD/ProxyLM.GO)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Multi-protocol LLM proxy (OpenAI + Anthropic API) for any LLM backend — local (LM Studio, Ollama, vLLM, llama.cpp) or remote (OpenRouter, Groq, Together AI, OpenAI, Anthropic). Model-aware queueing, cross-protocol translation, retry/failover, SSE streaming, and a Bubble Tea TUI. Single portable binary, no CGO.
+Multi-protocol LLM proxy (OpenAI + Anthropic API) for any LLM backend — local (LM Studio, Ollama, vLLM, llama.cpp) or remote (OpenRouter, Groq, Together AI, OpenAI, Anthropic). Model-aware queueing, cross-protocol translation, retry/failover, SSE streaming, a console TUI, and a browser dashboard. Single portable binary, no CGO.
 
 **[На русском](README.ru.md)** · English
 
@@ -13,87 +13,40 @@ Multi-protocol LLM proxy (OpenAI + Anthropic API) for any LLM backend — local 
 
 ## Overview
 
-ProxyLM.GO sits between your applications and one or more LLM servers — local engines (LM Studio, Ollama, vLLM, llama.cpp) or remote APIs (OpenRouter, Groq, Together AI, OpenAI, Anthropic). To the client it looks like a standard OpenAI or Anthropic API endpoint; behind the scenes it manages routing, queuing, and failover across multiple backends. Cross-protocol translation is automatic: an OpenAI SDK client can transparently use an Anthropic backend, and vice versa. You point the proxy at a URL, set the backend `type` (`openai` or `anthropic`), and it works — regardless of what software is running on the other side.
-
-The primary design goal is to eliminate redundant model swaps. Each LLM occupies significant VRAM; when multiple clients request different models in an interleaved pattern, a server without a proxy spends seconds to minutes unloading and reloading models on every request. ProxyLM.GO collects incoming requests into per-server queues and **drains all pending requests for the currently loaded model before switching** — the model loads once and processes its entire backlog. Requests for the same model across multiple capable servers are distributed in parallel to keep GPU utilization high.
+ProxyLM.GO sits between your applications and one or more LLM servers, presenting a standard OpenAI or Anthropic API endpoint while managing routing, queuing, and failover across multiple backends behind the scenes. Its primary design goal is to eliminate redundant model swaps: each LLM occupies significant VRAM, and a server juggling several models on demand can spend seconds to minutes reloading on every request. ProxyLM.GO queues incoming requests per server and **drains all pending requests for the currently loaded model before switching** — the model loads once and processes its entire backlog, while requests for the same model across multiple capable servers are distributed in parallel to keep GPU utilization high.
 
 ## Features
 
 - **Model-affinity queue** — per-server worker drains all queued requests for the current model before switching; prevents redundant model swaps (INV-1..INV-3)
 - **OpenAI + Anthropic API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/messages`, `/v1/models`, `/healthz`
-- **Cross-protocol translation** — clients using OpenAI SDK can reach Anthropic backends and vice versa; request/response and streaming formats are converted automatically
-- **Multiple backends** — route across any number of servers (OpenAI-compatible or Anthropic); configurable priority per backend (use it to prefer local over cloud when both can serve a model)
+- **Cross-protocol translation** — OpenAI SDK clients can reach Anthropic backends and vice versa, automatically (see below)
+- **Multiple backends** — route across any number of servers; configurable priority per backend (prefer local over cloud when both can serve a model)
 - **Auto-discovery** — polls each backend's `/v1/models` at a configurable interval; marks unhealthy servers after N consecutive failures
 - **Retry and failover** — exponential backoff with rolling server exclusion; failover to another healthy backend after local retries (INV-5)
 - **SSE streaming** — transparent chunk-by-chunk proxying; no buffering, no retry after the first chunk is sent to the client (INV-6)
-- **Dual authentication** — accepts both `Authorization: Bearer` (OpenAI-style) and `x-api-key` (Anthropic-style); named API keys; client name appears in logs and history, the key itself does not
+- **Dual authentication** — accepts both `Authorization: Bearer` (OpenAI-style) and `x-api-key` (Anthropic-style); named API keys, client name in logs/history, never the key itself
 - **Request history in SQLite** — pure-Go, no CGO (`modernc.org/sqlite`); configurable retention
-- **Bubble Tea TUI** — live request table, server health status, log stream; connects to the daemon over WebSocket
-- **Embedded Web UI** — read-only browser dashboard at `/ui/`, mirroring the TUI; no separate install, no build step
+- **Bubble Tea TUI + browser dashboard** — live request table, server health, and log stream, from a console client (`proxylm tui`) or a browser (`proxylm web`)
 - **System service** — install as Windows Service, systemd unit, or launchd job with one command
 - **Portable** — config and database live next to the binary; no installation required
 
-## Screenshots
-
-![ProxyLM.GO TUI](docs/img/sh.png)
-
-A text version of the same layout (for code search and offline reading):
-
-```
-ProxyLM.GO vX.Y.Z                                                          2026-05-17 14:32:07
-╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ lmstudio   ● qwen2.5-coder-14b-instruct   850ms · ↓12.3 tok/s · ↑51.8 tok/s                                              │
-│ ollama     ● llama-3.1-8b-instruct-q4_k_m                                                                                │
-│ backup     ✗ idle                                                                                                        │
-│ Queued: 2   Running: 1   Done/30m: 4   Failed: 1   Servers: 2/3 healthy                                                  │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ Requests                                                                                                                 │
-│   #    Client    Model                        Server     Status       RM Queued   Started  Elapsed I→O tok               │
-│ ▶ a3f2 webclient qwen2.5-coder-14b-instruct   lmstudio   ▶ running    —  14:31:50 14:31:52 15.2s   512→…                 │
-│   7c1e apitest   llama-3.1-8b-instruct-q4_k_m ollama     … queued     —  14:31:55 —        —      —→—                    │
-│   d09b botuser   qwen2.5-coder-14b-instruct   lmstudio   … queued     —  14:32:01 —        —      —→—                    │
-│   55ab cli-app   gemma-2-9b-it-q4_k_m         lmstudio   ✓ completed  ✓  14:01:10 14:01:11 8.4s    256→1024              │
-│   f1e0 tester    mistral-7b-instruct-v0.3     ✗ backup   ✗ failed     —  14:15:22 14:15:23 2.1s    128→—                 │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ Info — Request a3f2                                                                                                      │
-│ ID           8fa3...a3f2     Created      2026-05-17 14:31:50                                                            │
-│ Client       webclient       Started      2026-05-17 14:31:52                                                            │
-│ Model        qwen2.5-coder-14b-instruct    Completed    —                                                                │
-│ Endpoint     /v1/chat/completions          Queue wait   120ms                                                            │
-│ Stream       yes             Prompt tok   512                                                                            │
-│ Server       lmstudio        Output tok   …                                                                              │
-│ Status       running (1/2)   RM           —                                                                              │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-F1 Help   F5 Refresh   / Filter   Tab Header/Requests/Info   Click — select   q/F10 Quit
-```
-
-**Column widths** are sized for the typical case:
-
-- `Model` (27 chars) — fits canonical names such as `qwen2.5-coder-14b-instruct` or `llama-3.1-8b-instruct-q4_k_m` without truncating the quantization suffix.
-- `Server` (10 chars) — includes a 2-char `✗ ` prefix for failed-attempt servers, leaving 8 chars for the name.
-- `Status` (12 chars) — covers the longest `✗ completed` plus one space of slack.
-- `Tokens` (11 chars) — `NNN→NNNN` format; in-progress streaming shows `…` instead of the output count.
-- `RM` (2 chars) — single-character "model reloaded" marker (`✓` / `—`) plus separator.
-
 ## Quick Start
 
-### 1. Download
+### 1. Get the binary
 
-Download the pre-built binary for your platform from [Releases](https://github.com/MaxWD/ProxyLM.GO/releases):
+Download the pre-built archive for your platform from [Releases](https://github.com/MaxWD/ProxyLM.GO/releases) and extract it — no runtime or interpreter required:
 
-| Platform      | Archive                             |
-|---------------|-------------------------------------|
-| Linux x86-64  | `proxylm_linux_x86_64.tar.gz`       |
-| Linux ARM64   | `proxylm_linux_arm64.tar.gz`        |
-| macOS x86-64  | `proxylm_macos_x86_64.tar.gz`       |
-| macOS ARM64   | `proxylm_macos_arm64.tar.gz`        |
-| Windows x86-64| `proxylm_windows_x86_64.zip`        |
+| Platform      | Archive                       |
+|---------------|--------------------------------|
+| Linux x86-64  | `proxylm_linux_x86_64.tar.gz`  |
+| Linux ARM64   | `proxylm_linux_arm64.tar.gz`   |
+| macOS x86-64  | `proxylm_macos_x86_64.tar.gz`  |
+| macOS ARM64   | `proxylm_macos_arm64.tar.gz`   |
+| Windows x86-64| `proxylm_windows_x86_64.zip`   |
 
-Extract the archive. No runtime or interpreter is required.
+Or build it yourself — see [Build from Source](#build-from-source).
 
-> Note: `go install github.com/MaxWD/ProxyLM.GO@latest` does not work — the Go module path is a local name (`proxylm`), not the GitHub URL. Installation is via the pre-built binary or by building from source.
+> Note: `go install github.com/MaxWD/ProxyLM.GO@latest` does not work — the Go module path is a local name (`proxylm`), not the GitHub URL.
 
 ### 2. Run the daemon
 
@@ -101,52 +54,35 @@ Extract the archive. No runtime or interpreter is required.
 ./proxylm serve
 ```
 
-On first run the daemon writes `config.yaml` and `proxylm.db` next to the binary from the embedded template. Edit `config.yaml` before the next start.
+On first run this writes `config.yaml` and `proxylm.db` next to the binary from the embedded template.
 
 ### 3. Configure backends
 
-Open `config.yaml` and adjust the `backends` section:
+Open `config.yaml` and adjust `backends`:
 
 ```yaml
 backends:
-  - name: lm-studio          # any descriptive name — shown in TUI and logs
+  - name: lm-studio
     url: http://127.0.0.1:1234   # LM Studio default port
     timeout_seconds: 600
-    priority: 100            # lower number = higher preference among free servers
+    priority: 100                # lower number = higher preference among free servers
 
   - name: ollama
     url: http://127.0.0.1:11434  # Ollama default port (OpenAI-compatible /v1/* shim)
     timeout_seconds: 600
     priority: 200
 
-  # Cloud fallback — uncomment if you want OpenRouter to serve when locals are busy
-  # - name: openrouter
-  #   url: https://openrouter.ai/api
-  #   api_key: sk-or-v1-...
-  #   timeout_seconds: 120
-  #   priority: 900          # high number = used only when locals can't serve
-
-  # Anthropic Claude API — set type: anthropic for native Anthropic protocol
+  # Anthropic Claude API — set type: anthropic for the native Anthropic protocol
   # - name: anthropic-cloud
   #   url: https://api.anthropic.com
-  #   type: anthropic          # uses Anthropic Messages API instead of OpenAI
+  #   type: anthropic
   #   api_key: sk-ant-api03-...
-  #   timeout_seconds: 120
-  #   priority: 900
-  #   models:
-  #     - claude-sonnet-4-6
-  #     - claude-haiku-4-5
+  #   priority: 900               # high number = used only when locals can't serve
 ```
 
-Any OpenAI-compatible or Anthropic-compatible server works — `url`, `type` (defaults to `openai`), and `api_key` if needed. The `type` field selects the wire protocol: `openai` (default — works with LM Studio, Ollama, vLLM, OpenRouter, etc.) or `anthropic` (Anthropic Messages API). Cross-protocol translation is automatic: OpenAI SDK clients can use Anthropic backends and vice versa. Then change the placeholder keys in `auth.api_keys` and `auth.admin_key` and restart the daemon.
+`type` selects the wire protocol: `openai` (default — LM Studio, Ollama, vLLM, OpenRouter, etc.) or `anthropic`. Then replace the placeholder keys in `auth.api_keys` and `auth.admin_key` and restart the daemon.
 
-### 4. Connect the TUI
-
-```sh
-./proxylm tui --connect ws://localhost:8080 --token <admin_key>
-```
-
-### 5. Send a request
+### 4. Send a request
 
 ```sh
 curl -H "Authorization: Bearer sk-proxy-replace-me-aaaaa" \
@@ -155,7 +91,7 @@ curl -H "Authorization: Bearer sk-proxy-replace-me-aaaaa" \
      http://localhost:8080/v1/chat/completions
 ```
 
-Or, using the Anthropic Messages API:
+Or via the Anthropic Messages API — works against the same daemon regardless of the backend's own protocol:
 
 ```sh
 curl -H "x-api-key: sk-proxy-replace-me-aaaaa" \
@@ -165,9 +101,30 @@ curl -H "x-api-key: sk-proxy-replace-me-aaaaa" \
      http://localhost:8080/v1/messages
 ```
 
-Both endpoints work regardless of the backend protocol — the proxy translates automatically.
-
 More examples (streaming, embeddings, `/v1/models`) — see [docs/API.md](docs/API.md) §4.
+
+## Commands
+
+`proxylm` is a single binary; every mode is a subcommand.
+
+| Command | Description | Typical invocation |
+|---|---|---|
+| `serve` | Run the daemon (HTTP proxy + IPC WebSocket) | `proxylm serve` |
+| `tui` | Connect the console TUI to a running daemon | `proxylm tui --connect ws://localhost:8080 --token <admin_key>` |
+| `web` | Open the browser dashboard | `proxylm web --connect ws://localhost:8080 --token <admin_key>` |
+| `config init` | Write `config.yaml` from the embedded template | `proxylm config init` |
+| `config validate` | Validate `config.yaml` | `proxylm config validate` |
+| `service install` | Register `proxylm` as a system service | `proxylm service install` |
+| `service uninstall` | Remove the service registration | `proxylm service uninstall` |
+| `service start` / `stop` | Start / stop the service | `proxylm service start` |
+| `service status` | Show the service status | `proxylm service status` |
+| `version` | Print version, OS/arch, Go version | `proxylm version` |
+
+Flags worth knowing:
+
+- **`serve`** — `--config <path>` (default: `config.yaml` next to the binary).
+- **`tui`** — `--connect <ws-url>` (default `ws://localhost:8080`), `--token <admin_key>` (required).
+- **`web`** — `--connect <url>` (`ws://`/`wss://`/`http://`/`https://`, default `ws://localhost:8080`), `--token <admin_key>` (optional — enables auto-connect), `--listen <host:port>` (default `127.0.0.1:8081`), `--no-open` (don't launch the browser automatically).
 
 ## Configuration
 
@@ -177,7 +134,7 @@ Full annotated example: [`config.example.yaml`](config.example.yaml).
 |---------------------|-------------------------------------------------------------------------------------------|
 | `proxy`             | `host`, `port`, `log_level` (debug / info / warning / error)                              |
 | `auth.api_keys`     | Named Bearer keys for client services                                                     |
-| `auth.admin_key`    | Separate key for TUI, Web UI, and `/admin/*` endpoints                                    |
+| `auth.admin_key`    | Separate key for `tui`, `web`, and `/admin/*` endpoints                                   |
 | `routing.strategy`  | `model_affinity_least_busy` (default), `least_busy`, `round_robin`, `deferred_model_then_capable`, `preserve_model_coverage` |
 | `retry`             | `max_attempts`, `initial_backoff_ms`, `max_backoff_ms`; rolling server exclusion (size 1) |
 | `discovery`         | `enabled`, `interval_seconds`, `unhealthy_after_failed_polls`                             |
@@ -186,66 +143,35 @@ Full annotated example: [`config.example.yaml`](config.example.yaml).
 | `compat`            | `response_format_mode`: `passthrough` / `normalize_json_object` / `strict_reject`        |
 | `backends`          | List of servers: `name`, `url`, `priority`, `type` (`openai`/`anthropic`), `timeout_seconds`, `api_key`, `models` |
 
-CLI flags `--host` / `--port` on the `serve` command override YAML values.
+CLI flags `--host` / `--port` on `serve` override YAML values.
 
-The `compat.response_format_mode` setting is useful for mixed backend pools:
-- `passthrough` — forward `response_format` as-is (default).
-- `normalize_json_object` — rewrite `response_format.type=json_object` to `json_schema` before the upstream call.
-- `strict_reject` — return HTTP 400 at the proxy if `type` is not `json_schema` or `text`.
+## Cross-Protocol Translation
 
-## Architecture Overview
-
-```
-  clients (OpenAI SDK, Anthropic SDK, curl, ...)
-            |  HTTP / OpenAI or Anthropic format
-            v
-   +----------------------------------+
-   | ProxyLM.GO daemon                |        +-----------+
-   |  Dual Auth -> Router -> per-srv  |------->| srv1 (OAI)|
-   |           queues + workers       |        +-----------+
-   |           + cross-protocol       |        +-----------+
-   |             translation          |------->| srv2 (Ant)|
-   |  Discovery / SQLite / IPC        |        +-----------+
-   +----------------+-----------------+
-                    |  WebSocket /admin/stream
-                    v
-              TUI (Bubble Tea)
-```
-
-The scheduler enforces **model affinity**: a server's worker pops requests for the currently loaded model first. Only when that sub-queue is empty does it switch to the next model. This is the core invariant (INV-2) that eliminates redundant VRAM swaps.
-
-Full design details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The proxy accepts both the OpenAI-style API (`/v1/chat/completions`, `/v1/messages` counterpart aside) and the Anthropic Messages API (`/v1/messages`) on the same port, and each backend independently declares its own protocol via `type: openai` / `type: anthropic`. All four client/backend combinations work transparently — an OpenAI SDK client can be routed to an Anthropic backend and vice versa — with request/response bodies and SSE streaming translated automatically. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §7-8, [docs/API.md](docs/API.md) §1.5.
 
 ## TUI
 
-The TUI is a separate process that connects to the running daemon over WebSocket and receives a real-time stream of request events and log lines.
+![ProxyLM.GO TUI](docs/img/sh.png)
 
 ```sh
 ./proxylm tui --connect ws://localhost:8080 --token <admin_key>
 ```
 
-Hotkeys: `F1` help overlay, `F5` refresh snapshot (sends `request_snapshot` via WebSocket), `/` search, `Tab` cycle panes (Header / Requests / Info), `F10` or `q` quit.
+Hotkeys: `F1` help, `F5` refresh snapshot, `/` search, `Tab` cycle panes (Header / Requests / Info), `F10` or `q` quit. Reconnects automatically on disconnection (exponential backoff, 1 s → 30 s cap).
 
-If the WebSocket connection drops, the TUI reconnects automatically with exponential backoff (1 s → 30 s cap). The title bar shows `connecting…` / `reconnecting…` / `live`.
-
-Completed requests are hidden from the table after `tui.show_completed_minutes` (default 30) but remain in SQLite.
-
-On Windows `cmd.exe` Unicode glyphs may not render correctly. Enable ASCII fallback:
-
-```bat
-set PROXYLM_NO_UNICODE=1
-proxylm.exe tui --connect ws://localhost:8080 --token <admin_key>
-```
+On Windows `cmd.exe`, Unicode glyphs may not render; set `PROXYLM_NO_UNICODE=1` for an ASCII fallback.
 
 ## Web UI
 
-For monitoring without a terminal, open `http://<host>:<port>/ui/` in a browser (same host/port as the daemon's HTTP API). Enter the `auth.admin_key` from `config.yaml` once — it's cached in the browser's `localStorage`. Nothing to install: the frontend is a static page embedded in the `proxylm` binary and served directly by the daemon.
+```sh
+./proxylm web --connect ws://localhost:8080 --token <admin_key>
+```
 
-The Web UI is a **strictly read-only** mirror of the TUI — the same server rack, request table, and detail panes, live over the `/admin/stream` WebSocket — with no controls that change daemon state. It reconnects automatically on disconnection, same as the TUI.
+Runs a small local HTTP server and opens the default browser (unless `--no-open`). It is a **strictly read-only** mirror of the TUI — the same server rack, request table, and detail panes, live over the same `/admin/stream` WebSocket — with no controls that change daemon state, and it reconnects automatically on disconnection. The daemon itself serves no browser UI; `proxylm web` is a separate local client, analogous to `proxylm tui`.
 
 ## Build from Source
 
-Requires Go 1.25.10 or later. No CGO.
+Requires Go 1.25.12 or later. No CGO.
 
 ```sh
 git clone https://github.com/MaxWD/ProxyLM.GO.git
@@ -253,28 +179,15 @@ cd ProxyLM.GO
 go build -ldflags "-s -w -X main.version=dev" -o bin/proxylm .
 ```
 
-On Windows:
-
-```powershell
-.\scripts\build.ps1
-```
-
-Cross-compilation (single static binary per target, no CGO):
+On Windows: `.\scripts\build.ps1`. Cross-compile all targets at once: `.\scripts\build-all.ps1`, or individually:
 
 ```sh
 GOOS=linux   GOARCH=amd64 go build -o bin/proxylm-linux-amd64   .
-GOOS=linux   GOARCH=arm64 go build -o bin/proxylm-linux-arm64   .
 GOOS=darwin  GOARCH=arm64 go build -o bin/proxylm-darwin-arm64  .
 GOOS=windows GOARCH=amd64 go build -o bin/proxylm-windows-amd64.exe .
 ```
 
-Or all targets at once:
-
-```powershell
-.\scripts\build-all.ps1
-```
-
-Run tests:
+Run tests and lint:
 
 ```sh
 go test ./...
@@ -286,8 +199,6 @@ golangci-lint run
 
 ## Run as a Service
 
-ProxyLM.GO can register itself with the system service manager via a single CLI:
-
 ```sh
 proxylm service install    # Windows Service / systemd unit / launchd job
 proxylm service start
@@ -296,15 +207,7 @@ proxylm service stop
 proxylm service uninstall
 ```
 
-Backed by [`github.com/kardianos/service`](https://github.com/kardianos/service):
-
-- **Windows** — Service Control Manager; the service appears in `services.msc` after `install`.
-- **Linux** — systemd unit written to `/etc/systemd/system/proxylm.service`; requires root for `install`/`uninstall`.
-- **macOS** — launchd plist written to `~/Library/LaunchAgents/`.
-
-The service working directory is the directory containing the binary; config and database are resolved relative to it.
-
-On Linux/macOS set `config.yaml` permissions to `0600` and ensure it is owned by the user running the service.
+Backed by [`github.com/kardianos/service`](https://github.com/kardianos/service): Windows Service Control Manager, a systemd unit at `/etc/systemd/system/proxylm.service` (root required for install/uninstall), or a launchd plist under `~/Library/LaunchAgents/`. The service's working directory is the directory containing the binary; config and database resolve relative to it. On Linux/macOS, set `config.yaml` permissions to `0600`.
 
 ## Documentation
 
@@ -312,7 +215,7 @@ On Linux/macOS set `config.yaml` permissions to `0600` and ensure it is owned by
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, scheduler algorithm, retry/failover, streaming, IPC, database schema, code layout |
 | [docs/SRS.md](docs/SRS.md) | Software Requirements Specification: FR/NFR, invariants, acceptance criteria, out-of-scope |
-| [docs/API.md](docs/API.md) | API contract: OpenAI v1 endpoints, admin/IPC WebSocket, backend call format |
+| [docs/API.md](docs/API.md) | API contract: OpenAI/Anthropic endpoints, admin/IPC WebSocket, backend call format |
 | [docs/AGENTS.md](docs/AGENTS.md) | Contributor roles and document ownership map |
 
 ## Contributing
