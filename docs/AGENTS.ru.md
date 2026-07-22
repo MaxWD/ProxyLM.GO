@@ -25,6 +25,7 @@
 | `internal/ipc/client.go`    | go-tui-engineer       | потребитель в TUI            |
 | `internal/ipc/messages.go`  | tech-writer (схемы) / go-backend-engineer (типы) | оба используют |
 | `internal/tui/*`            | go-tui-engineer       | TUI-приложение               |
+| `internal/webui/*`          | go-backend-engineer   | встроенный read-only Web UI (static + go:embed) |
 | `internal/service/*`        | go-devops-cli         | service install / lifecycle  |
 | `scripts/*`                 | go-devops-cli         | сборка / упаковка            |
 | `test/integration/*`        | go-qa-tests           | e2e тесты                    |
@@ -77,6 +78,7 @@
 - `internal/storage/history.go` — async writer через канал, чистка по retention.
 - `internal/logging/slog.go` — `log/slog` setup (JSON handler, уровни).
 - `internal/ipc/server.go` — WebSocket publisher (`coder/websocket`).
+- `internal/webui/*` — встроенный read-only Web UI: `webui.go` (`//go:embed static`, `http.Handler` с `Cache-Control: no-cache`) и сам статический фронтенд (vanilla HTML/CSS/JS, без build-шага); монтируется на `/ui/*` в `internal/api/server.go` вне групп middleware аутентификации.
 - Юнит-тесты на scheduler/router/retry (table-driven, coverage ≥ 80%).
 
 **Приоритет реализации:** сначала непотоковый путь end-to-end, затем streaming.

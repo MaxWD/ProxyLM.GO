@@ -7,11 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-22
+
+### Added
+
+- **Perf statistics persistence** (`internal/storage/perf.go`, migration `0004_perf_observations.sql`). `PerfTracker` observations are now persisted to SQLite through a single-writer async goroutine — `Record` fires a non-blocking send on a capacity-1024 channel, dropping on overflow rather than adding scheduler latency — and restored on daemon startup (`PerfStore.Trim` → `PerfStore.LoadAll` → `PerfTracker.Load`, sink wired only afterwards), so the performance regression no longer resets to zero samples across restarts. Always-on, no config flag; the on-disk ring buffer is capped at the same `core.PerfMaxObservations` (1000/key) as the in-memory one and trimmed hourly regardless of `storage.history_retention_days`.
+- **Strict `/v1/models` response-shape validation** (`internal/core/backends/backend.go`, sentinel `ErrModelsShape`). A 2xx `/v1/models` response is now validated for an OpenAI-compatible shape (`data: [{id: string}, ...]`, or a legacy top-level string array); a response that doesn't match is treated as a discovery failure with an actionable WARN naming `backends[].url` as the likely misconfiguration, instead of silently accepting garbage as a model list.
+- **Embedded Web UI** (`internal/webui`, `GET /ui/*`, `GET /ui` redirect). A strictly read-only browser dashboard mirroring the TUI — server rack sorted by priority (health lamp, current model, queue depth, `SLOW` flag, perf metric), a request table with TTL-based hiding per `tui.show_completed_minutes`, and server/request detail panes (per-model perf table with ±CI, generation tail) — served from static assets embedded in the binary via `//go:embed`. `/ui/*` is unauthenticated at the HTTP layer by design: the static page carries no secrets, and all live data flows over the existing `/admin/stream` WebSocket, authenticated through a new browser-friendly channel — the admin key can be offered as a `Sec-WebSocket-Protocol` entry (`proxylm-token.<base64url-no-padding(admin_key)>`), since browsers cannot set `Authorization` at WebSocket handshake time. `Authorization: Bearer` still works unchanged and takes precedence when both are present; the server negotiates `proxylm-admin` as the subprotocol. The admin key is entered once and cached in the browser's `localStorage`; the page reconnects automatically on disconnection, mirroring the TUI.
+
+### Changed
+
+- **`GET /v1/models` with an empty `data` array (`{"data": []}`) is now explicitly treated as healthy with zero models** rather than an ambiguous edge case, logged at WARN ("server healthy but reports zero models").
+- **Explicit-models backends (`backends[].models`) are more lenient during periodic discovery polls**: a response-shape validation failure is now treated as a successful liveness check (the endpoint responded; the explicit list remains the source of truth for routing) instead of counting toward `unhealthy_after_failed_polls`. The initial-healthcheck behavior for explicit-models servers (already healthy without polling) is unchanged.
+- **`cmd/serve.go`: `runRetention` renamed to `runMaintenance`**, which now also runs the hourly perf-observation trim alongside the existing history-retention sweep, independent of `storage.history_retention_days`.
+
 ## [0.13.2] - 2026-07-22
 
 ### Fixed
 
 - **Bumped Go to 1.25.12** to pick up the standard-library security fix flagged by `govulncheck`: GO-2026-5856 (`crypto/tls` — invoking Encrypted Client Hello privacy leak), reachable from `api.ListenAndServe` and the backends' HTTP calls (`ListModels`, `Forward`). No application code changed; CI derives the Go version from `go.mod`, so the single directive bump rebuilds against the patched stdlib.
+
+## [0.13.1] - 2026-06-15
 
 ### Fixed
 
@@ -212,7 +228,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.2...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.2...v0.14.0
 [0.13.2]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.12.1...v0.13.0

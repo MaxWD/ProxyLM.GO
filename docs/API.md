@@ -1,6 +1,6 @@
 # ProxyLM.GO — API Specification
 
-Document version: 0.13.0
+Document version: 0.14.0
 Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`SRS.md`](./SRS.md)
 
 This document describes three API groups:
@@ -379,6 +379,17 @@ data: [DONE]
 
 The client must detect the presence of `error` in an SSE chunk. History record — `failed`.
 
+### 1.9. `GET /ui` and `/ui/*` (embedded Web UI, v0.14.0)
+
+`GET /ui` returns `301 Moved Permanently` to `/ui/`. `GET /ui/*` serves the embedded static frontend (`index.html`, `app.js`, `style.css`) — a read-only dashboard mirroring the TUI (see `ARCHITECTURE.md` §19).
+
+These paths require **no authentication** — they carry no secrets and no live data by themselves; the page's own JavaScript opens a separate authenticated WebSocket connection to `/admin/stream` (§2.1) to fetch live state. Every response includes `Cache-Control: no-cache` so a rebuilt binary's frontend is never served stale from the browser cache.
+
+```bash
+curl -s http://localhost:8080/ui/          # returns index.html
+curl -sI http://localhost:8080/ui          # 301 -> /ui/
+```
+
 ---
 
 ## 2. Admin / IPC API
@@ -401,6 +412,20 @@ Sec-WebSocket-Key: ...
 
 `/admin/stream` is available on the same listener as `/v1/*` (`proxy.host:proxy.port`).
 No separate listener for IPC is provided.
+
+#### Browser auth channel (v0.14.0)
+
+The embedded Web UI (§1.9) runs in a browser, and the native browser `WebSocket` API cannot set request headers (no `Authorization`) at handshake time. As a second, equivalent auth channel, the admin key may instead be offered via `Sec-WebSocket-Protocol`, as one of the comma-separated subprotocol values:
+
+```
+Sec-WebSocket-Protocol: proxylm-admin, proxylm-token.<base64url-no-padding(admin_key)>
+```
+
+- The token entry has the fixed prefix `proxylm-token.` followed by the admin key, base64url-encoded **without padding** (`=`).
+- `proxylm-admin` is the only protocol name the server ever negotiates (echoed back in the `Sec-WebSocket-Protocol` response header); `proxylm-token.<...>` is never selected as the negotiated subprotocol — it is a side-channel for the key only.
+- If both `Authorization: Bearer` and a `proxylm-token.` subprotocol entry are present on the same request, `Authorization: Bearer` **takes precedence**.
+- The admin key is **never logged**, regardless of which channel carried it.
+- Existing TUI clients are unaffected — they authenticate exclusively via `Authorization: Bearer` and offer no subprotocols.
 
 ### 2.2. Server → client messages
 

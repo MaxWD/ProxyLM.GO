@@ -29,6 +29,7 @@ The primary design goal is to eliminate redundant model swaps. Each LLM occupies
 - **Dual authentication** — accepts both `Authorization: Bearer` (OpenAI-style) and `x-api-key` (Anthropic-style); named API keys; client name appears in logs and history, the key itself does not
 - **Request history in SQLite** — pure-Go, no CGO (`modernc.org/sqlite`); configurable retention
 - **Bubble Tea TUI** — live request table, server health status, log stream; connects to the daemon over WebSocket
+- **Embedded Web UI** — read-only browser dashboard at `/ui/`, mirroring the TUI; no separate install, no build step
 - **System service** — install as Windows Service, systemd unit, or launchd job with one command
 - **Portable** — config and database live next to the binary; no installation required
 
@@ -176,7 +177,7 @@ Full annotated example: [`config.example.yaml`](config.example.yaml).
 |---------------------|-------------------------------------------------------------------------------------------|
 | `proxy`             | `host`, `port`, `log_level` (debug / info / warning / error)                              |
 | `auth.api_keys`     | Named Bearer keys for client services                                                     |
-| `auth.admin_key`    | Separate key for TUI and `/admin/*` endpoints                                             |
+| `auth.admin_key`    | Separate key for TUI, Web UI, and `/admin/*` endpoints                                    |
 | `routing.strategy`  | `model_affinity_least_busy` (default), `least_busy`, `round_robin`, `deferred_model_then_capable`, `preserve_model_coverage` |
 | `retry`             | `max_attempts`, `initial_backoff_ms`, `max_backoff_ms`; rolling server exclusion (size 1) |
 | `discovery`         | `enabled`, `interval_seconds`, `unhealthy_after_failed_polls`                             |
@@ -235,6 +236,12 @@ On Windows `cmd.exe` Unicode glyphs may not render correctly. Enable ASCII fallb
 set PROXYLM_NO_UNICODE=1
 proxylm.exe tui --connect ws://localhost:8080 --token <admin_key>
 ```
+
+## Web UI
+
+For monitoring without a terminal, open `http://<host>:<port>/ui/` in a browser (same host/port as the daemon's HTTP API). Enter the `auth.admin_key` from `config.yaml` once — it's cached in the browser's `localStorage`. Nothing to install: the frontend is a static page embedded in the `proxylm` binary and served directly by the daemon.
+
+The Web UI is a **strictly read-only** mirror of the TUI — the same server rack, request table, and detail panes, live over the `/admin/stream` WebSocket — with no controls that change daemon state. It reconnects automatically on disconnection, same as the TUI.
 
 ## Build from Source
 

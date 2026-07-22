@@ -25,6 +25,7 @@ Each role below is a separate executor (sub-agent) to whom a portion of the work
 | `internal/ipc/client.go`    | go-tui-engineer       | TUI consumer                          |
 | `internal/ipc/messages.go`  | tech-writer (schemas) / go-backend-engineer (types) | both use |
 | `internal/tui/*`            | go-tui-engineer       | TUI application                       |
+| `internal/webui/*`          | go-backend-engineer   | embedded read-only Web UI (static + go:embed) |
 | `internal/service/*`        | go-devops-cli         | service install / lifecycle           |
 | `scripts/*`                 | go-devops-cli         | build / packaging                     |
 | `test/integration/*`        | go-qa-tests           | e2e tests                             |
@@ -77,6 +78,7 @@ Each role below is a separate executor (sub-agent) to whom a portion of the work
 - `internal/storage/history.go` — async writer via channel, cleanup by retention.
 - `internal/logging/slog.go` — `log/slog` setup (JSON handler, levels).
 - `internal/ipc/server.go` — WebSocket publisher (`coder/websocket`).
+- `internal/webui/*` — embedded read-only Web UI: `webui.go` (`//go:embed static`, `http.Handler` with `Cache-Control: no-cache`) and the static frontend itself (vanilla HTML/CSS/JS, no build step); mounted at `/ui/*` in `internal/api/server.go` outside the auth middleware groups.
 - Unit tests for scheduler/router/retry (table-driven, coverage ≥ 80%).
 
 **Implementation priority:** non-streaming end-to-end path first, then streaming.

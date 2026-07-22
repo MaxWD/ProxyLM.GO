@@ -27,6 +27,7 @@ ProxyLM.GO — это мультипротокольный посредник м
 - **Двойная аутентификация** — принимает и `Authorization: Bearer` (OpenAI-стиль), и `x-api-key` (Anthropic-стиль); поимённые API-ключи; имя клиента попадает в логи и историю, сам ключ — нет
 - **История запросов в SQLite** — pure-Go, без CGO (`modernc.org/sqlite`); настраиваемый retention
 - **Bubble Tea TUI** — таблица запросов в реальном времени, статус серверов; подключается к daemon'у через WebSocket; авто-переподключение при разрыве
+- **Встроенный Web UI** — read-only дашборд в браузере на `/ui/`, зеркалирующий TUI; ничего дополнительно ставить не нужно
 - **Системная служба** — установка как Windows Service, systemd unit или launchd job одной командой
 - **Portable** — конфиг и БД лежат рядом с бинарником; без установки
 
@@ -191,6 +192,12 @@ set PROXYLM_NO_UNICODE=1
 proxylm.exe tui --connect ws://localhost:8080 --token <admin_key>
 ```
 
+## Web UI
+
+Для мониторинга без терминала — открой `http://<host>:<port>/ui/` в браузере (тот же хост/порт, что и HTTP API daemon'а). Введи `auth.admin_key` из `config.yaml` один раз — он кэшируется в `localStorage` браузера. Устанавливать ничего не нужно: фронтенд — статическая страница, встроенная в бинарник `proxylm` и отдаваемая самим daemon'ом.
+
+Web UI — строго **read-only** зеркало TUI: та же стойка серверов, таблица запросов и детальные панели, живые данные через WebSocket `/admin/stream` — без единого элемента, меняющего состояние daemon'а. Автоматически переподключается при разрыве, как и TUI.
+
 ## Конфигурация
 
 Полный пример с комментариями — [`config.example.yaml`](./config.example.yaml). Ключевые секции:
@@ -199,7 +206,7 @@ proxylm.exe tui --connect ws://localhost:8080 --token <admin_key>
 |-------------------|--------------------------------------------------------------------|
 | `proxy`           | `host`, `port`, `log_level`                                         |
 | `auth.api_keys`   | список Bearer-ключей с `name`/`key`                                 |
-| `auth.admin_key`  | отдельный ключ для TUI и `/admin/*` эндпоинтов                      |
+| `auth.admin_key`  | отдельный ключ для TUI, Web UI и `/admin/*` эндпоинтов               |
 | `routing.strategy`| `model_affinity_least_busy` (default), `least_busy`, `round_robin`, `deferred_model_then_capable` |
 | `retry`           | `max_attempts`, `initial_backoff_ms`, `max_backoff_ms` (rolling exclusion: упавший сервер пропускается ровно на 1 след. попытку) |
 | `discovery`       | `interval_seconds`, `unhealthy_after_failed_polls`                  |
