@@ -27,7 +27,7 @@ func TestHandler(t *testing.T) {
 			name:           "index at /ui/",
 			path:           "/ui/",
 			wantStatus:     http.StatusOK,
-			wantContains:   "Web UI placeholder",
+			wantContains:   "<title>ProxyLM</title>",
 			wantContentSub: "text/html",
 		},
 		{
