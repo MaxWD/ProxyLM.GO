@@ -95,6 +95,15 @@ func (h *Hub) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			InsecureSkipVerify: true, // CORS вне scope MVP
+			// "proxylm-admin" — единственный "настоящий" подпротокол; браузерный
+			// Web UI дополнительно предлагает "proxylm-token.<base64url admin_key>"
+			// в том же списке (см. internal/api/auth.go extractAdminKeyFromSubprotocol),
+			// но тот используется только для передачи токена в auth-проверке и
+			// никогда не будет выбран здесь, т.к. отсутствует в server-side списке.
+			// RFC 6455 требует, чтобы сервер либо не подтверждал подпротокол вовсе,
+			// либо выбрал один из предложенных клиентом — TUI-клиент подпротоколы
+			// не предлагает и продолжает работать без изменений.
+			Subprotocols: []string{"proxylm-admin"},
 		})
 		if err != nil {
 			h.log.Warn("ipc: accept failed", "error", err.Error())
