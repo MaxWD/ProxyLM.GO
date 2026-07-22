@@ -30,6 +30,10 @@ ProxyLM.GO встаёт между вашими приложениями и од
 - **Системная служба** — установка как Windows Service, systemd unit или launchd job одной командой
 - **Portable** — конфиг и БД лежат рядом с бинарником; без установки
 
+## Скриншоты
+
+![ProxyLM.GO TUI](docs/img/sh.png)
+
 ## Быстрый старт
 
 ### 1. Получить бинарник
@@ -150,8 +154,6 @@ CLI-флаги `--host` / `--port` у `serve` переопределяют зн�
 Прокси принимает и OpenAI-стиль API (`/v1/chat/completions` и т. д.), и Anthropic Messages API (`/v1/messages`) на одном порту, а каждый бэкенд независимо объявляет свой протокол через `type: openai` / `type: anthropic`. Все четыре комбинации клиент/бэкенд работают прозрачно — клиент OpenAI SDK может быть направлен на Anthropic-бэкенд и наоборот — с автоматической трансляцией тел запросов/ответов и SSE-streaming'а. Подробности: [docs/ARCHITECTURE.ru.md](docs/ARCHITECTURE.ru.md) §7-8, [docs/API.ru.md](docs/API.ru.md) §1.5.
 
 ## TUI
-
-![ProxyLM.GO TUI](docs/img/sh.png)
 
 ```sh
 ./proxylm tui --connect ws://localhost:8080 --token <admin_key>

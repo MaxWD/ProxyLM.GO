@@ -30,6 +30,10 @@ ProxyLM.GO sits between your applications and one or more LLM servers, presentin
 - **System service** — install as Windows Service, systemd unit, or launchd job with one command
 - **Portable** — config and database live next to the binary; no installation required
 
+## Screenshots
+
+![ProxyLM.GO TUI](docs/img/sh.png)
+
 ## Quick Start
 
 ### 1. Get the binary
@@ -150,8 +154,6 @@ CLI flags `--host` / `--port` on `serve` override YAML values.
 The proxy accepts both the OpenAI-style API (`/v1/chat/completions`, `/v1/messages` counterpart aside) and the Anthropic Messages API (`/v1/messages`) on the same port, and each backend independently declares its own protocol via `type: openai` / `type: anthropic`. All four client/backend combinations work transparently — an OpenAI SDK client can be routed to an Anthropic backend and vice versa — with request/response bodies and SSE streaming translated automatically. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §7-8, [docs/API.md](docs/API.md) §1.5.
 
 ## TUI
-
-![ProxyLM.GO TUI](docs/img/sh.png)
 
 ```sh
 ./proxylm tui --connect ws://localhost:8080 --token <admin_key>
