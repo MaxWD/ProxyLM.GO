@@ -85,7 +85,9 @@ func (s *PerfStore) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case row := <-s.ch:
-			s.insert(row)
+			// insert намеренно использует detached-контекст (см. doc-comment Run):
+			// уже начатая запись должна пережить отмену ctx при shutdown.
+			s.insert(row) //nolint:contextcheck
 		}
 	}
 }
