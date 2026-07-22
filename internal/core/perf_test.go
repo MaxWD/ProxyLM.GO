@@ -290,6 +290,123 @@ func TestPerfTracker_Concurrent(t *testing.T) {
 	}
 }
 
+// TestPerfTracker_SetSink_ReceivesAcceptedObservations: sink получает ровно
+// значения принятых Record-вызовов (server/model/endpoint/поля Observation),
+// и не вызывается для отклонённых (totalMs<=0, out<=0) точек.
+func TestPerfTracker_SetSink_ReceivesAcceptedObservations(t *testing.T) {
+	p := NewPerfTracker()
+
+	type sunk struct {
+		server, model, endpoint string
+		o                       Observation
+	}
+	var mu sync.Mutex
+	var received []sunk
+	p.SetSink(func(server, model, endpoint string, o Observation) {
+		mu.Lock()
+		defer mu.Unlock()
+		received = append(received, sunk{server, model, endpoint, o})
+	})
+
+	// Accepted.
+	p.Record("srv1", "m1", "/v1/chat/completions", 100, 50, 1234, true)
+	p.Record("srv1", "m1", "/v1/chat/completions", 10, 20, 30, false)
+	// Rejected: totalMs<=0.
+	p.Record("srv1", "m1", "/v1/chat/completions", 5, 5, 0, false)
+	// Rejected: out<=0.
+	p.Record("srv1", "m1", "/v1/chat/completions", 5, 0, 100, false)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(received) != 2 {
+		t.Fatalf("sink invoked %d times, want 2 (rejected Records must not reach sink): %+v", len(received), received)
+	}
+	want := []sunk{
+		{"srv1", "m1", "/v1/chat/completions", Observation{In: 100, Out: 50, TotalMs: 1234, Loaded: true}},
+		{"srv1", "m1", "/v1/chat/completions", Observation{In: 10, Out: 20, TotalMs: 30, Loaded: false}},
+	}
+	for i, w := range want {
+		g := received[i]
+		if g.server != w.server || g.model != w.model || g.endpoint != w.endpoint || g.o != w.o {
+			t.Errorf("received[%d] = %+v, want %+v", i, g, w)
+		}
+	}
+}
+
+// TestPerfTracker_Load_RingBufferCap: Load'им 1200 наблюдений одним вызовом —
+// в bySlot (проверяется через Snapshot().Samples) должно остаться ровно
+// PerfMaxObservations (1000), т.е. самые новые (хвост входного среза).
+func TestPerfTracker_Load_RingBufferCap(t *testing.T) {
+	p := NewPerfTracker()
+	const total = PerfMaxObservations + 200
+	obs := make([]Observation, total)
+	for i := range obs {
+		// Out различим по индексу — используем позже для проверки "оставлены новые".
+		obs[i] = Observation{In: 10, Out: i + 1, TotalMs: int64(i + 1), Loaded: false}
+	}
+	p.Load("srv1", "m1", "/v1/chat/completions", obs)
+
+	st := p.Snapshot("srv1", "m1", "/v1/chat/completions")
+	if st.Samples != PerfMaxObservations {
+		t.Fatalf("Samples = %d, want %d after Loading %d observations", st.Samples, PerfMaxObservations, total)
+	}
+
+	// Внутренний срез напрямую — убедиться, что остался именно ХВОСТ (новейшие),
+	// а не голова: bySlot доступен внутри package core.
+	p.mu.RLock()
+	kept := p.bySlot[perfKey{server: "srv1", model: "m1", endpoint: "/v1/chat/completions"}]
+	p.mu.RUnlock()
+	if len(kept) != PerfMaxObservations {
+		t.Fatalf("len(kept) = %d, want %d", len(kept), PerfMaxObservations)
+	}
+	if kept[0].out != total-PerfMaxObservations+1 {
+		t.Errorf("kept[0].out = %d, want %d (oldest dropped, newest kept)", kept[0].out, total-PerfMaxObservations+1)
+	}
+	if kept[len(kept)-1].out != total {
+		t.Errorf("kept[last].out = %d, want %d", kept[len(kept)-1].out, total)
+	}
+}
+
+// TestPerfTracker_Load_NeverInvokesSink: Load restores historical data at
+// startup and must NOT re-persist it — sink must never be called by Load,
+// even when a sink is already attached.
+func TestPerfTracker_Load_NeverInvokesSink(t *testing.T) {
+	p := NewPerfTracker()
+	called := false
+	p.SetSink(func(string, string, string, Observation) { called = true })
+
+	p.Load("srv1", "m1", "/v1/chat/completions", []Observation{
+		{In: 10, Out: 20, TotalMs: 100, Loaded: false},
+		{In: 30, Out: 40, TotalMs: 200, Loaded: true},
+	})
+
+	if called {
+		t.Fatalf("Load must never invoke the sink")
+	}
+	st := p.Snapshot("srv1", "m1", "/v1/chat/completions")
+	if st.Samples != 2 {
+		t.Fatalf("Samples = %d, want 2", st.Samples)
+	}
+}
+
+// TestPerfTracker_NilSafety_SinkAndLoad: SetSink on a nil *PerfTracker and
+// Record with no sink attached must not panic.
+func TestPerfTracker_NilSafety_SinkAndLoad(t *testing.T) {
+	var p *PerfTracker
+	p.SetSink(func(string, string, string, Observation) {
+		t.Fatalf("sink must never be invoked on a nil tracker")
+	})
+	p.Load("srv1", "m1", "/v1/chat/completions", []Observation{{In: 1, Out: 1, TotalMs: 1}})
+
+	p2 := NewPerfTracker()
+	// No sink attached — Record must not panic when sink is nil.
+	p2.Record("srv1", "m1", "/v1/chat/completions", 10, 20, 100, false)
+	st := p2.Snapshot("srv1", "m1", "/v1/chat/completions")
+	if st.Samples != 1 {
+		t.Fatalf("Samples = %d, want 1", st.Samples)
+	}
+}
+
 // TestPerfTracker_ServerSummary: возвращает (модель, endpoint), отсортированные
 // по числу samples DESC.
 func TestPerfTracker_ServerSummary(t *testing.T) {

@@ -15,7 +15,8 @@
 - Retry + failover на другой сервер с той же моделью
 - Аутентификация по API-ключам
 - Консольный TUI в стиле btop (отдельный клиент к daemon'у)
-- История запросов в SQLite
+- Read-only Web UI dashboard для браузеров, зеркалирующий TUI, отдаваемый отдельной клиентской командой (`proxylm web`), а не daemon'ом — см. §19
+- История запросов в SQLite; наблюдения perf-регрессии тоже персистятся (см. §10, §17)
 - **Один portable-бинарник:** один и тот же исполняемый файл — и daemon, и TUI-клиент, и инсталлятор службы. Кросс-компиляция под любую OS без CGO.
 
 ## 2. Принципиальная схема
@@ -238,6 +239,7 @@ Streaming-нюанс: если ошибка приходит **до первог
 - При недоступности сервера N циклов подряд → флаг `unhealthy.Store(false)`.
 - Discovery-цикл получает `context.Context`, корректно завершается при shutdown.
 - **Проба загруженных моделей (v0.13.0):** в том же цикле опроса бэкенды, реализующие опциональный интерфейс `backends.LoadedModelsProber`, дополнительно опрашиваются на предмет моделей, *реально находящихся в памяти*. Проба выбирается по типу (`backends[].type`): Ollama → `GET /api/ps`, LM Studio → `GET /api/v1/models` (модели с непустым `loaded_instances`), llama.cpp → `GET /models` (фильтр `status==loaded`). Обычные `openai` и `anthropic` бэкенды интерфейс не реализуют и пропускаются. Результат сохраняется в `ServerInfo` через `SetLoadedModels` (atomic) и публикуется как `ServerState.loaded_models` / `loaded_models_probed`. Ошибка пробы не фатальна — не влияет на `healthy` и не затирает прошлый снимок.
+- **Строгая валидация формы `/v1/models` (v0.14.0):** `parseModelsBody` (`internal/core/backends/backend.go`), общая для `openai.go` и `anthropic.go`, принимает две формы: `{"data": [...]}`, где каждая запись имеет непустой строковый `id` (`{"data": []}` валиден — ноль моделей, не ошибка), либо legacy верхнеуровневый массив строк (включая `[]`). Любое другое тело 2xx — объекты в `data` без `id`, HTML, посторонний JSON — возвращает ошибку, оборачивающую sentinel `backends.ErrModelsShape`. `Discovery` (`initial healthcheck` и `pollOne`) трактует это отдельно от сетевой/HTTP-ошибки: сервер помечается `unhealthy`, а WARN-лог указывает на `backends[].url` как вероятную причину (пользователь направил прокси на non-OpenAI-совместимый endpoint — Anthropic `/v1/messages`, Azure `api-version`, native Ollama `/api/generate` и т. п.). Healthy-ответ 2xx с нулём моделей (`{"data": []}`) логируется на уровне WARN («server healthy but reports zero models»), но сервер остаётся `healthy`. Для серверов с непустым явным списком `backends[].models` ошибка формы при **периодическом** опросе трактуется как успешная проверка живости (`failed_polls` сбрасывается в 0, сервер помечается `healthy`) — эндпоинт ответил, а явный список уже является источником истины для маршрутизации; эта снисходительность не распространяется на сетевые ошибки, а initial healthcheck для explicit-models серверов не меняется (по-прежнему полностью пропускает опрос, согласно FR-49).
 
 ## 9. TUI ↔ Daemon (IPC)
 
@@ -249,7 +251,7 @@ TUI (Bubble Tea) подключается через тот же бинарни�
 
 **Авто-переподключение TUI:** при разрыве WS-соединения TUI-клиент выполняет бесконечный экспоненциальный backoff (1 с, 2 с, …, cap 30 с). В заголовке показывается `connecting…` / `reconnecting…` / `live`. Выход — только через `q` / `F10` / Ctrl-C.
 
-Аутентификация: тот же Bearer-механизм, но используется выделенный admin-ключ.
+Аутентификация: тот же Bearer-механизм, но используется выделенный admin-ключ. С v0.14.0 для того же эндпоинта существует второй, браузерно-ориентированный канал аутентификации — см. §19.
 
 Publisher на стороне daemon — отдельная goroutine с входящим `chan Event`; core-модули (scheduler, router, retry) шлют события неблокирующе (с защитой от backpressure: drop при переполнении буфера, в лог — `event_drop`).
 
@@ -292,11 +294,39 @@ CREATE TABLE IF NOT EXISTS schema_version (
 -- 0002_model_reloaded.sql (миграция v0.7.0)
 ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0;
 -- Backfill = 0: для старых строк факт reload неизвестен — безопасный дефолт.
+
+-- 0004_perf_observations.sql (миграция v0.14.0)
+CREATE TABLE perf_observations (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  server     TEXT    NOT NULL,
+  model      TEXT    NOT NULL,
+  endpoint   TEXT    NOT NULL,
+  in_tokens  INTEGER NOT NULL,
+  out_tokens INTEGER NOT NULL,
+  total_ms   INTEGER NOT NULL,
+  loaded     INTEGER NOT NULL,
+  created_at TEXT    NOT NULL
+);
+CREATE INDEX idx_perf_obs_key ON perf_observations(server, model, endpoint, id);
+-- id одновременно служит FIFO-порядком для трима кольцевого буфера в рамках
+-- ключа (server, model, endpoint); created_at (RFC3339Nano UTC) — только для
+-- форензики, обратно в PerfTracker не читается.
 ```
 
 Очередь — **только in-memory** (рестарт = клиенты получат ошибку и сами повторят).
 
 Запись истории — асинхронная: горутина-писатель читает из `chan HistoryEvent`, делает batch-инсерты (или одиночные с PRAGMA `synchronous = NORMAL`).
+
+### Персистентность perf-статистики (v0.14.0)
+
+До v0.14.0 наблюдения `PerfTracker` жили только в памяти и терялись при каждом рестарте (см. §17). `internal/storage/perf.go` (`PerfStore`) теперь их персистит, всегда включено, без флага конфига. Жизненный цикл, подключён в `cmd/serve.go`:
+
+1. **Trim при старте.** `PerfStore.Trim(ctx, core.PerfMaxObservations)` удаляет строки сверх in-memory cap кольцевого буфера (1000 на ключ) для каждого `(server, model, endpoint)` — страховка от таблицы, разросшейся под прошлой сборкой с большим cap'ом.
+2. **Массовое восстановление.** `PerfStore.LoadAll(ctx)` читает все строки, сгруппированные по ключу, в порядке `id ASC` (старые→новые); `PerfTracker.Load` массово восстанавливает их в память. `Load` никогда не вызывает sink — восстановление персистентных данных не должно сразу же ставить их обратно в очередь на персистентность.
+3. **Подключение sink'а.** Только *после* массового восстановления вызывается `PerfTracker.SetSink(perfStore.Enqueue)`, затем `go perfStore.Run(ctx)` запускает единственную writer-горутину. Порядок важен: подключение sink'а до `Load` привело бы к немедленной обратной записи восстановленных точек в ту же таблицу, откуда они пришли.
+4. **Запись на горячем пути.** При каждом последующем принятом `Record` (то есть прошедшем валидацию) sink срабатывает *вне* мьютекса `PerfTracker` и выполняет неблокирующую отправку в `chan perfRow` (ёмкость 1024). Заполненный канал дропает наблюдение с Debug-логом — это best-effort persistence, которая никогда не должна добавлять задержку или backpressure планировщику.
+5. **Единственный writer.** `PerfStore.Run` — единственная горутина, пишущая в `perf_observations`; она вычитывает канал и вставляет по одной строке за раз, используя detached `context.Background()` + таймаут 5с на вставку (чтобы начатая запись пережила shutdown daemon'а — тот же паттерн, что и `persistRecord` в `internal/api/routes_openai.go`).
+6. **Периодический trim.** `runMaintenance` (переименован из `runRetention` в v0.14.0) запускает `PerfStore.Trim` раз в час **безусловно** — независимо от того, `storage.history_retention_days > 0` или нет — наряду с существующей уборкой retention истории.
 
 ## 11. Конфиг
 
@@ -341,6 +371,7 @@ ProxyLM.GO/
 │   ├── root.go
 │   ├── serve.go
 │   ├── tui.go
+│   ├── web.go                    # `proxylm web` — локальный HTTP-сервер + запуск браузера (v0.14.0, см. §19)
 │   ├── config.go
 │   ├── service.go
 │   └── version.go
@@ -359,8 +390,8 @@ ProxyLM.GO/
 │   │       ├── openai.go         # клиент к OpenAI-совместимым (LM Studio, Ollama и т. д.)
 │   │       └── anthropic.go      # клиент к Anthropic-совместимым (type: anthropic)
 │   ├── api/
-│   │   ├── server.go             # net/http + chi, lifecycle, graceful shutdown
-│   │   ├── auth.go               # middleware Bearer + x-api-key (двойная аутентификация)
+│   │   ├── server.go             # net/http + chi, lifecycle, graceful shutdown; не отдаёт маршрутов Web UI (см. cmd/web.go, §19)
+│   │   ├── auth.go               # middleware Bearer + x-api-key (двойная аутентификация); канал admin-токена через Sec-WebSocket-Protocol (v0.14.0)
 │   │   ├── routes_openai.go      # /v1/chat/completions, /v1/completions, /v1/embeddings, /v1/models
 │   │   ├── routes_anthropic.go   # хендлер /v1/messages (Anthropic Messages API)
 │   │   ├── routes_admin.go       # /admin/stream (WebSocket)
@@ -374,18 +405,23 @@ ProxyLM.GO/
 │   ├── storage/
 │   │   ├── db.go                 # подключение, миграции (//go:embed migrations/*.sql)
 │   │   ├── history.go            # запись/чтение requests (async writer)
+│   │   ├── perf.go               # PerfStore: асинхронная персистентность наблюдений PerfTracker (v0.14.0, см. §10)
 │   │   └── migrations/
 │   │       ├── 0001_init.sql
-│   │       └── 0002_model_reloaded.sql  # ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0
+│   │       ├── 0002_model_reloaded.sql  # ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0
+│   │       └── 0004_perf_observations.sql # таблица perf_observations (v0.14.0)
 │   ├── ipc/
 │   │   ├── messages.go           # типы JSON-сообщений (Envelope, state_snapshot, request_snapshot, hello, ...)
-│   │   ├── server.go             # publisher на стороне daemon
+│   │   ├── server.go             # publisher на стороне daemon; согласовывает подпротокол "proxylm-admin"
 │   │   └── client.go             # WebSocket-клиент (используется TUI)
 │   ├── tui/
 │   │   ├── app.go                # Bubble Tea Model/Update/View
 │   │   ├── widgets.go            # HeaderBar, RequestTable, InfoPane (lipgloss + bubbles)
 │   │   ├── styles.go             # lipgloss-стили
 │   │   └── keys.go               # хоткеи (F5, F10, q, /)
+│   ├── webui/                    # статический фронтенд для `proxylm web` (v0.14.0, см. §19)
+│   │   ├── webui.go              # //go:embed static; http.Handler + ConfigJS; используется cmd/web.go, не daemon'ом
+│   │   └── static/               # index.html, app.js, style.css — vanilla JS, без build-шага
 │   └── service/
 │       └── service.go            # kardianos/service интеграция
 ├── scripts/
@@ -503,7 +539,7 @@ GOOS=darwin  GOARCH=arm64 go build -o bin/proxylm-darwin-arm64 .
 
 ## 17. Метрики производительности (регрессия)
 
-Модуль `internal/core/perf.go` оценивает производительность сервера по паре `(server_name, model)` методом линейной регрессии. Все наблюдения хранятся в памяти (`[]perfObservation`) — при рестарте daemon'а история обнуляется.
+Модуль `internal/core/perf.go` оценивает производительность сервера по паре `(server_name, model)` методом линейной регрессии. Наблюдения живут в памяти (`[]perfObservation`) для быстрого пути регрессии; с v0.14.0 они дополнительно персистятся в SQLite и восстанавливаются при старте (см. §10, «Персистентность perf-статистики») — рестарт daemon'а больше не обнуляет регрессию до нуля наблюдений.
 
 ### Модель
 
@@ -568,10 +604,37 @@ type ModelSummary struct {
 
 В IPC `ServerState` перф-поля (см. `API.ru.md` §2.2) заполняются через `buildSnapshot`: `tok_in_per_sec = 1000 / KInMsTok` (нули и отрицательные → 0), аналогично `tok_out_per_sec`.
 
-## 18. Нерешённые вопросы / отложено на будущее
+## 19. Web UI (`proxylm web`)
+
+`internal/webui` встраивает небольшой статический фронтенд (`index.html`, `app.js`, `style.css`) через `//go:embed static` и предоставляет его через `webui.Handler()` — тонкую обёртку над `http.FileServerFS` с `cacheControlWriter`, который принудительно ставит `Cache-Control: no-cache` на каждый ответ, поскольку бинарник (а вместе с ним встроенный фронтенд) может быть заменён пересборкой в любой момент, и браузер не должен кэшировать `index.html`/`app.js` через рестарты.
+
+Daemon (`internal/api/server.go`) **не** монтирует этот хендлер и вообще не отдаёт маршрутов Web UI — `GET /ui`/`GET /ui/*` там обычные 404. Вместо этого `cmd/web.go` реализует отдельную клиентскую команду, `proxylm web`, структурно аналогичную `proxylm tui`:
+
+```
+proxylm web --connect ws://localhost:8080 --token sk-admin-... --listen 127.0.0.1:8081 [--no-open]
+```
+
+Она поднимает собственный локальный `net/http`-сервер (по умолчанию `--listen 127.0.0.1:8081`) с двумя маршрутами: `/` → `webui.Handler()` (встроенный статический фронтенд) и `/config.js` → небольшой генерируемый скрипт, `webui.ConfigJS(wsURL, token)`, производящий `window.PROXYLM = {"ws":"ws://host:port/admin/stream","token":"..."}` (`token` опускается через `omitempty`, если `--token` не задан). `--connect` нормализуется функцией `adminStreamURL`: она принимает `ws://`, `wss://`, `http://` или `https://` (конвертируя `http(s)` в `ws(s)`) и добавляет `/admin/stream`, если он ещё не указан. Если не передан `--no-open`, команда открывает корневой URL локального сервера в браузере по умолчанию для ОС (best-effort — неудача запуска браузера не фатальна, поскольку URL уже напечатан в stdout).
+
+Локальный HTTP-сервер, запускаемый `proxylm web`, **не требует собственной аутентификации**: статические ассеты и `config.js` сами по себе не несут секретов и живых данных (admin-ключ, если передан через `--token`, попадает только в ту одну вкладку браузера, которая загрузила страницу с этого локального сервера, и никогда не персистится на стороне сервера дольше памяти процесса). Все живые данные получаются собственным WebSocket-соединением страницы к `/admin/stream` daemon'а, аутентифицируемым отдельно (см. ниже). Модель угроз идентична TUI, подключающемуся по `ws://` в локальной сети: кто может достучаться до HTTP-порта daemon'а и владеет `auth.admin_key` — может открыть WebSocket и увидеть живое состояние; сам локальный сервер Web UI не добавляет новой поверхности атаки на daemon, поскольку общается с ним исключительно через этот единственный WebSocket.
+
+### Браузерный канал аутентификации для `/admin/stream`
+
+Нативный `WebSocket` API браузера не может выставить произвольные заголовки запроса на этапе хендшейка (в частности `Authorization`), поэтому фронтенд не может напрямую переиспользовать Bearer-путь TUI. Вместо этого `internal/api/auth.go` (`extractAdminKey`) также принимает ключ через `Sec-WebSocket-Protocol`, в записи вида:
+
+```
+Sec-WebSocket-Protocol: proxylm-admin, proxylm-token.<base64url-no-padding(admin_key)>
+```
+
+`proxylm-admin` — «настоящий» подпротокол, согласовываемый сервером (`internal/ipc/server.go`, `websocket.AcceptOptions.Subprotocols`); `proxylm-token.<...>` никогда не выбирается как согласованный подпротокол — он существует чисто как побочный канал для передачи ключа, опираясь на семантику RFC 6455 «клиент предлагает список, сервер выбирает один или ни одного». `extractAdminKeyFromSubprotocol` сканирует все значения заголовка `Sec-WebSocket-Protocol` на предмет префикса `proxylm-token.` и декодирует остаток base64url (без padding). Если в одном запросе присутствуют и `Authorization: Bearer`, и токен в подпротоколе, побеждает `Authorization`. Admin-ключ никогда не логируется ни на одном из путей. TUI-клиент не затронут — он по-прежнему аутентифицируется исключительно через `Authorization: Bearer` и никогда не предлагает подпротоколов.
+
+### Фронтенд
+
+`internal/webui/static/` — read-only дашборд, зеркалирующий TUI: стойка серверов, отсортированная по `priority` (лампа здоровья, текущая модель, глубина очереди, флаг `SLOW`, perf-метрика), таблица запросов, соблюдающая `tui.show_completed_minutes` для TTL-скрытия завершённых/упавших строк, и детальные панели для выбранного сервера (включая per-model perf-таблицу с ±CI) или запроса (включая хвост генерации). Admin-ключ вводится один раз через небольшую auth-форму и кэшируется в `localStorage` браузера; страница автоматически переподключается к `/admin/stream` с экспоненциальным backoff при разрыве, зеркалируя собственную reconnect-логику TUI (FR-48). Никакого server-rendering или build-шага — обычные HTML/CSS/JS, в духе минимализма зависимостей проекта (§14).
+
+## 20. Нерешённые вопросы / отложено на будущее
 
 - Метрики Prometheus (`/metrics`).
-- Web UI вместо/помимо TUI.
 - Поддержка native Ollama API endpoints (`/api/generate`).
 - Приоритизация по клиенту (квоты).
 - Persistence очереди при рестарте (отдельно обсуждалось — намеренно не делаем).

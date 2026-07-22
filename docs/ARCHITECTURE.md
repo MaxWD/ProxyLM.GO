@@ -15,7 +15,8 @@ Key properties:
 - Retry + failover to another server with the same model
 - API-key authentication
 - btop-style console TUI (separate client to the daemon)
-- Request history in SQLite
+- Read-only Web UI dashboard for browsers, mirroring the TUI, served by a dedicated client command (`proxylm web`) rather than the daemon — see §19
+- Request history in SQLite; performance regression observations are persisted too (see §10, §17)
 - **Single portable binary:** the same executable file acts as daemon, TUI client, and service installer. Cross-compiles to any OS without CGO.
 
 ## 2. System Diagram
@@ -238,6 +239,7 @@ Implements the `Backend` interface for backends with `type: anthropic`. Sends re
 - If a server is unreachable for N consecutive cycles → `unhealthy.Store(false)`.
 - The discovery loop receives a `context.Context` and shuts down cleanly on shutdown.
 - **Loaded-model probe (v0.13.0):** in the same poll cycle, backends that implement the optional `backends.LoadedModelsProber` interface are additionally queried for the models *currently resident in memory*. The probe is type-driven (`backends[].type`): Ollama → `GET /api/ps`, LM Studio → `GET /api/v1/models` (models with a non-empty `loaded_instances`), llama.cpp → `GET /models` (filter `status==loaded`). Plain `openai` and `anthropic` backends don't implement it and are skipped. The result is stored on `ServerInfo` via `SetLoadedModels` (atomic) and published as `ServerState.loaded_models` / `loaded_models_probed`. A probe failure is non-fatal — it never flips `healthy` and leaves the previous snapshot intact.
+- **Strict `/v1/models` shape validation (v0.14.0):** `parseModelsBody` (`internal/core/backends/backend.go`), shared by `openai.go` and `anthropic.go`, accepts two shapes: `{"data": [...]}` where every entry has a non-empty string `id` (`{"data": []}` is valid — zero models, not an error), or a legacy top-level string array (including `[]`). Any other 2xx body — objects in `data` missing `id`, HTML, unrelated JSON — returns an error wrapping the sentinel `backends.ErrModelsShape`. `Discovery` (`initial healthcheck` and `pollOne`) treats this distinctly from a network/HTTP error: the server is marked `unhealthy` and the WARN log names `backends[].url` as the likely misconfiguration (a user pointed the proxy at a non-OpenAI-compatible endpoint — Anthropic `/v1/messages`, Azure `api-version`, raw Ollama `/api/generate`, etc.). A healthy 2xx response with zero models (`{"data": []}`) is logged at WARN ("server healthy but reports zero models") but the server stays `healthy`. For servers with a non-empty explicit `backends[].models` list, a shape error during a **periodic** poll is treated as a successful liveness check (`failed_polls` resets to 0, server marked `healthy`) — the endpoint responded, and the explicit list is already the source of truth for routing; this leniency does not apply to network-level errors, and the initial healthcheck for explicit-models servers is unchanged (still skips the poll entirely, per FR-49).
 
 ## 9. TUI ↔ Daemon (IPC)
 
@@ -249,7 +251,7 @@ The TUI (Bubble Tea) connects via the same binary in `proxylm tui --connect ...`
 
 **TUI auto-reconnect:** on WebSocket disconnection the TUI client performs infinite exponential backoff (1 s, 2 s, …, cap 30 s). The title shows `connecting…` / `reconnecting…` / `live`. Exit only via `q` / `F10` / Ctrl-C.
 
-Authentication: the same Bearer mechanism, but using a dedicated admin key.
+Authentication: the same Bearer mechanism, but using a dedicated admin key. Since v0.14.0 a second, browser-oriented auth channel exists for the same endpoint — see §19.
 
 The publisher on the daemon side is a separate goroutine with an incoming `chan Event`; core modules (scheduler, router, retry) send events non-blocking (with backpressure protection: drop on buffer overflow, log `event_drop`).
 
@@ -292,11 +294,39 @@ CREATE TABLE IF NOT EXISTS schema_version (
 -- 0002_model_reloaded.sql (migration v0.7.0)
 ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0;
 -- Backfill = 0: for old rows the reload fact is unknown — safe default.
+
+-- 0004_perf_observations.sql (migration v0.14.0)
+CREATE TABLE perf_observations (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  server     TEXT    NOT NULL,
+  model      TEXT    NOT NULL,
+  endpoint   TEXT    NOT NULL,
+  in_tokens  INTEGER NOT NULL,
+  out_tokens INTEGER NOT NULL,
+  total_ms   INTEGER NOT NULL,
+  loaded     INTEGER NOT NULL,
+  created_at TEXT    NOT NULL
+);
+CREATE INDEX idx_perf_obs_key ON perf_observations(server, model, endpoint, id);
+-- id doubles as FIFO order for ring-buffer trimming within a (server, model,
+-- endpoint) key; created_at (RFC3339Nano UTC) is forensics-only and is never
+-- read back into PerfTracker.
 ```
 
 Queue — **in-memory only** (restart = clients receive an error and retry on their own).
 
 History writing — asynchronous: a writer goroutine reads from `chan HistoryEvent`, performs batch inserts (or single inserts with PRAGMA `synchronous = NORMAL`).
+
+### Perf statistics persistence (v0.14.0)
+
+Prior to v0.14.0, `PerfTracker` observations lived only in memory and were lost on every restart (see §17). `internal/storage/perf.go` (`PerfStore`) now persists them, always on, with no config flag. Lifecycle, wired in `cmd/serve.go`:
+
+1. **Startup trim.** `PerfStore.Trim(ctx, core.PerfMaxObservations)` deletes rows beyond the in-memory ring-buffer cap (1000 per key) for each `(server, model, endpoint)` — guards against a table grown larger under a previous build that used a bigger cap.
+2. **Bulk restore.** `PerfStore.LoadAll(ctx)` reads all rows grouped by key, ordered `id ASC` (oldest→newest); `PerfTracker.Load` bulk-restores them into memory. `Load` never invokes the sink — restoring persisted data must not immediately re-queue it for persistence.
+3. **Sink wiring.** Only *after* the bulk restore is `PerfTracker.SetSink(perfStore.Enqueue)` called, then `go perfStore.Run(ctx)` starts the single writer goroutine. Ordering matters: wiring the sink before `Load` would write the restored points straight back to the table they came from.
+4. **Hot-path write.** On every subsequent accepted `Record` (i.e. one that passed validation), the sink fires *outside* `PerfTracker`'s mutex and performs a non-blocking send on `chan perfRow` (capacity 1024). A full channel drops the observation with a Debug log — this is best-effort persistence and must never add latency or backpressure to the scheduler.
+5. **Single writer.** `PerfStore.Run` is the only goroutine that writes to `perf_observations`; it drains the channel and inserts one row at a time using a detached `context.Background()` + 5 s timeout per insert (so an in-flight write survives daemon shutdown — the same pattern as `persistRecord` in `internal/api/routes_openai.go`).
+6. **Ongoing trim.** `runMaintenance` (renamed from `runRetention` in v0.14.0) runs `PerfStore.Trim` every hour **unconditionally** — independent of whether `storage.history_retention_days > 0` — alongside the existing history-retention sweep.
 
 ## 11. Configuration
 
@@ -341,6 +371,7 @@ ProxyLM.GO/
 │   ├── root.go
 │   ├── serve.go
 │   ├── tui.go
+│   ├── web.go                    # `proxylm web` — local HTTP server + browser launch (v0.14.0, see §19)
 │   ├── config.go
 │   ├── service.go
 │   └── version.go
@@ -359,8 +390,8 @@ ProxyLM.GO/
 │   │       ├── openai.go         # client to OpenAI-compatible servers (LM Studio, Ollama, etc.)
 │   │       └── anthropic.go      # client to Anthropic-compatible servers (type: anthropic)
 │   ├── api/
-│   │   ├── server.go             # net/http + chi, lifecycle, graceful shutdown
-│   │   ├── auth.go               # Bearer + x-api-key middleware (dual auth)
+│   │   ├── server.go             # net/http + chi, lifecycle, graceful shutdown; serves no Web UI routes (see cmd/web.go, §19)
+│   │   ├── auth.go               # Bearer + x-api-key middleware (dual auth); admin Sec-WebSocket-Protocol token channel (v0.14.0)
 │   │   ├── routes_openai.go      # /v1/chat/completions, /v1/completions, /v1/embeddings, /v1/models
 │   │   ├── routes_anthropic.go   # /v1/messages handler (Anthropic Messages API)
 │   │   ├── routes_admin.go       # /admin/stream (WebSocket)
@@ -374,18 +405,23 @@ ProxyLM.GO/
 │   ├── storage/
 │   │   ├── db.go                 # connection, migrations (//go:embed migrations/*.sql)
 │   │   ├── history.go            # write/read requests (async writer)
+│   │   ├── perf.go               # PerfStore: async persistence of PerfTracker observations (v0.14.0, see §10)
 │   │   └── migrations/
 │   │       ├── 0001_init.sql
-│   │       └── 0002_model_reloaded.sql  # ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0
+│   │       ├── 0002_model_reloaded.sql  # ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0
+│   │       └── 0004_perf_observations.sql # perf_observations table (v0.14.0)
 │   ├── ipc/
 │   │   ├── messages.go           # JSON message types (Envelope, state_snapshot, request_snapshot, hello, ...)
-│   │   ├── server.go             # publisher on the daemon side
+│   │   ├── server.go             # publisher on the daemon side; negotiates "proxylm-admin" subprotocol
 │   │   └── client.go             # WebSocket client (used by TUI)
 │   ├── tui/
 │   │   ├── app.go                # Bubble Tea Model/Update/View
 │   │   ├── widgets.go            # HeaderBar, RequestTable, InfoPane (lipgloss + bubbles)
 │   │   ├── styles.go             # lipgloss styles
 │   │   └── keys.go               # hotkeys (F5, F10, q, /)
+│   ├── webui/                    # static frontend for `proxylm web` (v0.14.0, see §19)
+│   │   ├── webui.go              # //go:embed static; http.Handler + ConfigJS; used by cmd/web.go, not by the daemon
+│   │   └── static/               # index.html, app.js, style.css — vanilla JS, no build step
 │   └── service/
 │       └── service.go            # kardianos/service integration
 ├── scripts/
@@ -503,7 +539,7 @@ Since the SQLite driver is pure-Go, **CGO_ENABLED=0** is acceptable (and preferr
 
 ## 17. Performance Metrics (Regression)
 
-The module `internal/core/perf.go` estimates server performance per `(server_name, model)` pair using linear regression. All observations are stored in memory (`[]perfObservation`) — when the daemon restarts, the history is reset.
+The module `internal/core/perf.go` estimates server performance per `(server_name, model)` pair using linear regression. Observations live in memory (`[]perfObservation`) for the fast regression path; since v0.14.0 they are additionally persisted to SQLite and restored on startup (see §10, "Perf statistics persistence") — a daemon restart no longer resets the regression to zero samples.
 
 ### Model
 
@@ -568,10 +604,37 @@ Method `ServerSummary(server string) []ModelSummary` returns all models for a se
 
 In IPC `ServerState`, perf fields (see `API.md` §2.2) are populated via `buildSnapshot`: `tok_in_per_sec = 1000 / KInMsTok` (zeros and negatives → 0), similarly for `tok_out_per_sec`.
 
-## 18. Open Questions / Deferred
+## 19. Web UI (`proxylm web`)
+
+`internal/webui` embeds a small static frontend (`index.html`, `app.js`, `style.css`) via `//go:embed static` and exposes it through `webui.Handler()` — a thin wrapper around `http.FileServerFS` with a `cacheControlWriter` that forces `Cache-Control: no-cache` on every response, since the binary (and the embedded frontend baked into it) can be replaced by a rebuild at any time and a browser must not keep `index.html`/`app.js` cached across restarts.
+
+The daemon (`internal/api/server.go`) does **not** mount this handler and serves no Web UI routes at all — `GET /ui`/`GET /ui/*` are plain 404s there. Instead, `cmd/web.go` implements a dedicated client command, `proxylm web`, structurally analogous to `proxylm tui`:
+
+```
+proxylm web --connect ws://localhost:8080 --token sk-admin-... --listen 127.0.0.1:8081 [--no-open]
+```
+
+It runs its own local `net/http` server (default `--listen 127.0.0.1:8081`) with two routes: `/` → `webui.Handler()` (the embedded static frontend), and `/config.js` → a small generated script, `webui.ConfigJS(wsURL, token)`, producing `window.PROXYLM = {"ws":"ws://host:port/admin/stream","token":"..."}` (`token` omitted via `omitempty` when `--token` was not given). `--connect` is normalized by `adminStreamURL`: it accepts `ws://`, `wss://`, `http://`, or `https://` (translating `http(s)` to `ws(s)`) and appends `/admin/stream` unless already present. Unless `--no-open` is passed, the command opens the local server's root URL in the OS default browser (best-effort — a failure to launch a browser is not fatal, since the URL is already printed to stdout).
+
+The local HTTP server started by `proxylm web` requires **no authentication of its own**: the static assets and `config.js` by themselves carry no secrets and no live data (the admin key, if passed via `--token`, is only ever handed to the one browser tab that loads the page from that local server, never persisted server-side beyond the process's memory). All live state is fetched by the page's own WebSocket connection to the daemon's `/admin/stream`, authenticated independently (see below). The threat model is identical to the TUI connecting over `ws://` on a LAN: whoever can reach the daemon's HTTP port and holds `auth.admin_key` can open the WebSocket and see live state; the local Web UI server itself adds no new attack surface on the daemon, since it never talks to it except over that one WebSocket.
+
+### Browser auth channel for `/admin/stream`
+
+The browser's native `WebSocket` API cannot set arbitrary request headers at handshake time (no `Authorization`), so the frontend cannot reuse the TUI's Bearer-token path directly. Instead, `internal/api/auth.go` (`extractAdminKey`) also accepts the key via `Sec-WebSocket-Protocol`, in an entry of the form:
+
+```
+Sec-WebSocket-Protocol: proxylm-admin, proxylm-token.<base64url-no-padding(admin_key)>
+```
+
+`proxylm-admin` is the "real" subprotocol negotiated by the server (`internal/ipc/server.go`, `websocket.AcceptOptions.Subprotocols`); `proxylm-token.<...>` is never selected as the negotiated subprotocol — it exists purely as a side channel to smuggle the key, relying on RFC 6455's "client offers a list, server picks one or none" subprotocol negotiation. `extractAdminKeyFromSubprotocol` scans every `Sec-WebSocket-Protocol` header value for a `proxylm-token.` prefix and base64url-decodes (no padding) the remainder. If both `Authorization: Bearer` and the subprotocol token are present on the same request, `Authorization` wins. The admin key is never logged in either path. The TUI client is unaffected — it continues to authenticate exclusively via `Authorization: Bearer` and never offers subprotocols.
+
+### Frontend
+
+`internal/webui/static/` is a read-only dashboard mirroring the TUI: a server rack sorted by `priority` (health lamp, current model, queue depth, `SLOW` flag, perf metric), a request table honoring `tui.show_completed_minutes` for TTL-based hiding of completed/failed rows, and detail panes for the selected server (including the per-model perf table with ±CI) or request (including the generation tail). The admin key is entered once through a small auth form and cached in the browser's `localStorage`; the page reconnects to `/admin/stream` automatically with exponential backoff on disconnection, mirroring the TUI's own reconnect logic (FR-48). There is no server-rendering or build step — plain HTML/CSS/JS, matching the project's minimal-dependencies philosophy (§14).
+
+## 20. Open Questions / Deferred
 
 - Prometheus metrics (`/metrics`).
-- Web UI instead of / in addition to TUI.
 - Native Ollama API endpoints (`/api/generate`).
 - Per-client prioritization (quotas).
 - Queue persistence across restarts (intentionally deferred).

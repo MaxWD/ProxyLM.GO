@@ -1,6 +1,6 @@
 # ProxyLM.GO — API Specification
 
-Document version: 0.13.0
+Document version: 0.14.0
 Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`SRS.md`](./SRS.md)
 
 This document describes three API groups:
@@ -379,6 +379,20 @@ data: [DONE]
 
 The client must detect the presence of `error` in an SSE chunk. History record — `failed`.
 
+### 1.9. Web UI (not a daemon endpoint, v0.14.0)
+
+The daemon itself exposes no Web UI routes: `GET /ui` and any `GET /ui/*` are undefined paths and return a plain `404`, same as any other unknown route.
+
+The read-only browser dashboard is a separate local client, the `proxylm web` command (see `ARCHITECTURE.md` §19), analogous to `proxylm tui`. It embeds the same static frontend (`index.html`, `app.js`, `style.css`) in the single `proxylm` binary, runs its own local HTTP server, and serves it with `Cache-Control: no-cache` on every response:
+
+```bash
+proxylm web --connect ws://localhost:8080 --token sk-admin-... --listen 127.0.0.1:8081
+```
+
+This opens `http://127.0.0.1:8081/` in the default browser (unless `--no-open`). The command also serves a generated `/config.js` (`window.PROXYLM = {"ws":"...","token":"..."}`) so the page knows which daemon `/admin/stream` to connect to and, if `--token` was given, connects automatically. `--connect` accepts `ws://`, `wss://`, `http://`, or `https://` and normalizes it to the `/admin/stream` WebSocket URL.
+
+The local server requires **no authentication of its own** — it carries no secrets and no live data by itself; the page's own JavaScript opens a separate authenticated WebSocket connection to the daemon's `/admin/stream` (§2.1) to fetch live state.
+
 ---
 
 ## 2. Admin / IPC API
@@ -401,6 +415,20 @@ Sec-WebSocket-Key: ...
 
 `/admin/stream` is available on the same listener as `/v1/*` (`proxy.host:proxy.port`).
 No separate listener for IPC is provided.
+
+#### Browser auth channel (v0.14.0)
+
+The embedded Web UI (§1.9) runs in a browser, and the native browser `WebSocket` API cannot set request headers (no `Authorization`) at handshake time. As a second, equivalent auth channel, the admin key may instead be offered via `Sec-WebSocket-Protocol`, as one of the comma-separated subprotocol values:
+
+```
+Sec-WebSocket-Protocol: proxylm-admin, proxylm-token.<base64url-no-padding(admin_key)>
+```
+
+- The token entry has the fixed prefix `proxylm-token.` followed by the admin key, base64url-encoded **without padding** (`=`).
+- `proxylm-admin` is the only protocol name the server ever negotiates (echoed back in the `Sec-WebSocket-Protocol` response header); `proxylm-token.<...>` is never selected as the negotiated subprotocol — it is a side-channel for the key only.
+- If both `Authorization: Bearer` and a `proxylm-token.` subprotocol entry are present on the same request, `Authorization: Bearer` **takes precedence**.
+- The admin key is **never logged**, regardless of which channel carried it.
+- Existing TUI clients are unaffected — they authenticate exclusively via `Authorization: Bearer` and offer no subprotocols.
 
 ### 2.2. Server → client messages
 

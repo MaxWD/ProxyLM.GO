@@ -83,6 +83,11 @@ func (s *Server) router() http.Handler {
 
 	r.Get("/healthz", healthzHandler(s.servers))
 
+	// Статику Web UI daemon НЕ отдаёт: дашборд поднимается отдельной командой
+	// `proxylm web` (cmd/web.go) и подключается сюда только по WS
+	// /admin/stream — auth браузера через Sec-WebSocket-Protocol (см.
+	// internal/api/auth.go extractAdminKey и internal/ipc/server.go).
+
 	// /v1/* — клиентский API (OpenAI + Anthropic)
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(s.auth.ClientAuth)

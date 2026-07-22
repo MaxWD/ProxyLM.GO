@@ -16,17 +16,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 1. Persistence of perf statistics (priority: high)
-
-**Problem:** `PerfTracker` keeps all observations `(server, model, endpoint)` in RAM. When the daemon restarts, the history is wiped; regression restarts from scratch — the first 2–3 requests yield no metrics.
-
-**Solution:** persist `[]perfObservation` in SQLite (new table `perf_observations`), load on startup. Limit storage size (e.g., 1000 observations per key, FIFO).
-
-**Risks:** small overhead per completed request; migration 0003 required.
-
----
-
-## 2. In-memory queue persistence (priority: medium)
+## 1. In-memory queue persistence (priority: medium)
 
 **Problem:** when the daemon restarts, all requests in `pending` are lost — clients receive a connection error and must retry on their side. In production installations this can cause significant losses.
 
@@ -36,17 +26,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 3. Web UI (priority: low)
-
-**Problem:** TUI requires a terminal; when monitoring remotely via a browser, TUI is inconvenient.
-
-**Solution:** a minimalist Web UI on the same WebSocket (`/admin/stream`), with no frontend dependencies (vanilla JS + EventSource or WebSocket). Table view of requests and server header bar — analogous to TUI.
-
-**Constraint:** explicitly out of scope for MVP (SRS §8).
-
----
-
-## 4. Authenticated WS multiplexing with event filtering (priority: medium)
+## 2. Authenticated WS multiplexing with event filtering (priority: medium)
 
 **Problem:** the current `/admin/stream` delivers all events to all connected clients. With multiple simultaneous TUI sessions, backpressure and event drops are possible.
 
@@ -54,7 +34,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 5. Optional CGO SQLite build (priority: low)
+## 3. Optional CGO SQLite build (priority: low)
 
 **Problem:** `modernc.org/sqlite` (pure-Go) is noticeably slower than `mattn/go-sqlite3` (CGO) under high history throughput.
 
@@ -62,7 +42,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 6. Model aliasing / fallback mapping (priority: low)
+## 4. Model aliasing / fallback mapping (priority: low)
 
 **Problem:** when a client requests a model not present on any healthy server, the proxy returns `ErrNoServer` / 503. Some clients work with an entire model family (e.g., "any 20B+ instruct") and do not want a 404 when a specific model name is not deployed.
 
@@ -72,17 +52,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 7. Preflight `/v1/models` shape validation (priority: high)
-
-**Problem:** the proxy is backend-agnostic and accepts any URL in `backends[].url`. If a user accidentally points it at a non-OpenAI endpoint (Anthropic `/v1/messages`, Azure with `api-version`, raw Ollama `/api/generate`), the misconfiguration surfaces only on the first client request as a 404/500 with no diagnostic guidance.
-
-**Solution:** at startup, after the initial healthcheck, issue a single `GET /v1/models` and validate the response shape (`data: []` with objects having `id: string`). If the shape is wrong, mark the server `unhealthy` and emit a WARN log explaining that the endpoint is not OpenAI-compatible. The proxy stays up — the rest of the configured servers continue to work.
-
-**Risks:** adds one extra HTTP call per backend at startup; trivial cost.
-
----
-
-## 8. 429-aware retry with `Retry-After` and jitter (priority: high)
+## 5. 429-aware retry with `Retry-After` and jitter (priority: high)
 
 **Problem:** the retry policy (FR-18..FR-20) does not currently distinguish between 5xx, network errors, and 429 rate-limit responses. For cloud backends (OpenRouter, Groq, Together, OpenAI) this can amplify rate limits — failover to a second cloud backend multiplies the 429 storm rather than waiting it out.
 
@@ -95,7 +65,7 @@ This document records features that did not make it into current releases but ar
 
 ---
 
-## 9. Per-backend `serialize_by_model` flag (priority: medium)
+## 6. Per-backend `serialize_by_model` flag (priority: medium)
 
 **Problem:** model-affinity routing (INV-2) serializes requests by model on each server to prevent VRAM swaps. For single-model backends (LM Studio, Ollama, vLLM, llama.cpp) this is essential. For multi-model cloud backends (OpenRouter, Groq, Together — all models available simultaneously, no VRAM swap), it is pure overhead: requests for different models that could be served in parallel are queued sequentially.
 
@@ -105,3 +75,19 @@ This document records features that did not make it into current releases but ar
 - `auto` — heuristic: if `/v1/models` returns ≤ 2 models, behave as `true`; if ≥ 10, as `false`; otherwise log a hint and default to `true`.
 
 **Risks:** complicates the scheduler's worker loop; needs careful test coverage so single-model behavior is unaffected.
+
+---
+
+## 7. Shadow streaming for the generation tail (priority: low/medium)
+
+**Problem:** the "generation tail" feature (hotkey `t`, introduced in v0.13.0) shows the last generated tokens only for requests that the **client** sent in streaming mode (`"stream": true`). When a client sends `stream: false`, the proxy takes the non-streaming path (`runNonStream`): it receives the entire response from the backend as a single chunk at the end, with no intermediate chunks — and the TUI displays `non-streaming request — no live tail`. This means the observability of live generation depends on client behaviour, not on backend capability. Local servers (LM Studio, Ollama, llama.cpp) fully support streaming regardless of how the client asks.
+
+**Solution:** optionally (config flag, default off), for requests that arrive as non-streaming, the proxy executes "shadow streaming": it forwards the request to the backend with `stream: true`, feeds incoming SSE chunks to `core.LiveTail` as in the current streaming path, but returns to the **client** a single assembled non-streaming JSON response at the end — not a chunked stream. The tail then works for any request regardless of client behaviour.
+
+**Risks/constraints:**
+- Behavioural change to the response path; must be strictly opt-in via config.
+- Requires correct reassembly of the full response from deltas: accumulating `content`, `tool_calls` / `function_call` fragments, aggregating `usage` (prompt/completion tokens), reconciling `finish_reason` / `stop_reason`.
+- Cross-protocol translation (OpenAI ↔ Anthropic) — both SSE formats must be handled.
+- Client cancellation mid-stream must abort the backend connection without leaking goroutines.
+- INV-6 interaction: INV-6 prohibits retry/failover after the first SSE chunk has been sent to the client. In shadow mode no chunks are forwarded to the client, so retry and failover remain permitted up to the final response assembly — this must be explicitly documented and enforced in the implementation.
+- Embeddings are not streamed by backends and are out of scope.

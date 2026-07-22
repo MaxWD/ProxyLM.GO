@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>ProxyLM</title>
+<link rel="stylesheet" href="style.css">
+<script src="config.js"></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+
+<!-- Auth overlay: shown until a WebSocket handshake succeeds. -->
+<div id="auth" class="auth" hidden>
+  <form id="auth-form" class="auth-card">
+    <div class="wordmark">Proxy<span class="wordmark-lm">LM</span></div>
+    <p class="auth-hint">Enter the admin key from <code>config.yaml &gt; auth.admin_key</code>.</p>
+    <input id="auth-key" type="password" autocomplete="current-password"
+           placeholder="admin key" aria-label="Admin key">
+    <button id="auth-connect" type="submit">Connect</button>
+    <p id="auth-error" class="auth-error" hidden></p>
+  </form>
+</div>
+
+<!-- Dashboard -->
+<div id="dash" class="dash" hidden>
+  <header class="topbar">
+    <div class="wordmark">Proxy<span class="wordmark-lm">LM</span>
+      <span id="daemon-version" class="version"></span>
+    </div>
+    <div id="counters" class="counters" role="status"></div>
+    <div class="topbar-right">
+      <span id="conn" class="conn" data-state="connecting">connecting</span>
+      <button id="forget" class="linkbtn" type="button" title="Forget the saved admin key">forget key</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="rack-pane">
+      <h2 class="eyebrow">Servers</h2>
+      <div id="rack" class="rack" role="list"></div>
+    </aside>
+
+    <section class="requests-pane">
+      <h2 class="eyebrow">Requests</h2>
+      <div class="table-scroll">
+        <table id="req-table" class="req-table">
+          <thead>
+            <tr>
+              <th>#</th><th>Client</th><th>Model</th><th>Server</th><th>Status</th>
+              <th title="Model reloaded">RM</th><th>Queued</th><th>Started</th>
+              <th>Elapsed</th><th>I&#8201;&#8594;&#8201;O tok</th><th class="col-endpoint">Endpoint</th>
+            </tr>
+          </thead>
+          <tbody id="req-body"></tbody>
+        </table>
+      </div>
+      <p id="req-empty" class="empty" hidden>No requests yet. Point a client at <code>/v1</code> to see traffic.</p>
+    </section>
+
+    <section class="detail-pane">
+      <h2 class="eyebrow" id="detail-title">Detail</h2>
+      <div id="detail" class="detail">
+        <p class="empty">Select a server or a request to inspect it.</p>
+      </div>
+    </section>
+  </main>
+</div>
+
+</body>
+</html>

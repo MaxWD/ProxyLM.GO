@@ -1,6 +1,6 @@
 # ProxyLM.GO — Software Requirements Specification (SRS)
 
-Document version: 0.13.0
+Document version: 0.14.0
 Baseline: ProxyLM.GO v0.11.0
 Related documents: [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`API.md`](./API.md), [`AGENTS.md`](./AGENTS.md)
 
@@ -196,6 +196,27 @@ Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 | FR-64  | The TUI MUST color each server chip (and the request table's `Server` column) by the server's index in the priority-sorted list against a palette of ≥ 10 distinct colors, so that distinct servers are visually distinguishable up to the palette size. A healthy server with `in_flight = true` MUST render a *pulsing* status lamp (animated brightness); an idle healthy server MUST render a steady lamp. When a probed server's `current_model` is not present in `loaded_models`, the TUI MUST mark it as unloaded (e.g. an `⏏` marker). |
 | FR-65  | `RequestState` MUST include `last_tokens` — the trailing generated text (≤ ~160 characters) of an in-flight **streaming** request (`status = running`, `stream = true`). It MUST be held in memory only and MUST NOT be persisted to the database or written to logs. The TUI MUST hide it by default and reveal it only on an explicit toggle (hotkey `t`) in the request Info pane. |
 
+### 3.12. Performance Statistics Persistence (v0.14.0)
+
+| ID     | Requirement |
+|--------|-------------|
+| FR-66  | Every observation accepted by `PerfTracker.Record` (i.e. one that passed validation) MUST additionally be persisted to the SQLite table `perf_observations` (schema in `ARCHITECTURE.md` §10) via an asynchronous, non-blocking writer: the scheduler's hot path MUST NEVER be blocked by this write, and a full writer queue MUST silently drop the observation (Debug log) rather than apply backpressure. On daemon startup, before accepting HTTP requests, previously persisted observations MUST be loaded and bulk-restored into `PerfTracker` per `(server, model, endpoint)` key, in the same FIFO order used at write time, without re-triggering persistence for the restored points. The on-disk ring buffer per key MUST be capped at the same size as the in-memory cap (`core.PerfMaxObservations`, 1000) via a periodic trim (at startup and at least once per hour), independent of `storage.history_retention_days`. This feature has no config flag — it is always enabled. |
+
+### 3.13. Backend Health Validation (v0.14.0)
+
+| ID     | Requirement |
+|--------|-------------|
+| FR-67  | A 2xx `GET /v1/models` response MUST be treated as healthy with zero known models if the response body is a syntactically valid OpenAI models list with an empty `data` array (`{"data": []}`) or an empty top-level array (`[]`); the proxy MUST log a WARN ("server healthy but reports zero models") in this case. A 2xx response whose body is not OpenAI-compatible — objects in `data` missing a non-empty string `id`, or any other shape (HTML, arbitrary JSON) — MUST NOT be treated as healthy: the proxy MUST mark the server `unhealthy` and log an actionable WARN identifying the response-shape mismatch and suggesting the operator check `backends[].url`. This applies to both the initial healthcheck (FR-49) and periodic discovery polls (FR-24). |
+| FR-68  | For a server with a non-empty explicit `backends[].models` list, a response-shape validation failure (per FR-67) encountered during a **periodic** discovery poll MUST be treated as a successful liveness check rather than a failed poll: the endpoint responded, and the explicit model list remains the authoritative source of models, so `failed_polls` MUST reset to 0 and the server MUST be marked `healthy`. This leniency does not apply to network-level or non-2xx errors, which are handled per FR-26. It does not change the initial healthcheck (FR-49), which already marks explicit-models servers healthy without polling. |
+
+### 3.14. Embedded Web UI (v0.14.0)
+
+| ID     | Requirement |
+|--------|-------------|
+| FR-69  | The daemon itself MUST NOT serve any Web UI routes (`GET /ui` and `GET /ui/*` MUST return `404`, as for any other undefined path). The browser-based dashboard MUST instead be served by a dedicated client command, `proxylm web`, analogous to `proxylm tui`: it embeds the same statically built frontend assets (built into the single binary at compile time), runs its own local HTTP server (`--listen`, default `127.0.0.1:8081`), and serves them with `Cache-Control: no-cache` on every response. `proxylm web` MUST accept `--connect` (daemon `ws://`/`wss://`/`http://`/`https://` address, normalized to the `/admin/stream` WebSocket URL), an optional `--token` (admin key, injected into the served page so it can auto-connect), and `--no-open` (skip opening the default browser; otherwise the command MUST open it automatically after the local server starts). The command's local HTTP server MUST NOT require authentication of its own — it serves no secrets and no live data; all live state is obtained by the page's own WebSocket connection to the daemon's `/admin/stream`, authenticated per FR-70. |
+| FR-70  | The `/admin/stream` WebSocket handshake MUST accept the admin key via an additional channel — an entry of the form `proxylm-token.<base64url-no-padding(admin_key)>` in the `Sec-WebSocket-Protocol` request header — alongside the existing `Authorization: Bearer <admin_key>` mechanism (FR-33). If both are present on the same request, `Authorization: Bearer` MUST take precedence. The admin key value transmitted via either channel MUST NEVER be written to logs. The server MUST negotiate `proxylm-admin` as the selected WebSocket subprotocol; the token entry MUST NEVER be selected as the negotiated subprotocol. Existing TUI clients, which authenticate only via `Authorization: Bearer` and offer no subprotocols, MUST be unaffected. |
+| FR-71  | The embedded Web UI MUST be strictly read-only: it MUST NOT provide any control that mutates daemon state (no request cancellation, no configuration edits, no server enable/disable, no admin-key management beyond storing it locally in the browser for reuse). It MUST display the same categories of live state as the TUI — server list (health, current model, queue depth, priority order, performance metric), request table with TTL-based hiding of completed/failed records per `tui.show_completed_minutes` (FR-36), and detail views for a selected server (per-model performance breakdown, FR-41) or request (including the generation tail, FR-65) — and MUST reconnect automatically with exponential backoff on WebSocket disconnection, mirroring FR-48. |
+
 ---
 
 ## 4. Non-Functional Requirements (NFR)
@@ -339,7 +360,7 @@ A request is marked `completed` exclusively after receiving the complete respons
 **Test 4.1.**
 - **Given:** mock backend started streaming `data: {chunk1}`, then closed the connection **before** `[DONE]`.
 - **When:** the proxy detects the disconnection.
-- **Then:** the record has `status == "failed"`, `error` contains a description of the disconnection. The client has received the already-sent chunks + SSE termination with an error marker (see API.md §1.6).
+- **Then:** the record has `status == "failed"`, `error` contains a description of the disconnection. The client has received the already-sent chunks + SSE termination with an error marker (see API.md §1.8).
 
 ### INV-5. Attempt counter does not exceed the limit, and two consecutive attempts go to different servers
 
@@ -430,9 +451,8 @@ The baseline is considered complete when **all** items below are satisfied:
 
 ## 8. Out of Scope (deferred to FUTURE)
 
-The following are explicitly **not** implemented in the v0.9.3 baseline:
+The following are explicitly **not** implemented in the v0.9.3 baseline. Note: a strictly read-only Web UI dashboard, served by the local `proxylm web` client command rather than the daemon, shipped in v0.14.0 (§3.14, FR-69..FR-71) — it is not a general-purpose read-write web management interface, and the items below remain out of scope regardless of it.
 
-- Web UI (HTML interface).
 - Prometheus metrics / `GET /metrics`.
 - Native Ollama API endpoints (`/api/generate`, `/api/chat`) — OpenAI shim only.
 - In-memory queue persistence across restarts.
@@ -465,13 +485,13 @@ The following are explicitly **not** implemented in the v0.9.3 baseline:
 
 | ID    | Risk | Mitigation |
 |-------|------|------------|
-| R-1   | Starvation of model B under an infinite stream of model A requests (see ARCHITECTURE §3). | Documented as a deliberate trade-off; possible mitigation tracked in [`docs/FUTURE.md`](./FUTURE.md) (item §8). |
+| R-1   | Starvation of model B under an infinite stream of model A requests (see ARCHITECTURE §3). | Documented as a deliberate trade-off of the default strategy; mitigated (v0.10.0) via the optional `scheduler.max_consecutive_per_model` limit under `routing.strategy: fair_share_round_robin` (FR-16). |
 | R-2   | LM Studio takes a long time to load a large model into VRAM → request timeout. | `backends[].timeout_seconds` (default 600) + recommendation in README. |
 | R-3   | Mismatch between discovery model list and reality (model deleted on host between polls). | Request will get 404 from backend → standard error path + next discovery cycle corrects ModelMap. |
 | R-4   | Concurrent access to `current_model` between the worker and the router. | Worker updates `current_model` under the server's `sync.Mutex`; router reads the value under the same mutex (or `atomic.Pointer[string]`); eventual consistency is acceptable for heuristics. |
 | R-5   | Queue size is unbounded — DoS from a client. | Documented as a deliberate trade-off; mitigation tracked in [`docs/FUTURE.md`](./FUTURE.md). |
 | R-6   | Key leakage into logs during debugging. | Masking in `internal/api/auth.go`; covered by unit test. |
-| R-7   | `modernc.org/sqlite` is slower than the CGO variant under high history write load. | Async history writing (via channel), batch inserts; further mitigation tracked in [`docs/FUTURE.md`](./FUTURE.md) (item §9). |
+| R-7   | `modernc.org/sqlite` is slower than the CGO variant under high history write load. | Async history writing (via channel), batch inserts; further mitigation tracked in [`docs/FUTURE.md`](./FUTURE.md) (item 3). |
 
 ### 9.3. Closed Questions (Confirmed Decisions)
 
@@ -480,7 +500,7 @@ All questions previously marked "requires clarification" have been confirmed and
 - **U-1.** Token counting when `usage` is absent in the backend response — leave `NULL`. Fallback counting tracked in [`docs/FUTURE.md`](./FUTURE.md).
 - **U-2.** `GET /v1/models` returns models **from healthy servers only**.
 - **U-3.** `proxylm serve` when all backends are unavailable at startup — **starts** and returns `503` for requests until discovery finds at least one healthy server.
-- **U-4.** On mid-stream SSE disconnection — send `event: error` with `data: {"error": {"code": "stream_aborted", "message": "..."}}`, then `data: [DONE]` (see API.md §1.6).
+- **U-4.** On mid-stream SSE disconnection — send `event: error` with `data: {"error": {"code": "stream_aborted", "message": "..."}}`, then `data: [DONE]` (see API.md §1.8).
 - **U-5.** Exactly **one** admin key is supported (`auth.admin_key`).
 - **U-6.** On `503` the proxy returns the header `Retry-After: 1` (second).
 - **U-7.** Config and database reside **alongside the binary** (portable). If `config.yaml` is absent, the daemon creates it from the embedded template and continues startup. Path can be overridden with `--config`.
@@ -496,7 +516,7 @@ Additionally confirmed regarding scheduler behavior:
 ### Current baseline: v0.11.0
 
 Fully implements:
-- FR-1 … FR-65 (HTTP API including Anthropic Messages API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics, auto-reconnect, initial healthcheck, X-Request-Id middleware, F5 protocol, dual auth, per-backend protocol, cross-protocol translation, loaded-model probe, priority sort, distinct colors, pulsing in-flight lamp, generation tail)
+- FR-1 … FR-71 (HTTP API including Anthropic Messages API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics, auto-reconnect, initial healthcheck, X-Request-Id middleware, F5 protocol, dual auth, per-backend protocol, cross-protocol translation, loaded-model probe, priority sort, distinct colors, pulsing in-flight lamp, generation tail, perf statistics persistence, strict `/v1/models` shape validation, read-only Web UI via `proxylm web`)
 - NFR-1 … NFR-12
 - INV-1 … INV-8
 - AC-1 … AC-28

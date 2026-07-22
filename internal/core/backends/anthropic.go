@@ -2,7 +2,6 @@ package backends
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,6 +47,10 @@ func (a *Anthropic) Protocol() string { return "anthropic" }
 
 // ListModels опрашивает /v1/models с Anthropic-аутентификацией.
 // Anthropic API возвращает shape, совместимый с OpenAI: {"data":[{"id":"..."}]}.
+// {"data": []} — валидная форма (0 моделей), ошибкой не считается. Любая
+// другая форма ответа (объекты в "data" без непустого строкового "id",
+// HTML, произвольный JSON) — ошибка, оборачивающая ErrModelsShape (см.
+// parseModelsBody в backend.go).
 func (a *Anthropic) ListModels(ctx context.Context) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/v1/models", nil)
 	if err != nil {
@@ -70,27 +73,7 @@ func (a *Anthropic) ListModels(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read /v1/models body: %w", err)
 	}
-
-	var shape struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &shape); err == nil && len(shape.Data) > 0 {
-		out := make([]string, 0, len(shape.Data))
-		for _, m := range shape.Data {
-			if m.ID != "" {
-				out = append(out, m.ID)
-			}
-		}
-		return out, nil
-	}
-
-	var asStrings []string
-	if err := json.Unmarshal(body, &asStrings); err == nil {
-		return asStrings, nil
-	}
-	return nil, fmt.Errorf("parse /v1/models failed: %s", strings.TrimSpace(string(body)))
+	return parseModelsBody(body)
 }
 
 // Forward отправляет запрос на Anthropic-бэкенд с x-api-key аутентификацией.

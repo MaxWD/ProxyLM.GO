@@ -33,15 +33,16 @@ ProxyLM.GO/
 ├── go.mod
 ├── main.go                       # cobra root, версия через -ldflags
 ├── config.example.yaml           # шаблон, embedded в бинарник
-├── cmd/                          # cobra-команды (serve, tui, config, service, version)
+├── cmd/                          # cobra-команды (serve, tui, web, config, service, version)
 ├── internal/
 │   ├── config/                   # YAML + валидация + autogen
 │   ├── logging/                  # log/slog setup
 │   ├── core/                     # scheduler, router, retry, discovery, backends/
-│   ├── api/                      # net/http + chi: /v1/*, /admin/stream, /healthz, streaming
+│   ├── api/                      # net/http + chi: /v1/*, /admin/stream, /healthz, streaming (никаких Web UI роутов)
 │   ├── storage/                  # database/sql + modernc.org/sqlite + migrations//go:embed
 │   ├── ipc/                      # WS publisher (server.go) + client (для TUI)
 │   ├── tui/                      # Bubble Tea Model/Update/View
+│   ├── webui/                    # статический фронтенд (go:embed static/) для команды `proxylm web` — daemon его не отдаёт
 │   └── service/                  # kardianos/service install/lifecycle
 ├── scripts/                      # build.{ps1,sh}, build-all.ps1
 ├── docs/                         # ARCHITECTURE, SRS, API, AGENTS
@@ -66,7 +67,7 @@ ProxyLM.GO/
 - Не использовать тяжёлые HTTP-фреймворки (`gin`, `fiber`, `echo`) — `net/http` + `chi` достаточно.
 - Не блокировать HTTP-handler синхронным I/O в обход воркера (планировщик — единственная точка диспатча к бэкенду).
 - Не логировать API-ключи / admin-ключ. В логи / БД / TUI идёт только `client_name`.
-- Не реализовывать Web UI, Prometheus, native Ollama API, rate limiting, persistence очереди — это v0.2+.
+- Не реализовывать Prometheus, native Ollama API, rate limiting, persistence очереди — это v0.2+ (read-only Web UI реализован в v0.14.0, см. `docs/ARCHITECTURE.md` §19; полноценный read-write Web UI по-прежнему не делаем).
 - Не ретраить запрос после отправки клиенту первого SSE-чанка (INV-6).
 - Не использовать `panic` для штатных ошибок — только явный `error` через возврат.
 - Не использовать `time.Sleep` в тестах планировщика — синхронизация через каналы / `sync.WaitGroup`.
