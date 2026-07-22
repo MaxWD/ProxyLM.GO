@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -47,15 +48,26 @@ func (d *Discovery) InitialHealthcheck(ctx context.Context) {
 			models, err := e.backend.ListModels(pollCtx)
 			if err != nil {
 				e.server.Healthy.Store(false)
-				d.log.Warn("initial healthcheck: server unavailable",
-					"server", e.server.Name,
-					"error", err.Error())
+				if errors.Is(err, backends.ErrModelsShape) {
+					d.log.Warn("initial healthcheck: /v1/models is not OpenAI-compatible — check backends[].url",
+						"server", e.server.Name,
+						"url", e.server.URL,
+						"error", err.Error())
+				} else {
+					d.log.Warn("initial healthcheck: server unavailable",
+						"server", e.server.Name,
+						"error", err.Error())
+				}
 				return
 			}
 			e.server.Healthy.Store(true)
 			e.server.Lock()
 			e.server.Models = toModelInfos(models)
 			e.server.Unlock()
+			if len(models) == 0 {
+				d.log.Warn("server healthy but reports zero models",
+					"server", e.server.Name)
+			}
 			d.log.Info("initial healthcheck: server healthy",
 				"server", e.server.Name,
 				"models", len(models))
@@ -159,13 +171,38 @@ func (d *Discovery) pollAll(ctx context.Context) {
 func (d *Discovery) pollOne(ctx context.Context, e *discoveryEntry) {
 	models, err := e.backend.ListModels(ctx)
 	if err != nil {
+		shapeErr := errors.Is(err, backends.ErrModelsShape)
+		if len(e.explicitModels) > 0 && shapeErr {
+			// Explicit-models сервер: /v1/models ответил (endpoint жив), но не
+			// в OpenAI-форме. Модели у нас и так берутся из конфига — считаем
+			// опрос успешным для целей healthcheck, список не трогаем.
+			e.failedPolls = 0
+			wasUnhealthy := !e.server.Healthy.Load()
+			e.server.Healthy.Store(true)
+			if wasUnhealthy {
+				d.log.Debug("discovery: explicit-models server healthy despite non-OpenAI /v1/models shape",
+					"server", e.server.Name)
+				e.server.Wake()
+			}
+			d.probeLoadedModels(ctx, e)
+			return
+		}
+
 		e.failedPolls++
 		if e.failedPolls >= d.unhealthyAfterFailedPolls && e.server.Healthy.Load() {
 			e.server.Healthy.Store(false)
-			d.log.Warn("сервер помечен unhealthy",
-				"server", e.server.Name,
-				"failed_polls", e.failedPolls,
-				"error", err.Error())
+			if shapeErr {
+				d.log.Warn("сервер помечен unhealthy: /v1/models is not OpenAI-compatible — check backends[].url",
+					"server", e.server.Name,
+					"url", e.server.URL,
+					"failed_polls", e.failedPolls,
+					"error", err.Error())
+			} else {
+				d.log.Warn("сервер помечен unhealthy",
+					"server", e.server.Name,
+					"failed_polls", e.failedPolls,
+					"error", err.Error())
+			}
 		} else {
 			d.log.Debug("discovery: ошибка опроса",
 				"server", e.server.Name,
@@ -191,6 +228,9 @@ func (d *Discovery) pollOne(ctx context.Context, e *discoveryEntry) {
 	if len(e.explicitModels) > 0 {
 		// Список фиксирован в конфиге — не перезаписываем.
 		return
+	}
+	if len(models) == 0 {
+		d.log.Warn("server healthy but reports zero models", "server", e.server.Name)
 	}
 	e.server.Lock()
 	e.server.Models = toModelInfos(models)

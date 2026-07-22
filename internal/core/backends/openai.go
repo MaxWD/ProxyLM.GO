@@ -2,7 +2,6 @@ package backends
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -75,7 +74,11 @@ func (o *OpenAI) SetProbeKind(kind string) { o.probeKind = kind }
 //
 //	{"data": [{"id": "model-a", ...}, ...]}
 //
-// Для совместимости со старыми вариантами также принимается верхнеуровневый массив строк.
+// {"data": []} — валидная форма (0 моделей), ошибкой не считается. Для
+// совместимости со старыми вариантами также принимается верхнеуровневый
+// массив строк (включая пустой). Любая другая форма ответа (объекты в "data"
+// без непустого строкового "id", HTML, произвольный JSON) — ошибка,
+// оборачивающая ErrModelsShape (см. parseModelsBody в backend.go).
 func (o *OpenAI) ListModels(ctx context.Context) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/v1/models", nil)
 	if err != nil {
@@ -95,30 +98,11 @@ func (o *OpenAI) ListModels(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("GET /v1/models: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
 
-	var openAIShape struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read /v1/models body: %w", err)
 	}
-	if err := json.Unmarshal(body, &openAIShape); err == nil && len(openAIShape.Data) > 0 {
-		out := make([]string, 0, len(openAIShape.Data))
-		for _, m := range openAIShape.Data {
-			if m.ID != "" {
-				out = append(out, m.ID)
-			}
-		}
-		return out, nil
-	}
-	// Fallback: массив строк.
-	var asStrings []string
-	if err := json.Unmarshal(body, &asStrings); err == nil {
-		return asStrings, nil
-	}
-	return nil, fmt.Errorf("распарсить /v1/models не удалось: %s", strings.TrimSpace(string(body)))
+	return parseModelsBody(body)
 }
 
 // Forward отправляет запрос на upstream. Заголовки приходящие от клиента копируются
