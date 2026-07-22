@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.13.1] - 2026-06-15
+## [0.13.2] - 2026-07-22
+
+### Fixed
+
+- **Bumped Go to 1.25.12** to pick up the standard-library security fix flagged by `govulncheck`: GO-2026-5856 (`crypto/tls` — invoking Encrypted Client Hello privacy leak), reachable from `api.ListenAndServe` and the backends' HTTP calls (`ListModels`, `Forward`). No application code changed; CI derives the Go version from `go.mod`, so the single directive bump rebuilds against the patched stdlib.
 
 ### Fixed
 
@@ -208,7 +212,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.12.0...v0.12.1
