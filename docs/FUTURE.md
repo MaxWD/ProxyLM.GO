@@ -105,3 +105,19 @@ This document records features that did not make it into current releases but ar
 - `auto` — heuristic: if `/v1/models` returns ≤ 2 models, behave as `true`; if ≥ 10, as `false`; otherwise log a hint and default to `true`.
 
 **Risks:** complicates the scheduler's worker loop; needs careful test coverage so single-model behavior is unaffected.
+
+---
+
+## 10. Shadow streaming for the generation tail (priority: low/medium)
+
+**Problem:** the "generation tail" feature (hotkey `t`, introduced in v0.13.0) shows the last generated tokens only for requests that the **client** sent in streaming mode (`"stream": true`). When a client sends `stream: false`, the proxy takes the non-streaming path (`runNonStream`): it receives the entire response from the backend as a single chunk at the end, with no intermediate chunks — and the TUI displays `non-streaming request — no live tail`. This means the observability of live generation depends on client behaviour, not on backend capability. Local servers (LM Studio, Ollama, llama.cpp) fully support streaming regardless of how the client asks.
+
+**Solution:** optionally (config flag, default off), for requests that arrive as non-streaming, the proxy executes "shadow streaming": it forwards the request to the backend with `stream: true`, feeds incoming SSE chunks to `core.LiveTail` as in the current streaming path, but returns to the **client** a single assembled non-streaming JSON response at the end — not a chunked stream. The tail then works for any request regardless of client behaviour.
+
+**Risks/constraints:**
+- Behavioural change to the response path; must be strictly opt-in via config.
+- Requires correct reassembly of the full response from deltas: accumulating `content`, `tool_calls` / `function_call` fragments, aggregating `usage` (prompt/completion tokens), reconciling `finish_reason` / `stop_reason`.
+- Cross-protocol translation (OpenAI ↔ Anthropic) — both SSE formats must be handled.
+- Client cancellation mid-stream must abort the backend connection without leaking goroutines.
+- INV-6 interaction: INV-6 prohibits retry/failover after the first SSE chunk has been sent to the client. In shadow mode no chunks are forwarded to the client, so retry and failover remain permitted up to the final response assembly — this must be explicitly documented and enforced in the implementation.
+- Embeddings are not streamed by backends and are out of scope.
