@@ -12,9 +12,11 @@ import (
 // даже теоретически.
 const perfMinSamples = 3
 
-// perfMaxObservations — максимальный размер кольцевого буфера наблюдений на ключ
+// PerfMaxObservations — максимальный размер кольцевого буфера наблюдений на ключ
 // (server, model, endpoint). При превышении самое старое наблюдение дропается (M11).
-const perfMaxObservations = 1000
+// Экспортирована, чтобы internal/storage мог применять тот же cap при триме
+// persisted-таблицы perf_observations (см. FUTURE #1).
+const PerfMaxObservations = 1000
 
 // perfRidgeLambda — параметр L2-регуляризации (Tikhonov / ridge) нормальных
 // уравнений: решаем (X^T X + λI) · θ = X^T y вместо X^T X · θ = X^T y.
@@ -97,6 +99,7 @@ type perfKey struct {
 type PerfTracker struct {
 	mu     sync.RWMutex
 	bySlot map[perfKey][]perfObservation
+	sink   PerfSink
 }
 
 // NewPerfTracker создаёт пустой tracker.
@@ -122,15 +125,77 @@ func (p *PerfTracker) Record(server, model, endpoint string, in, out int, totalM
 		in = 0
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	k := perfKey{server: server, model: model, endpoint: endpoint}
 	obs := p.bySlot[k]
 	obs = append(obs, perfObservation{in: in, out: out, totalMs: totalMs, loaded: loaded})
 	// Ring-buffer: при превышении cap дропаем самое старое наблюдение (M11).
-	if len(obs) > perfMaxObservations {
-		obs = obs[len(obs)-perfMaxObservations:]
+	if len(obs) > PerfMaxObservations {
+		obs = obs[len(obs)-PerfMaxObservations:]
 	}
 	p.bySlot[k] = obs
+	// Sink читается под тем же mu, что и SetSink пишет его, — гонок нет.
+	// Сам вызов sink() делаем ПОСЛЕ разблокировки: это внешний callback
+	// (persistence writer), который не должен выполняться в критической секции.
+	sink := p.sink
+	p.mu.Unlock()
+	if sink != nil {
+		sink(server, model, endpoint, Observation{In: in, Out: out, TotalMs: totalMs, Loaded: loaded})
+	}
+}
+
+// Observation — экспортированное зеркало perfObservation для persistence API
+// (internal/storage). Отдельный тип, чтобы internal-детали регрессии
+// (perfObservation) не утекали в публичный контракт между пакетами.
+type Observation struct {
+	In      int
+	Out     int
+	TotalMs int64
+	Loaded  bool
+}
+
+// PerfSink получает копию каждого принятого (прошедшего валидацию) наблюдения
+// сразу после Record. Не должен надолго блокироваться — вызывается синхронно
+// из Record на горячем пути scheduler'а: типичная реализация — неблокирующая
+// отправка в буферизованный канал async-writer'а.
+type PerfSink func(server, model, endpoint string, o Observation)
+
+// SetSink подключает получателя наблюдений (например, storage.PerfStore.Enqueue).
+// Вызывается под mu.Lock, поэтому безопасен в любой момент (в т.ч. конкурентно
+// с Record) — гонок с чтением p.sink внутри Record нет. nil-safe.
+func (p *PerfTracker) SetSink(sink PerfSink) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.sink = sink
+	p.mu.Unlock()
+}
+
+// Load массово загружает ранее сохранённые наблюдения одного ключа (server,
+// model, endpoint) в порядке, переданном вызывающим (обычно ORDER BY id ASC —
+// т.е. от старых к новым, как читает storage.PerfStore.LoadAll). Используется
+// только при старте daemon'а для восстановления PerfTracker из SQLite —
+// поэтому, в отличие от Record, НЕ вызывает sink (иначе восстановленные точки
+// были бы записаны в БД повторно) и не валидирует значения (доверяем тому,
+// что раньше уже прошло валидацию Record при первой записи).
+// Соблюдает тот же ring-buffer cap PerfMaxObservations (хвост при превышении).
+// nil-safe.
+func (p *PerfTracker) Load(server, model, endpoint string, obs []Observation) {
+	if p == nil || len(obs) == 0 {
+		return
+	}
+	converted := make([]perfObservation, len(obs))
+	for i, o := range obs {
+		converted[i] = perfObservation{in: o.In, out: o.Out, totalMs: o.TotalMs, loaded: o.Loaded}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	k := perfKey{server: server, model: model, endpoint: endpoint}
+	all := append(p.bySlot[k], converted...)
+	if len(all) > PerfMaxObservations {
+		all = all[len(all)-PerfMaxObservations:]
+	}
+	p.bySlot[k] = all
 }
 
 // PerfStats — результат ridge-регрессии по ключу (server, model, endpoint).

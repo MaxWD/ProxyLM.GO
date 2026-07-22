@@ -156,17 +156,38 @@ func runDaemon(parent context.Context, cfgPath string) error {
 		InitialBackoff: time.Duration(cfg.Retry.InitialBackoffMs) * time.Millisecond,
 		MaxBackoff:     time.Duration(cfg.Retry.MaxBackoffMs) * time.Millisecond,
 	}
+	// 4a) Perf persistence (FUTURE #1): trim перед LoadAll, чтобы не тащить в
+	// память лишнее, если cap когда-то был больше и таблица успела разрастись
+	// (например, после downgrade/upgrade PerfMaxObservations между версиями).
+	perfStore := storage.NewPerfStore(db, log)
+	if _, err := perfStore.Trim(ctx, core.PerfMaxObservations); err != nil {
+		log.Warn("perf trim при старте завершился с ошибкой", "error", err.Error())
+	}
+
 	perf := core.NewPerfTracker()
+	if loaded, err := perfStore.LoadAll(ctx); err != nil {
+		log.Warn("не удалось восстановить perf-наблюдения из БД", "error", err.Error())
+	} else if len(loaded) > 0 {
+		points := 0
+		for k, obs := range loaded {
+			perf.Load(k.Server, k.Model, k.Endpoint, obs)
+			points += len(obs)
+		}
+		log.Info("perf-наблюдения восстановлены из БД", "keys", len(loaded), "points", points)
+	}
+	// SetSink — ПОСЛЕ Load: иначе восстановленные из БД точки были бы снова
+	// поставлены в очередь на запись обратно в ту же таблицу.
+	perf.SetSink(perfStore.Enqueue)
+	go perfStore.Run(ctx)
+
 	sched := core.NewSchedulerWithOptions(servers, router, retry, log, core.SchedulerOptions{
 		MaxConsecutivePerModel: cfg.Scheduler.MaxConsecutivePerModel,
 	})
 	sched.SetPerfTracker(perf)
 	sched.Start(ctx)
 
-	// 5) Retention (история): простой ticker под ctx.
-	if cfg.Storage.HistoryRetentionDays > 0 {
-		go runRetention(ctx, history, time.Duration(cfg.Storage.HistoryRetentionDays)*24*time.Hour, log)
-	}
+	// 5) Maintenance (retention истории + trim perf-наблюдений): простой ticker под ctx.
+	go runMaintenance(ctx, history, perfStore, time.Duration(cfg.Storage.HistoryRetentionDays)*24*time.Hour, log)
 
 	// 6) IPC Hub (WebSocket publisher) + HTTP API
 	// liveTail — общий in-memory стор «хвоста» генерации: пишется streaming-
@@ -197,7 +218,13 @@ func runDaemon(parent context.Context, cfgPath string) error {
 	return nil
 }
 
-func runRetention(ctx context.Context, history *storage.History, retention time.Duration, log interface{ Warn(string, ...any) }) {
+// runMaintenance — часовой ticker для двух периодических уборок:
+//   - history retention (requests старше retention, если retention > 0);
+//   - perf_observations trim (держим на диске не больше core.PerfMaxObservations
+//     точек на ключ (server, model, endpoint), симметрично in-memory PerfTracker).
+//
+// Обе уборки независимы: ошибка одной не блокирует другую.
+func runMaintenance(ctx context.Context, history *storage.History, perfStore *storage.PerfStore, retention time.Duration, log interface{ Warn(string, ...any) }) {
 	t := time.NewTicker(1 * time.Hour)
 	defer t.Stop()
 	for {
@@ -205,14 +232,19 @@ func runRetention(ctx context.Context, history *storage.History, retention time.
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			cutoff := time.Now().Add(-retention)
-			n, err := history.DeleteOlderThan(ctx, cutoff)
-			if err != nil {
-				log.Warn("retention sweep failed", "error", err.Error())
-				continue
+			if retention > 0 {
+				cutoff := time.Now().Add(-retention)
+				n, err := history.DeleteOlderThan(ctx, cutoff)
+				if err != nil {
+					log.Warn("retention sweep failed", "error", err.Error())
+				} else if n > 0 {
+					log.Warn("удалено старых записей истории", "count", n)
+				}
 			}
-			if n > 0 {
-				log.Warn("удалено старых записей истории", "count", n)
+			if n, err := perfStore.Trim(ctx, core.PerfMaxObservations); err != nil {
+				log.Warn("perf trim sweep failed", "error", err.Error())
+			} else if n > 0 {
+				log.Warn("удалено старых perf-наблюдений", "count", n)
 			}
 		}
 	}
