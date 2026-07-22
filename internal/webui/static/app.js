@@ -148,7 +148,14 @@
 
   // ---------- websocket ----------
 
+  // The `proxylm web` command serves config.js with window.PROXYLM =
+  // {ws: "<daemon /admin/stream URL>", token: "<optional admin key>"}.
+  // Same-origin fallback covers serving the static dir next to the daemon
+  // behind a reverse proxy.
+  function injected() { return window.PROXYLM || {}; }
+
   function wsURL() {
+    if (injected().ws) return injected().ws;
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
     return proto + "//" + location.host + "/admin/stream";
   }
@@ -477,7 +484,10 @@
     connect(key);
   });
 
+  var ignoreInjectedToken = false; // set by "forget key" so --token doesn't reconnect us
+
   $("forget").addEventListener("click", function () {
+    ignoreInjectedToken = true;
     localStorage.removeItem(STORAGE_KEY);
     if (state.retryTimer) clearTimeout(state.retryTimer);
     if (state.ws) { try { state.ws.close(); } catch (e) { /* noop */ } }
@@ -522,10 +532,10 @@
 
   // ---------- boot ----------
 
-  var saved = localStorage.getItem(STORAGE_KEY);
-  if (saved) {
+  var boot = (!ignoreInjectedToken && injected().token) || localStorage.getItem(STORAGE_KEY);
+  if (boot) {
     setPhase("live"); // optimistic: dashboard shell + "connecting" pill
-    connect(saved);
+    connect(boot);
   } else {
     setPhase("form");
   }

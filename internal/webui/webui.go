@@ -1,10 +1,11 @@
-// Package webui встраивает статические файлы Web UI (placeholder-фронтенд,
-// заменяется реальной сборкой в дальнейшем) в бинарник proxylm и отдаёт их
-// через http.Handler.
+// Package webui встраивает статические файлы Web UI в бинарник proxylm и
+// отдаёт их через http.Handler. Web UI поднимается ТОЛЬКО отдельной командой
+// `proxylm web` (см. cmd/web.go) — daemon эти файлы не сервит (FR-69).
 package webui
 
 import (
 	"embed"
+	"encoding/json"
 	"io/fs"
 	"net/http"
 )
@@ -13,9 +14,8 @@ import (
 var staticFS embed.FS
 
 // Handler возвращает http.Handler, отдающий встроенные статические файлы
-// Web UI (static/*). Предполагается монтирование под префиксом — например
-// http.StripPrefix("/ui/", Handler()) — так что путь "/" внутри этого
-// handler'а соответствует "/ui/" снаружи и отдаёт static/index.html.
+// Web UI (static/*). Команда `proxylm web` монтирует его в корень своего
+// локального HTTP-сервера: "/" отдаёт static/index.html.
 //
 // Каждый ответ получает Cache-Control: no-cache — бинарник (а вместе с ним и
 // встроенный фронтенд) обновляется при пересборке daemon'а, и закэшированный
@@ -67,4 +67,22 @@ func (w *cacheControlWriter) Write(b []byte) (int, error) {
 		w.WriteHeader(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(b)
+}
+
+// ConfigJS генерирует содержимое config.js — маленького скрипта, который
+// команда `proxylm web` отдаёт рядом со статикой. Он сообщает фронтенду
+// адрес WebSocket daemon'а (и, опционально, admin-ключ для автоподключения):
+//
+//	window.PROXYLM = {"ws":"ws://host:8080/admin/stream","token":"..."};
+//
+// Значения кодируются через encoding/json — произвольные символы в ключе
+// не могут сломать скрипт или выйти из строкового литерала.
+func ConfigJS(wsURL, token string) []byte {
+	payload := struct {
+		WS    string `json:"ws"`
+		Token string `json:"token,omitempty"`
+	}{WS: wsURL, Token: token}
+	// json.Marshal для plain-структуры со строковыми полями не ошибается.
+	b, _ := json.Marshal(payload)
+	return append(append([]byte("window.PROXYLM = "), b...), []byte(";\n")...)
 }

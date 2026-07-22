@@ -17,7 +17,6 @@ import (
 	"proxylm/internal/core"
 	"proxylm/internal/core/backends"
 	"proxylm/internal/storage"
-	"proxylm/internal/webui"
 )
 
 // Server — HTTP-сервер прокси.
@@ -84,12 +83,10 @@ func (s *Server) router() http.Handler {
 
 	r.Get("/healthz", healthzHandler(s.servers))
 
-	// /ui/* — встроенный Web UI. Без auth-middleware: статические файлы сами
-	// по себе не раскрывают ничего чувствительного, а WS-соединение, которое
-	// фронтенд открывает к /admin/stream, аутентифицируется отдельно (см.
+	// Статику Web UI daemon НЕ отдаёт: дашборд поднимается отдельной командой
+	// `proxylm web` (cmd/web.go) и подключается сюда только по WS
+	// /admin/stream — auth браузера через Sec-WebSocket-Protocol (см.
 	// internal/api/auth.go extractAdminKey и internal/ipc/server.go).
-	r.Get("/ui", http.RedirectHandler("/ui/", http.StatusMovedPermanently).ServeHTTP)
-	r.Handle("/ui/*", http.StripPrefix("/ui/", webui.Handler()))
 
 	// /v1/* — клиентский API (OpenAI + Anthropic)
 	r.Route("/v1", func(r chi.Router) {
