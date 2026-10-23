@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-10-23
+
+### Fixed
+
+- **TUI footer hints**: the main footer now lists `s Usage` and `Enter Details`, which were missing. Hints are added in priority order while they fit the terminal width (`F1 Help`, `s Usage`, `m Models`, `/ Filter`, `Enter Details`, `t Tail`, `Tab Panes`, `F5 Refresh`), with `q/F10 Quit` always shown; this replaces the fixed two-tier (<80 / ≥80 columns) footer.
+- **TUI Usage overlay hint** now reads `s/Esc/q close` (q already closed the overlay), and the F1 help notes that `q` inside an overlay closes it instead of quitting.
+
 ## [0.15.0] - 2026-10-23
 
 ### Added
@@ -249,7 +256,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.2...v0.14.0

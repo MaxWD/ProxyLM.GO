@@ -488,7 +488,7 @@ Dependencies are minimized: all core HTTP server/client code is stdlib. Third-pa
 │ Model        qwen2.5:14b           Completed 14:01:08   Output tok  82                      │
 │ Server       srv1       Status    completed (1/3)       RM  —                               │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
-   F1 Help  Tab panes  F5 Refresh  m Models  t Tail  / Filter  q/F10 Quit
+   F1 Help  s Usage  m Models  / Filter  Enter Details  t Tail  Tab Panes  F5 Refresh  q/F10 Quit
 ```
 
 Changes relative to v0.1.0:

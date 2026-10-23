@@ -367,7 +367,7 @@ func renderUsageOverlay(v usageView, termW, termH int) string {
 		visible = append(visible, "")
 	}
 
-	hints := fmt.Sprintf("s/Esc close %s 1-4 window %s %s tab %s %s scroll %s refresh %ds",
+	hints := fmt.Sprintf("s/Esc/q close %s 1-4 window %s %s tab %s %s scroll %s refresh %ds",
 		dot, dot, glyph("←/→", "</>"), dot, glyph("↑↓", "up/dn"), dot, int(usageRefreshInterval/time.Second))
 	status := "waiting for data"
 	if v.Data != nil && !v.Data.GeneratedAt.IsZero() {
