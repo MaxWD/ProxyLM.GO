@@ -10,6 +10,8 @@ const (
 	TypeStateSnapshot   MessageType = "state_snapshot"
 	TypeHello           MessageType = "hello"
 	TypeRequestSnapshot MessageType = "request_snapshot" // client→server: запрос немедленного snapshot
+	TypeStatsRequest    MessageType = "stats_request"    // client→server: запрос статистики использования
+	TypeUsageStats      MessageType = "usage_stats"      // server→client: ответ, только запросившему
 )
 
 // Envelope — внешний контейнер для всех сообщений. Конкретный payload зависит от Type.
@@ -158,6 +160,34 @@ type RequestState struct {
 	// только в памяти (в БД/логи не пишется — приватность). TUI показывает его
 	// в InfoPane по тоглу (хоткей t). Введено в v0.13.0.
 	LastTokens string `json:"last_tokens,omitempty"`
+}
+
+// StatsRequestPayload — payload client→server stats_request.
+type StatsRequestPayload struct {
+	Window string `json:"window"` // "1h" | "24h" | "7d" | "all"
+}
+
+// UsageRow — агрегат использования одной связки (client, model, server).
+type UsageRow struct {
+	Client       string    `json:"client"`
+	Model        string    `json:"model"`
+	Server       string    `json:"server"` // "" if never dispatched
+	Requests     int64     `json:"requests"`
+	Failed       int64     `json:"failed"`
+	BusyMs       int64     `json:"busy_ms"`
+	QueueMsAvg   int64     `json:"queue_ms_avg"`
+	PromptTokens int64     `json:"prompt_tokens"`
+	OutputTokens int64     `json:"output_tokens"`
+	LastUsed     time.Time `json:"last_used"`
+}
+
+// UsageStatsPayload — payload server→client usage_stats (v0.15.0).
+type UsageStatsPayload struct {
+	Window        string     `json:"window"` // effective window (invalid/empty → "24h")
+	GeneratedAt   time.Time  `json:"generated_at"`
+	RetentionDays int        `json:"retention_days"`  // storage.history_retention_days; 0 = keep forever
+	Rows          []UsageRow `json:"rows"`            // never null: empty slice
+	Error         string     `json:"error,omitempty"` // set if the DB query failed
 }
 
 // StateSnapshotPayload — полный снимок состояния (отправляется при подключении и периодически).

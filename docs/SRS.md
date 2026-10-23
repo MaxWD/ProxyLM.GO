@@ -217,6 +217,12 @@ Each requirement is a verifiable statement. The word "MUST" denotes obligation.
 | FR-70  | The `/admin/stream` WebSocket handshake MUST accept the admin key via an additional channel — an entry of the form `proxylm-token.<base64url-no-padding(admin_key)>` in the `Sec-WebSocket-Protocol` request header — alongside the existing `Authorization: Bearer <admin_key>` mechanism (FR-33). If both are present on the same request, `Authorization: Bearer` MUST take precedence. The admin key value transmitted via either channel MUST NEVER be written to logs. The server MUST negotiate `proxylm-admin` as the selected WebSocket subprotocol; the token entry MUST NEVER be selected as the negotiated subprotocol. Existing TUI clients, which authenticate only via `Authorization: Bearer` and offer no subprotocols, MUST be unaffected. |
 | FR-71  | The embedded Web UI MUST be strictly read-only: it MUST NOT provide any control that mutates daemon state (no request cancellation, no configuration edits, no server enable/disable, no admin-key management beyond storing it locally in the browser for reuse). It MUST display the same categories of live state as the TUI — server list (health, current model, queue depth, priority order, performance metric), request table with TTL-based hiding of completed/failed records per `tui.show_completed_minutes` (FR-36), and detail views for a selected server (per-model performance breakdown, FR-41) or request (including the generation tail, FR-65) — and MUST reconnect automatically with exponential backoff on WebSocket disconnection, mirroring FR-48. |
 
+### 3.15. Usage Statistics (v0.15.0)
+
+| ID     | Requirement |
+|--------|-------------|
+| FR-72  | The daemon MUST provide on-demand model usage statistics, where a "service" is an API client (`auth.api_keys[].name`, stored as `requests.client_name`). On receiving a `stats_request` frame (`window` ∈ `1h` / `24h` / `7d` / `all`; any other or empty value MUST be treated as `24h`) over `/admin/stream`, the daemon MUST reply with a `usage_stats` frame **to the requesting connection only** (it MUST NOT be part of the 1 s broadcast). The frame carries rows aggregated over finished requests (`completed` / `failed` / `cancelled`) per `(client, model, server)`: `requests`, `failed`, `busy_ms` (sum of backend run time across all attempts; for rows written before v0.15 — fallback to `completed_at - started_at`), `queue_ms_avg` (enqueue → first dispatch), `prompt_tokens`, `output_tokens`, `last_used`. Window `all` is bounded by `storage.history_retention_days` (reported as `retention_days`; `0` = unbounded). The scheduler MUST measure per-request run time and queue wait (`JobResult.RunMs` / `QueueMs`), the API layer MUST persist them to `requests.run_ms` / `requests.queue_ms` (migration `005_usage_stats.sql`). On a DB failure the frame MUST still be sent, with an empty `rows` array and a non-empty `error`. The TUI (overlay, key `s`) and the Web UI (`Usage` view) MUST present the rows as three pivots: Models, Clients, and Matrix (model × client heatmap). |
+
 ---
 
 ## 4. Non-Functional Requirements (NFR)
@@ -446,6 +452,10 @@ The baseline is considered complete when **all** items below are satisfied:
 | AC-26 | With `discovery.enabled=false` and all backends having explicit `models` lists, the daemon accepts `/v1/chat/completions` immediately after startup (no 503 indefinitely). | integration test |
 | AC-27 | Response to `POST /v1/chat/completions` includes the `X-Request-Id` header with a UUIDv4 value. | integration test |
 | AC-28 | Pressing `F5` in the TUI causes a `request_snapshot` WebSocket frame to be sent and a `state_snapshot` to be received within the next tick. | manual |
+| AC-29 | `stats_request` with `window` = `1h` / `24h` / `7d` / `all` yields a `usage_stats` frame only for the requesting WebSocket client (other connected clients receive nothing); an invalid or empty `window` yields `window: "24h"`. | integration test (`internal/ipc/server_test.go`) |
+| AC-30 | `History.UsageStats` aggregates per `(client, model, server)` over completed / failed / cancelled requests: counts, `failed`, `busy_ms` (with fallback to `completed_at - started_at` when `run_ms IS NULL`), average `queue_ms`, token sums, and the time-window filter. | unit test (`internal/storage/usage_test.go`) |
+| AC-31 | The scheduler records `JobResult.RunMs` (sum over all attempts) and `QueueMs` (enqueue → first dispatch). | unit test (`internal/core/usage_timing_test.go`) |
+| AC-32 | In the TUI, `s` opens the Usage overlay (windows `1`–`4`, tabs Models / Clients / Matrix, auto-refresh every 10 s); in the Web UI the `Live` / `Usage` switch in the topbar shows the same three views. | manual |
 
 ---
 
@@ -516,10 +526,10 @@ Additionally confirmed regarding scheduler behavior:
 ### Current baseline: v0.11.0
 
 Fully implements:
-- FR-1 … FR-71 (HTTP API including Anthropic Messages API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics, auto-reconnect, initial healthcheck, X-Request-Id middleware, F5 protocol, dual auth, per-backend protocol, cross-protocol translation, loaded-model probe, priority sort, distinct colors, pulsing in-flight lamp, generation tail, perf statistics persistence, strict `/v1/models` shape validation, read-only Web UI via `proxylm web`)
+- FR-1 … FR-72 (HTTP API including Anthropic Messages API, scheduler, routing, retry, discovery, history, TUI/IPC, CLI, performance metrics, auto-reconnect, initial healthcheck, X-Request-Id middleware, F5 protocol, dual auth, per-backend protocol, cross-protocol translation, loaded-model probe, priority sort, distinct colors, pulsing in-flight lamp, generation tail, perf statistics persistence, strict `/v1/models` shape validation, read-only Web UI via `proxylm web`)
 - NFR-1 … NFR-12
 - INV-1 … INV-8
-- AC-1 … AC-28
+- AC-1 … AC-32
 
 ### Future work
 

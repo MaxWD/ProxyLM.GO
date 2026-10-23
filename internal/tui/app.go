@@ -113,6 +113,16 @@ type model struct {
 	// Models overlay — список моделей выбранного в шапке сервера (хоткей m).
 	showModels bool
 
+	// Usage overlay — статистика использования (хоткей s). usageGen —
+	// поколение refresh-тикера: тик со старым поколением игнорируется, поэтому
+	// повторное открытие не плодит параллельные тикеры.
+	showUsage   bool
+	usageWindow string
+	usageTab    int
+	usageScroll int
+	usageData   *ipc.UsageStatsPayload
+	usageGen    int
+
 	// showTail — показывать ли «хвост» генерации (последние токены) для
 	// выбранного streaming-запроса в InfoPane. По умолчанию false (приватность —
 	// это контент ответа модели). Переключается хоткеем t.
@@ -181,6 +191,10 @@ type tickMsg time.Time
 // animTickMsg — частый тик (~160ms) для анимации пульса лампы работающих
 // серверов. Активен только пока есть in-flight сервер (см. maybeStartAnim).
 type animTickMsg time.Time
+
+// usageTickMsg — периодический refresh статистики, пока открыт Usage overlay.
+// gen сверяется с model.usageGen, чтобы устаревшие тикеры затухали.
+type usageTickMsg struct{ gen int }
 
 // refreshDoneMsg — визуальный сигнал «refresh sent» отработал (500ms).
 type refreshDoneMsg struct{}
@@ -324,6 +338,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.connStatus = connStateLive
 		m.reconnecting = false
 		return m, nil
+
+	case usageTickMsg:
+		if !m.showUsage || msg.gen != m.usageGen {
+			return m, nil // оверлей закрыт или тикер устарел
+		}
+		return m, tea.Batch(m.sendRequestStats(m.usageWindowOrDefault()), usageTick(m.usageGen))
 
 	case refreshDoneMsg:
 		// Сброс визуального flash «refreshing…» если нужен.
@@ -474,6 +494,16 @@ func (m *model) handleEnvelope(env ipc.Envelope, payload json.RawMessage) error 
 			m.ttlMinutes = h.ShowCompletedMinutes
 		}
 
+	case ipc.TypeUsageStats:
+		var us ipc.UsageStatsPayload
+		if err := json.Unmarshal(payload, &us); err != nil {
+			return fmt.Errorf("bad envelope (usage_stats): %w", err)
+		}
+		// Ответ на уже сменённое окно игнорируем (гонка при быстром 1-4).
+		if us.Window == "" || us.Window == m.usageWindowOrDefault() {
+			m.usageData = &us
+		}
+
 	case ipc.TypeStateSnapshot:
 		var snap ipc.StateSnapshotPayload
 		if err := json.Unmarshal(payload, &snap); err != nil {
@@ -537,6 +567,11 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Usage overlay перехватывает все клавиши.
+	if m.showUsage {
+		return m.handleUsageKey(msg)
+	}
+
 	// Models overlay перехватывает все клавиши кроме закрывающих (m / Esc / q).
 	if m.showModels {
 		switch {
@@ -585,6 +620,13 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showModels = true
 		}
 		return m, nil
+
+	case key.Matches(msg, keys.Usage):
+		m.showUsage = true
+		m.usageScroll = 0
+		m.usageGen++
+		w := m.usageWindowOrDefault()
+		return m, tea.Batch(m.sendRequestStats(w), usageTick(m.usageGen))
 
 	case key.Matches(msg, keys.Tail):
 		// Тогл «хвоста» генерации в InfoPane (контент ответа — по явному запросу).
@@ -650,6 +692,100 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.End):
 		return m, m.scrollEnd()
+	}
+	return m, nil
+}
+
+// sendRequestStats возвращает tea.Cmd, отправляющую daemon'у stats_request.
+// Ответ (usage_stats) придёт через обычный Recv-поток.
+func (m *model) sendRequestStats(window string) tea.Cmd {
+	return func() tea.Msg {
+		_ = m.client.RequestStats(m.ctx, window)
+		return nil
+	}
+}
+
+// usageTick планирует следующий refresh Usage overlay для поколения gen.
+func usageTick(gen int) tea.Cmd {
+	return tea.Tick(usageRefreshInterval, func(time.Time) tea.Msg {
+		return usageTickMsg{gen: gen}
+	})
+}
+
+// usageWindowOrDefault — выбранное окно или дефолтное (24h).
+func (m *model) usageWindowOrDefault() string {
+	if m.usageWindow == "" {
+		return defaultUsageWindow
+	}
+	return m.usageWindow
+}
+
+// usageView собирает входные данные для рендера Usage overlay.
+func (m *model) usageView(now time.Time) usageView {
+	idx := make(map[string]int, len(m.servers))
+	for i, s := range m.servers {
+		idx[s.Name] = i
+	}
+	return usageView{
+		Data:      m.usageData,
+		Window:    m.usageWindowOrDefault(),
+		Tab:       m.usageTab,
+		Scroll:    m.usageScroll,
+		ServerIdx: idx,
+		Now:       now,
+	}
+}
+
+// handleUsageKey обрабатывает клавиши при открытом Usage overlay.
+func (m *model) handleUsageKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	maxScroll := func() int {
+		n := usageLineCount(m.usageView(time.Now()), m.width) - usageBodyHeight(m.height)
+		if n < 0 {
+			return 0
+		}
+		return n
+	}
+	page := usageBodyHeight(m.height) - 1
+	switch {
+	case key.Matches(msg, keys.Usage), key.Matches(msg, keys.Esc), key.Matches(msg, keys.Quit):
+		m.showUsage = false
+		m.usageGen++ // гасим тикер
+	case key.Matches(msg, keys.UsageWin):
+		idx := int(msg.String()[0] - '1')
+		if idx >= 0 && idx < len(usageWindows) && usageWindows[idx] != m.usageWindowOrDefault() {
+			m.usageWindow = usageWindows[idx]
+			m.usageData = nil
+			m.usageScroll = 0
+			return m, m.sendRequestStats(m.usageWindow)
+		}
+	case key.Matches(msg, keys.TabLeft):
+		m.usageTab = (m.usageTab + usageTabCount - 1) % usageTabCount
+		m.usageScroll = 0
+	case key.Matches(msg, keys.TabRight):
+		m.usageTab = (m.usageTab + 1) % usageTabCount
+		m.usageScroll = 0
+	case key.Matches(msg, keys.Up):
+		if m.usageScroll > 0 {
+			m.usageScroll--
+		}
+	case key.Matches(msg, keys.Down):
+		if m.usageScroll < maxScroll() {
+			m.usageScroll++
+		}
+	case key.Matches(msg, keys.PageUp):
+		m.usageScroll -= page
+		if m.usageScroll < 0 {
+			m.usageScroll = 0
+		}
+	case key.Matches(msg, keys.PageDown):
+		m.usageScroll += page
+		if mx := maxScroll(); m.usageScroll > mx {
+			m.usageScroll = mx
+		}
+	case key.Matches(msg, keys.Home):
+		m.usageScroll = 0
+	case key.Matches(msg, keys.End):
+		m.usageScroll = maxScroll()
 	}
 	return m, nil
 }
@@ -965,6 +1101,11 @@ func (m *model) View() string {
 	// Help overlay — рендерится поверх всего содержимого.
 	if m.showHelp {
 		return renderHelpOverlay(m.width, m.height)
+	}
+
+	// Usage overlay — статистика использования.
+	if m.showUsage {
+		return renderUsageOverlay(m.usageView(time.Now()), m.width, m.height)
 	}
 
 	// Models overlay — список моделей выбранного сервера.

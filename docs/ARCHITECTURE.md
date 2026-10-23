@@ -328,6 +328,16 @@ Prior to v0.14.0, `PerfTracker` observations lived only in memory and were lost 
 5. **Single writer.** `PerfStore.Run` is the only goroutine that writes to `perf_observations`; it drains the channel and inserts one row at a time using a detached `context.Background()` + 5 s timeout per insert (so an in-flight write survives daemon shutdown — the same pattern as `persistRecord` in `internal/api/routes_openai.go`).
 6. **Ongoing trim.** `runMaintenance` (renamed from `runRetention` in v0.14.0) runs `PerfStore.Trim` every hour **unconditionally** — independent of whether `storage.history_retention_days > 0` — alongside the existing history-retention sweep.
 
+### Usage statistics (v0.15.0)
+
+Data flow for the per-client / per-model usage view ("service" = API client, `client_name`):
+
+1. **Measure.** The scheduler records, per job, `JobResult.RunMs` (sum of backend run time across all attempts) and `JobResult.QueueMs` (enqueue → first dispatch). Both are `NULL`/unmeasured for requests that never reached a backend.
+2. **Persist.** The API layer copies them into `RequestRecord.RunMs` / `QueueMs`, written to `requests.run_ms` / `requests.queue_ms` (migration `005_usage_stats.sql`: two nullable `INTEGER` columns plus index `idx_requests_created_model ON requests(created_at, model)`).
+3. **Aggregate.** `History.UsageStats(ctx, since)` (`internal/storage/usage.go`) groups finished requests (`completed` / `failed` / `cancelled`) by `(client_name, model, server_name)` and returns requests, failed, `busy_ms`, average `queue_ms`, token sums and `last_used`. For pre-0.15 rows (`run_ms IS NULL`) `busy_ms` falls back to `completed_at - started_at`. The time filter is two-step (coarse index-friendly string bound + exact `julianday` comparison) because `created_at` is RFC3339Nano text with trimmed trailing zeros.
+4. **Serve.** In `internal/ipc/server.go` `handleClientFrame` handles `stats_request`: `statsWindow` normalizes the window (`1h` / `24h` / `7d` / `all`, anything else → `24h`), `buildUsageStats` queries `History.UsageStats` (`all` = no lower bound, i.e. bounded by `storage.history_retention_days`, set via `Hub.SetRetentionDays`) and `sendTo` delivers `usage_stats` to the requesting connection only. It is on demand and is not part of the 1 s broadcast; a DB failure yields empty `rows` plus `error`.
+5. **Present.** The TUI (`internal/tui/usage.go`, `usage_view.go`) opens an overlay on `s`, requests stats via `Client.RequestStats` and refreshes every 10 s; the Web UI has a `Usage` view (see §19). Both pivot the rows into Models, Clients and Matrix (model × client heatmap).
+
 ## 11. Configuration
 
 See `config.example.yaml`. Sections: `proxy`, `auth`, `routing`, `retry`, `discovery`, `storage`, `tui`, `compat`, `backends`.
@@ -631,6 +641,8 @@ Sec-WebSocket-Protocol: proxylm-admin, proxylm-token.<base64url-no-padding(admin
 ### Frontend
 
 `internal/webui/static/` is a read-only dashboard mirroring the TUI: a server rack sorted by `priority` (health lamp, current model, queue depth, `SLOW` flag, perf metric), a request table honoring `tui.show_completed_minutes` for TTL-based hiding of completed/failed rows, and detail panes for the selected server (including the per-model perf table with ±CI) or request (including the generation tail). The admin key is entered once through a small auth form and cached in the browser's `localStorage`; the page reconnects to `/admin/stream` automatically with exponential backoff on disconnection, mirroring the TUI's own reconnect logic (FR-48). There is no server-rendering or build step — plain HTML/CSS/JS, matching the project's minimal-dependencies philosophy (§14).
+
+The topbar has a `Live` | `Usage` switch (v0.15.0). The `Usage` view sends `stats_request` over the same WebSocket (window selector 1h / 24h / 7d / all, periodic refresh) and renders the `usage_stats` reply as three pivots — Models, Clients, Matrix (model × client heatmap). It is still read-only: the request only reads aggregates from SQLite (§10, "Usage statistics").
 
 ## 20. Open Questions / Deferred
 

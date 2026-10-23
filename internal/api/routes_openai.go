@@ -140,6 +140,8 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec.OutputTokens = res.OutputTokens
 	rec.Attempt = res.Attempt
 	rec.ModelReloaded = res.ModelReloaded
+	rec.RunMs = res.RunMs
+	rec.QueueMs = res.QueueMs
 
 	if err != nil {
 		rec.Status = core.StatusFailed

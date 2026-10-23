@@ -37,6 +37,14 @@ type Job struct {
 	// при failover'е: сервер, на котором Job уже падал, помечается, чтобы pool
 	// не отдал ему этот же Job повторно. Доступ — только под локом JobPool.
 	visited map[string]bool
+
+	// Учёт длительностей для статистики использования (v0.15.0). Пишутся
+	// только worker'ом в dispatch (до отправки в j.done) и читаются Submit'ом
+	// после получения из j.done — happens-before обеспечивает канал.
+	submittedAt time.Time // момент Submit
+	dispatched  bool      // true после первого dispatch на бэкенд
+	queueMs     int64     // submit -> первый dispatch
+	runMs       int64     // сумма времени Run по всем попыткам
 }
 
 // JobResult — итог одной попытки выполнения Job на одном сервере.
@@ -63,6 +71,11 @@ type JobResult struct {
 	// его не видит и не должен трогать). Используется регрессией perf для
 	// отделения «холодных» вызовов (с временем загрузки модели) от «горячих».
 	ModelReloaded bool
+	// RunMs — суммарное время выполнения Run на бэкендах по ВСЕМ попыткам Job
+	// (мс). QueueMs — время от Submit до первого dispatch на бэкенд (0, если
+	// Job так и не был отдан бэкенду). Введено в v0.15.0.
+	RunMs   int64
+	QueueMs int64
 }
 
 // Scheduler — оркестратор: per-server worker'ы + интеграция с router/retry.
@@ -92,6 +105,16 @@ type Scheduler struct {
 	// perf — скользящее окно tok/s и TTFT по парам (server, model).
 	// nil-safe: если не передан, Record просто игнорируется.
 	perf *PerfTracker
+
+	// now — источник времени для замеров queue/run (подменяется в тестах).
+	now func() time.Time
+}
+
+func (s *Scheduler) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // ErrSchedulerStopped — попытка Submit после остановки планировщика.
@@ -176,10 +199,21 @@ func (s *Scheduler) Submit(ctx context.Context, j *Job) (JobResult, error) {
 	if j == nil || j.Run == nil {
 		return JobResult{}, fmt.Errorf("scheduler: пустой Job/Run")
 	}
+	j.submittedAt = s.clock()
+	j.dispatched, j.queueMs, j.runMs = false, 0, 0
+	var (
+		res JobResult
+		err error
+	)
 	if s.pool != nil {
-		return s.submitDeferred(ctx, j)
+		res, err = s.submitDeferred(ctx, j)
+	} else {
+		res, err = s.submitPush(ctx, j)
 	}
-	return s.submitPush(ctx, j)
+	// Результаты, не прошедшие через dispatch (cancel из очереди, failServerQueue,
+	// ErrNoServer), не несут длительностей — проставляем накопленные значения.
+	res.RunMs, res.QueueMs = j.runMs, j.queueMs
+	return res, err
 }
 
 // submitPush — классический режим: router.Pick → srv.Queue → ждём j.done.
@@ -512,7 +546,16 @@ func (s *Scheduler) dispatch(ctx context.Context, srv *ServerInfo, j *Job) {
 	defer srv.InFlight.Store(false)
 
 	runStart := time.Now()
+	if !j.dispatched {
+		j.dispatched = true
+		if !j.submittedAt.IsZero() {
+			j.queueMs = s.clock().Sub(j.submittedAt).Milliseconds()
+		}
+	}
+	runClockStart := s.clock()
 	res := s.runWithPanicGuard(ctx, srv, j)
+	j.runMs += s.clock().Sub(runClockStart).Milliseconds()
+	res.RunMs, res.QueueMs = j.runMs, j.queueMs
 	res.Server = srv.Name
 	res.ModelReloaded = reloaded
 	if res.Err != nil && !res.ResponseStarted {

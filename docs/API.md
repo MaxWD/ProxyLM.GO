@@ -599,6 +599,53 @@ Tracks a single `(model, endpoint)` bucket on this server. Endpoint became part 
 | `error_message` | string | last error message for `failed` requests; omitted if empty |
 | `last_tokens` | string | generation tail: the last ~160 generated characters for an in-flight **streaming** request. Present only for `status=running` + `stream=true`; kept in memory only (never persisted to the database or logs); omitted if empty (v0.13.0) |
 
+#### `usage_stats`
+
+Sent **only to the connection that sent a `stats_request`** (see §2.3); it is never part of the 1 s `state_snapshot` broadcast (v0.15.0). Rows are aggregated over finished requests (`completed` / `failed` / `cancelled`) per `(client, model, server)`.
+
+```json
+{
+  "type": "usage_stats",
+  "time": "2026-10-23T10:00:00Z",
+  "payload": {
+    "window": "24h",
+    "generated_at": "2026-10-23T10:00:00Z",
+    "retention_days": 30,
+    "rows": [
+      {
+        "client": "cursor-ide",
+        "model": "qwen2.5-coder-7b",
+        "server": "lmstudio-1",
+        "requests": 42,
+        "failed": 1,
+        "busy_ms": 183400,
+        "queue_ms_avg": 850,
+        "prompt_tokens": 51200,
+        "output_tokens": 9800,
+        "last_used": "2026-10-23T09:58:12Z"
+      }
+    ]
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `window` | string | effective window: `1h` / `24h` / `7d` / `all` (an invalid or empty requested value becomes `24h`) |
+| `generated_at` | string (RFC3339) | when the aggregate was computed |
+| `retention_days` | int | `storage.history_retention_days`; bounds window `all`; `0` = keep forever |
+| `rows` | array | never `null` (empty array if no data) |
+| `rows[].client` | string | client name (`auth.api_keys[].name`); empty if unknown |
+| `rows[].model` | string | requested model |
+| `rows[].server` | string | server that handled it; empty if never dispatched |
+| `rows[].requests` | int | finished requests (completed + failed + cancelled) |
+| `rows[].failed` | int | of which `failed` |
+| `rows[].busy_ms` | int | sum of backend run time across all attempts; for pre-0.15 rows falls back to `completed_at - started_at` |
+| `rows[].queue_ms_avg` | int | average wait from enqueue to first dispatch (rows where measured) |
+| `rows[].prompt_tokens` / `rows[].output_tokens` | int | token sums |
+| `rows[].last_used` | string (RFC3339) | most recent request creation time in the group |
+| `error` | string | present only if the DB query failed; `rows` is then empty |
+
 ### 2.3. Client → server messages
 
 #### `request_snapshot`
@@ -610,6 +657,16 @@ The TUI sends this frame to request an immediate snapshot from the daemon. Used 
 ```
 
 No `payload` is required. The daemon responds with a regular `state_snapshot` message (same as on connect).
+
+#### `stats_request`
+
+Requests a usage aggregate (v0.15.0). The daemon replies with a `usage_stats` message to this connection only.
+
+```json
+{"type": "stats_request", "time": "2026-10-23T10:00:00Z", "payload": {"window": "7d"}}
+```
+
+`window` is one of `1h`, `24h`, `7d`, `all`. Any other or missing value is treated as `24h` (reflected in the response `window`). Window `all` covers the whole history, bounded by `storage.history_retention_days`.
 
 ### 2.4. Connection close
 

@@ -328,6 +328,16 @@ CREATE INDEX idx_perf_obs_key ON perf_observations(server, model, endpoint, id);
 5. **Единственный writer.** `PerfStore.Run` — единственная горутина, пишущая в `perf_observations`; она вычитывает канал и вставляет по одной строке за раз, используя detached `context.Background()` + таймаут 5с на вставку (чтобы начатая запись пережила shutdown daemon'а — тот же паттерн, что и `persistRecord` в `internal/api/routes_openai.go`).
 6. **Периодический trim.** `runMaintenance` (переименован из `runRetention` в v0.14.0) запускает `PerfStore.Trim` раз в час **безусловно** — независимо от того, `storage.history_retention_days > 0` или нет — наряду с существующей уборкой retention истории.
 
+### Статистика использования (v0.15.0)
+
+Поток данных для среза использования по клиентам / моделям («сервис» = API-клиент, `client_name`):
+
+1. **Измерение.** Планировщик для каждого job записывает `JobResult.RunMs` (сумма времени выполнения на бэкенде по всем попыткам) и `JobResult.QueueMs` (постановка в очередь → первый dispatch). Для запросов, не дошедших до бэкенда, значения `NULL`/не измерены.
+2. **Сохранение.** API-слой копирует их в `RequestRecord.RunMs` / `QueueMs`, которые пишутся в `requests.run_ms` / `requests.queue_ms` (миграция `005_usage_stats.sql`: две nullable `INTEGER`-колонки и индекс `idx_requests_created_model ON requests(created_at, model)`).
+3. **Агрегация.** `History.UsageStats(ctx, since)` (`internal/storage/usage.go`) группирует завершённые запросы (`completed` / `failed` / `cancelled`) по `(client_name, model, server_name)` и возвращает requests, failed, `busy_ms`, средний `queue_ms`, суммы токенов и `last_used`. Для строк до v0.15 (`run_ms IS NULL`) `busy_ms` берётся как `completed_at - started_at`. Фильтр по времени двухступенчатый (грубая строковая граница, использующая индекс, + точное сравнение `julianday`), так как `created_at` — RFC3339Nano-текст с обрезанными хвостовыми нулями.
+4. **Выдача.** В `internal/ipc/server.go` `handleClientFrame` обрабатывает `stats_request`: `statsWindow` нормализует окно (`1h` / `24h` / `7d` / `all`, всё остальное → `24h`), `buildUsageStats` запрашивает `History.UsageStats` (`all` = без нижней границы, т.е. ограничено `storage.history_retention_days`, задаётся через `Hub.SetRetentionDays`), а `sendTo` отправляет `usage_stats` только запросившему соединению. Работает по запросу и не входит в секундный broadcast; при ошибке БД приходит пустой `rows` и `error`.
+5. **Отображение.** TUI (`internal/tui/usage.go`, `usage_view.go`) открывает оверлей по `s`, запрашивает статистику через `Client.RequestStats` и обновляет её каждые 10 с; в Web UI есть вид `Usage` (см. §19). Оба раскладывают строки на срезы Models, Clients и Matrix (тепловая карта модель × клиент).
+
 ## 11. Конфиг
 
 См. `config.example.yaml`. Секции: `proxy`, `auth`, `routing`, `retry`, `discovery`, `storage`, `tui`, `compat`, `backends`.
@@ -631,6 +641,8 @@ Sec-WebSocket-Protocol: proxylm-admin, proxylm-token.<base64url-no-padding(admin
 ### Фронтенд
 
 `internal/webui/static/` — read-only дашборд, зеркалирующий TUI: стойка серверов, отсортированная по `priority` (лампа здоровья, текущая модель, глубина очереди, флаг `SLOW`, perf-метрика), таблица запросов, соблюдающая `tui.show_completed_minutes` для TTL-скрытия завершённых/упавших строк, и детальные панели для выбранного сервера (включая per-model perf-таблицу с ±CI) или запроса (включая хвост генерации). Admin-ключ вводится один раз через небольшую auth-форму и кэшируется в `localStorage` браузера; страница автоматически переподключается к `/admin/stream` с экспоненциальным backoff при разрыве, зеркалируя собственную reconnect-логику TUI (FR-48). Никакого server-rendering или build-шага — обычные HTML/CSS/JS, в духе минимализма зависимостей проекта (§14).
+
+В topbar есть переключатель `Live` | `Usage` (v0.15.0). Вид `Usage` отправляет `stats_request` по тому же WebSocket (выбор окна 1h / 24h / 7d / all, периодическое обновление) и показывает ответ `usage_stats` тремя срезами — Models, Clients, Matrix (тепловая карта модель × клиент). Он по-прежнему read-only: запрос лишь читает агрегаты из SQLite (§10, «Статистика использования»).
 
 ## 20. Нерешённые вопросы / отложено на будущее
 

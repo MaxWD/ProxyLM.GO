@@ -194,6 +194,7 @@ func runDaemon(parent context.Context, cfgPath string) error {
 	// обработчиком, читается Hub'ом при сборке snapshot'а. В БД/логи не попадает.
 	liveTail := core.NewLiveTail()
 	hub := ipc.NewHub(daemonVersion, servers, history, 1*time.Second, cfg.Retry.MaxAttempts, cfg.TUI.ShowCompletedMinutes, perf, liveTail, log)
+	hub.SetRetentionDays(cfg.Storage.HistoryRetentionDays)
 	go hub.Run(ctx)
 
 	auth := api.NewAuthRegistry(cfg.Auth)
