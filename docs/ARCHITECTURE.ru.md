@@ -439,7 +439,7 @@ ProxyLM.GO/
 
 | Слой           | Библиотека                                    |
 |----------------|-----------------------------------------------|
-| Язык           | Go 1.25+ (минимум диктует `modernc.org/sqlite`) |
+| Язык           | Go 1.26+ (1.25 — EOL; security-фиксы stdlib только в 1.26.x) |
 | HTTP server    | `net/http` (stdlib, Go 1.22 mux) + `github.com/go-chi/chi/v5` |
 | HTTP client    | `net/http` (stdlib) + per-backend `*http.Client` |
 | WebSocket      | `github.com/coder/websocket`                  |
