@@ -599,6 +599,53 @@ Sec-WebSocket-Protocol: proxylm-admin, proxylm-token.<base64url-no-padding(admin
 | `error_message` | string | последнее сообщение об ошибке для `failed`-запросов; опускается если пусто |
 | `last_tokens` | string | «хвост» генерации: последние ~160 сгенерированных символов для выполняющегося **streaming**-запроса. Присутствует только при `status=running` + `stream=true`; хранится только в памяти (в БД и логи не пишется); опускается если пусто (v0.13.0) |
 
+#### `usage_stats`
+
+Отправляется **только соединению, приславшему `stats_request`** (см. §2.3); никогда не входит в секундный broadcast `state_snapshot` (v0.15.0). Строки агрегируются по завершённым запросам (`completed` / `failed` / `cancelled`) для каждой тройки `(client, model, server)`.
+
+```json
+{
+  "type": "usage_stats",
+  "time": "2026-10-23T10:00:00Z",
+  "payload": {
+    "window": "24h",
+    "generated_at": "2026-10-23T10:00:00Z",
+    "retention_days": 30,
+    "rows": [
+      {
+        "client": "cursor-ide",
+        "model": "qwen2.5-coder-7b",
+        "server": "lmstudio-1",
+        "requests": 42,
+        "failed": 1,
+        "busy_ms": 183400,
+        "queue_ms_avg": 850,
+        "prompt_tokens": 51200,
+        "output_tokens": 9800,
+        "last_used": "2026-10-23T09:58:12Z"
+      }
+    ]
+  }
+}
+```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `window` | string | фактическое окно: `1h` / `24h` / `7d` / `all` (неверное или пустое запрошенное значение превращается в `24h`) |
+| `generated_at` | string (RFC3339) | момент расчёта агрегата |
+| `retention_days` | int | `storage.history_retention_days`; ограничивает окно `all`; `0` = хранить вечно |
+| `rows` | array | никогда не `null` (пустой массив, если данных нет) |
+| `rows[].client` | string | имя клиента (`auth.api_keys[].name`); пусто, если неизвестен |
+| `rows[].model` | string | запрошенная модель |
+| `rows[].server` | string | сервер, обработавший запрос; пусто, если не доходил до dispatch |
+| `rows[].requests` | int | завершённые запросы (completed + failed + cancelled) |
+| `rows[].failed` | int | из них `failed` |
+| `rows[].busy_ms` | int | сумма времени выполнения на бэкенде по всем попыткам; для строк до v0.15 — fallback на `completed_at - started_at` |
+| `rows[].queue_ms_avg` | int | среднее ожидание от постановки в очередь до первого dispatch (по строкам, где измерено) |
+| `rows[].prompt_tokens` / `rows[].output_tokens` | int | суммы токенов |
+| `rows[].last_used` | string (RFC3339) | время создания самого свежего запроса в группе |
+| `error` | string | присутствует только при ошибке запроса к БД; `rows` при этом пуст |
+
 ### 2.3. Сообщения клиент → серверу
 
 #### `request_snapshot`
@@ -610,6 +657,16 @@ TUI отправляет этот фрейм, чтобы потребовать 
 ```
 
 Payload не требуется. Daemon отвечает обычным `state_snapshot` (тем же путём, что и при connect).
+
+#### `stats_request`
+
+Запрашивает агрегат использования (v0.15.0). Daemon отвечает сообщением `usage_stats` только этому соединению.
+
+```json
+{"type": "stats_request", "time": "2026-10-23T10:00:00Z", "payload": {"window": "7d"}}
+```
+
+`window` — одно из `1h`, `24h`, `7d`, `all`. Любое другое или отсутствующее значение трактуется как `24h` (отражается в поле `window` ответа). Окно `all` охватывает всю историю, ограниченную `storage.history_retention_days`.
 
 ### 2.4. Закрытие соединения
 

@@ -29,6 +29,10 @@
     <div class="wordmark">Proxy<span class="wordmark-lm">LM</span>
       <span id="daemon-version" class="version"></span>
     </div>
+    <div class="seg" id="view-switch" role="group" aria-label="View">
+      <button type="button" data-view="live" aria-pressed="true">Live</button>
+      <button type="button" data-view="usage" aria-pressed="false">Usage</button>
+    </div>
     <div id="counters" class="counters" role="status"></div>
     <div class="topbar-right">
       <span id="conn" class="conn" data-state="connecting">connecting</span>
@@ -36,7 +40,28 @@
     </div>
   </header>
 
-  <main class="layout">
+  <main id="usage-view" class="usage" hidden>
+    <div class="usage-bar">
+      <div class="seg" id="u-window" role="group" aria-label="Time window">
+        <button type="button" data-window="1h" aria-pressed="false">1h</button>
+        <button type="button" data-window="24h" aria-pressed="true">24h</button>
+        <button type="button" data-window="7d" aria-pressed="false">7d</button>
+        <button type="button" data-window="all" aria-pressed="false">all</button>
+      </div>
+      <div class="seg" id="u-tabs" role="group" aria-label="Usage breakdown">
+        <button type="button" data-tab="models" aria-pressed="true">Models</button>
+        <button type="button" data-tab="clients" aria-pressed="false">Clients</button>
+        <button type="button" data-tab="matrix" aria-pressed="false">Matrix</button>
+      </div>
+      <span id="u-updated" class="u-note"></span>
+      <span id="u-retention" class="u-note" hidden></span>
+    </div>
+    <p id="u-error" class="u-error" hidden></p>
+    <div id="u-body" class="u-scroll"></div>
+    <p id="u-empty" class="empty" hidden></p>
+  </main>
+
+  <main id="live-view" class="layout">
     <aside class="rack-pane">
       <h2 class="eyebrow">Servers</h2>
       <div id="rack" class="rack" role="list"></div>

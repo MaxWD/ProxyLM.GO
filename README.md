@@ -159,7 +159,7 @@ The proxy accepts both the OpenAI-style API (`/v1/chat/completions`, `/v1/messag
 ./proxylm tui --connect ws://localhost:8080 --token <admin_key>
 ```
 
-Hotkeys: `F1` help, `F5` refresh snapshot, `/` search, `Tab` cycle panes (Header / Requests / Info), `F10` or `q` quit. Reconnects automatically on disconnection (exponential backoff, 1 s → 30 s cap).
+Hotkeys: `F1` help, `F5` refresh snapshot, `/` search, `Tab` cycle panes (Header / Requests / Info), `F10` or `q` quit. Reconnects automatically on disconnection (exponential backoff, 1 s → 30 s cap). `s` opens the **Usage** overlay — per-client / per-model request counts, busy time, queue wait and tokens over `1h` / `24h` / `7d` / all (keys `1`–`4`; tabs Models / Clients / Matrix via `←`/`→`).
 
 On Windows `cmd.exe`, Unicode glyphs may not render; set `PROXYLM_NO_UNICODE=1` for an ASCII fallback.
 
@@ -169,7 +169,7 @@ On Windows `cmd.exe`, Unicode glyphs may not render; set `PROXYLM_NO_UNICODE=1` 
 ./proxylm web --connect ws://localhost:8080 --token <admin_key>
 ```
 
-Runs a small local HTTP server and opens the default browser (unless `--no-open`). It is a **strictly read-only** mirror of the TUI — the same server rack, request table, and detail panes, live over the same `/admin/stream` WebSocket — with no controls that change daemon state, and it reconnects automatically on disconnection. The daemon itself serves no browser UI; `proxylm web` is a separate local client, analogous to `proxylm tui`.
+Runs a small local HTTP server and opens the default browser (unless `--no-open`). It is a **strictly read-only** mirror of the TUI — the same server rack, request table, and detail panes, live over the same `/admin/stream` WebSocket — with no controls that change daemon state, and it reconnects automatically on disconnection. The daemon itself serves no browser UI; `proxylm web` is a separate local client, analogous to `proxylm tui`. A **Usage** tab in the topbar (next to **Live**) shows the same per-client / per-model usage statistics.
 
 ## Build from Source
 

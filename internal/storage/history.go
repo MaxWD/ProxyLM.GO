@@ -25,8 +25,9 @@ func (h *History) Insert(ctx context.Context, r *core.RequestRecord) error {
         INSERT INTO requests (
             id, client_name, model, endpoint, stream, server_name, status,
             http_status, prompt_tokens, output_tokens, attempt, error_message,
-            model_reloaded, last_failed_server, created_at, started_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            model_reloaded, last_failed_server, created_at, started_at, completed_at,
+            run_ms, queue_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             client_name        = excluded.client_name,
             model              = excluded.model,
@@ -42,13 +43,16 @@ func (h *History) Insert(ctx context.Context, r *core.RequestRecord) error {
             model_reloaded     = excluded.model_reloaded,
             last_failed_server = excluded.last_failed_server,
             started_at         = excluded.started_at,
-            completed_at       = excluded.completed_at`
+            completed_at       = excluded.completed_at,
+            run_ms             = excluded.run_ms,
+            queue_ms           = excluded.queue_ms`
 	_, err := h.db.ExecContext(ctx, q,
 		r.ID, r.ClientName, r.Model, r.Endpoint, boolToInt(r.Stream),
 		r.ServerName, string(r.Status), r.HTTPStatus,
 		r.PromptTokens, r.OutputTokens, r.Attempt, r.ErrorMessage,
 		boolToInt(r.ModelReloaded), r.LastFailedServer,
 		formatTime(r.CreatedAt), formatTime(r.StartedAt), formatTime(r.CompletedAt),
+		nullIfZero(r.RunMs), nullIfZero(r.QueueMs),
 	)
 	if err != nil {
 		return fmt.Errorf("history insert %s: %w", r.ID, err)
@@ -65,7 +69,8 @@ func (h *History) List(ctx context.Context, limit int) ([]*core.RequestRecord, e
 	const q = `
         SELECT id, client_name, model, endpoint, stream, server_name, status,
                http_status, prompt_tokens, output_tokens, attempt, error_message,
-               model_reloaded, last_failed_server, created_at, started_at, completed_at
+               model_reloaded, last_failed_server, created_at, started_at, completed_at,
+               run_ms, queue_ms
         FROM requests
         ORDER BY created_at DESC
         LIMIT ?`
@@ -124,14 +129,18 @@ func scanRecord(rows *sql.Rows) (*core.RequestRecord, error) {
 		streamI, reloadedI                int
 		status                            string
 		createdAt, startedAt, completedAt string
+		runMs, queueMs                    sql.NullInt64
 	)
 	if err := rows.Scan(
 		&r.ID, &r.ClientName, &r.Model, &r.Endpoint, &streamI, &r.ServerName, &status,
 		&r.HTTPStatus, &r.PromptTokens, &r.OutputTokens, &r.Attempt, &r.ErrorMessage,
 		&reloadedI, &r.LastFailedServer, &createdAt, &startedAt, &completedAt,
+		&runMs, &queueMs,
 	); err != nil {
 		return nil, fmt.Errorf("scan request: %w", err)
 	}
+	r.RunMs = runMs.Int64
+	r.QueueMs = queueMs.Int64
 	r.Stream = streamI != 0
 	r.ModelReloaded = reloadedI != 0
 	r.Status = core.Status(status)
@@ -139,6 +148,14 @@ func scanRecord(rows *sql.Rows) (*core.RequestRecord, error) {
 	r.StartedAt = parseTime(startedAt)
 	r.CompletedAt = parseTime(completedAt)
 	return &r, nil
+}
+
+// nullIfZero возвращает nil для 0 — «не измерено» хранится как NULL.
+func nullIfZero(v int64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 func boolToInt(b bool) int {

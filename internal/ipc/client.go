@@ -171,6 +171,21 @@ func (c *Client) RequestSnapshot(ctx context.Context) error {
 	return nil
 }
 
+// RequestStats запрашивает у daemon'а статистику использования моделей за
+// окно ("1h" | "24h" | "7d" | "all"). Ответ — фрейм type=usage_stats через
+// обычный поток Recv, доставляется только этому клиенту.
+func (c *Client) RequestStats(ctx context.Context, window string) error {
+	env := Envelope{Type: TypeStatsRequest, Payload: StatsRequestPayload{Window: window}}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("ipc: marshal stats_request: %w", err)
+	}
+	if err := c.conn.Write(ctx, websocket.MessageText, data); err != nil {
+		return fmt.Errorf("ipc: send stats_request: %w", err)
+	}
+	return nil
+}
+
 // IsAuthError возвращает true если err содержит признак ошибки аутентификации (401/403).
 func IsAuthError(err error) bool {
 	if err == nil {

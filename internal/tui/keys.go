@@ -8,6 +8,10 @@ type keyMap struct {
 	Refresh  key.Binding
 	Help     key.Binding
 	Models   key.Binding
+	Usage    key.Binding
+	UsageWin key.Binding
+	TabLeft  key.Binding
+	TabRight key.Binding
 	Tail     key.Binding
 	Filter   key.Binding
 	Tab      key.Binding
@@ -37,6 +41,22 @@ var keys = keyMap{
 	Models: key.NewBinding(
 		key.WithKeys("m"),
 		key.WithHelp("m", "models on selected server"),
+	),
+	Usage: key.NewBinding(
+		key.WithKeys("s"),
+		key.WithHelp("s", "usage statistics"),
+	),
+	UsageWin: key.NewBinding(
+		key.WithKeys("1", "2", "3", "4"),
+		key.WithHelp("1-4", "usage window (1h / 24h / 7d / all)"),
+	),
+	TabLeft: key.NewBinding(
+		key.WithKeys("left", "h"),
+		key.WithHelp("←/h", "previous tab"),
+	),
+	TabRight: key.NewBinding(
+		key.WithKeys("right", "l"),
+		key.WithHelp("→/l", "next tab"),
 	),
 	Tail: key.NewBinding(
 		key.WithKeys("t"),

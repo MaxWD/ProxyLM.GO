@@ -40,9 +40,14 @@ type RequestRecord struct {
 	// запроса упала. Пустая строка — неудачных попыток ещё не было. Поле
 	// заполняется api/routes_openai.go в фазе "pending-retry" Run-замыкания.
 	LastFailedServer string
-	CreatedAt        time.Time
-	StartedAt        time.Time // момент захвата воркером (выход из очереди)
-	CompletedAt      time.Time
+	// RunMs — суммарное время выполнения на бэкендах по всем попыткам (мс);
+	// QueueMs — ожидание в очереди до первого dispatch (мс). Источник —
+	// JobResult; 0 для не дошедших до бэкенда запросов (v0.15.0).
+	RunMs       int64
+	QueueMs     int64
+	CreatedAt   time.Time
+	StartedAt   time.Time // момент захвата воркером (выход из очереди)
+	CompletedAt time.Time
 }
 
 // ModelInfo — описание модели на конкретном бэкенде (источник: discovery или явный список в конфиге).

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-23
+
+### Added
+
+- **Model usage statistics** (a "service" is an API client, `auth.api_keys[].name`). The daemon aggregates finished requests (completed / failed / cancelled) per `(client, model, server)` over a window (`1h` / `24h` / `7d` / `all`): requests, failed, `busy_ms` (sum of backend run time across all attempts; pre-0.15 rows fall back to `completed_at - started_at`), average `queue_ms` (enqueue → first dispatch), prompt/output tokens, `last_used`. Served on demand over `/admin/stream`: new client frame `stats_request` (`{"window": "..."}`, invalid/empty → `24h`) answered by a `usage_stats` frame to the requester only — not part of the 1 s broadcast; the `all` window is bounded by `storage.history_retention_days` (`retention_days` in the reply; a DB failure yields empty `rows` plus `error`). New `History.UsageStats` (`internal/storage/usage.go`), `Hub.SetRetentionDays`, `ipc.Client.RequestStats`.
+- **TUI Usage overlay** (key `s`): windows `1`–`4` (1h / 24h / 7d / all), tabs Models / Clients / Matrix (model × client heatmap) via `←`/`→` or `h`/`l`, scrolling keys, auto-refresh every 10 s.
+- **Web UI Usage view**: `Live` | `Usage` switch in the topbar with the same Models / Clients / Matrix pivots (still read-only).
+
+### Changed
+
+- `core.JobResult` gains `RunMs` (backend run time summed over attempts) and `QueueMs` (enqueue → first dispatch); `storage.RequestRecord` persists them.
+- Migration `005_usage_stats.sql`: nullable `requests.run_ms` / `requests.queue_ms` columns and index `idx_requests_created_model (created_at, model)`. Backward compatible; existing rows stay `NULL`.
+
 ## [0.14.1] - 2026-10-23
 
 ### Fixed
@@ -236,7 +249,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.2...v0.14.0
 [0.13.2]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.1...v0.13.2

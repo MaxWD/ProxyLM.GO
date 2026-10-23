@@ -27,6 +27,7 @@ type Hub struct {
 	showCompletedMinutes int
 	perf                 *core.PerfTracker
 	liveTail             *core.LiveTail
+	retentionDays        int
 
 	mu      sync.RWMutex
 	clients map[*hubClient]struct{}
@@ -73,6 +74,10 @@ func NewHub(version string, servers []*core.ServerInfo, history *storage.History
 		clients:              make(map[*hubClient]struct{}),
 	}
 }
+
+// SetRetentionDays задаёт storage.history_retention_days, который отдаётся в
+// usage_stats (0 = история хранится бесконечно). Вызывать до Run/Handler.
+func (h *Hub) SetRetentionDays(days int) { h.retentionDays = days }
 
 // Run запускает периодический snapshot broadcaster. Блокирует до отмены ctx.
 func (h *Hub) Run(ctx context.Context) {
@@ -331,8 +336,13 @@ func (h *Hub) closeAll() {
 }
 
 // handleClientFrame разбирает входящий фрейм от TUI-клиента и реагирует на него.
-// Сейчас поддерживается только TypeRequestSnapshot (F5): отправляет немедленный
-// snapshot именно этому клиенту через c.out (без broadcast).
+// Поддерживаются:
+//   - TypeRequestSnapshot (F5): немедленный snapshot именно этому клиенту
+//     через c.out (без broadcast);
+//   - TypeStatsRequest: агрегат использования моделей за окно (1h|24h|7d|all),
+//     ответ TypeUsageStats уходит только запросившему клиенту и не входит в
+//     секундный broadcast.
+//
 // Неизвестные типы игнорируются с debug-логом.
 func (h *Hub) handleClientFrame(ctx context.Context, c *hubClient, data []byte) {
 	var env Envelope
@@ -347,9 +357,62 @@ func (h *Hub) handleClientFrame(ctx context.Context, c *hubClient, data []byte) 
 		// и мы не тратим ресурсы на формирование snapshot'а в никуда.
 		snap := h.buildSnapshot(ctx)
 		h.sendTo(c, snap)
+	case TypeStatsRequest:
+		h.sendTo(c, h.buildUsageStats(ctx, statsWindow(env.Payload)))
 	default:
 		h.log.Debug("ipc: unknown frame type from client", "type", env.Type)
 	}
+}
+
+// statsWindow извлекает window из произвольного payload (после json.Unmarshal в
+// any это map[string]any) и нормализует его: неизвестное/пустое → "24h".
+func statsWindow(payload any) string {
+	var p StatsRequestPayload
+	if m, ok := payload.(map[string]any); ok {
+		p.Window, _ = m["window"].(string)
+	}
+	switch p.Window {
+	case "1h", "24h", "7d", "all":
+		return p.Window
+	default:
+		return "24h"
+	}
+}
+
+// buildUsageStats формирует ответ usage_stats для нормализованного окна.
+func (h *Hub) buildUsageStats(ctx context.Context, window string) Envelope {
+	now := time.Now().UTC()
+	payload := UsageStatsPayload{
+		Window:        window,
+		GeneratedAt:   now,
+		RetentionDays: h.retentionDays,
+		Rows:          []UsageRow{},
+	}
+	var since time.Time
+	switch window {
+	case "1h":
+		since = now.Add(-time.Hour)
+	case "24h":
+		since = now.Add(-24 * time.Hour)
+	case "7d":
+		since = now.Add(-7 * 24 * time.Hour)
+	}
+	if h.history == nil {
+		payload.Error = "history storage is not available"
+	} else if rows, err := h.history.UsageStats(ctx, since); err != nil {
+		h.log.Warn("ipc: usage stats query failed", "error", err.Error())
+		payload.Error = err.Error()
+	} else {
+		for _, r := range rows {
+			payload.Rows = append(payload.Rows, UsageRow{
+				Client: r.Client, Model: r.Model, Server: r.Server,
+				Requests: r.Requests, Failed: r.Failed, BusyMs: r.BusyMs,
+				QueueMsAvg: r.QueueMsAvg, PromptTokens: r.PromptTokens,
+				OutputTokens: r.OutputTokens, LastUsed: r.LastUsed,
+			})
+		}
+	}
+	return Envelope{Type: TypeUsageStats, Time: now, Payload: payload}
 }
 
 // tokPerSec переводит коэффициент регрессии k (ms/token) в tok/s.
