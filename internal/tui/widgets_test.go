@@ -381,3 +381,40 @@ func TestSortedRequests(t *testing.T) {
 		}
 	}
 }
+
+// TestFooterText — подсказки отбрасываются с конца по ширине, Quit всегда на месте.
+func TestFooterText(t *testing.T) {
+	full := strings.Join(append(append([]string(nil), footerHints...), footerQuit), footerSep)
+	tests := []struct {
+		name    string
+		avail   int
+		want    []string
+		notWant []string
+	}{
+		{"wide shows everything", len(full), append(append([]string(nil), footerHints...), footerQuit), nil},
+		{"80 cols keeps usage and models", 78, []string{"F1 Help", "s Usage", "m Models", "/ Filter", footerQuit}, []string{"F5 Refresh"}},
+		{"narrow keeps help and quit", 30, []string{"F1 Help", footerQuit}, []string{"F5 Refresh", "Tab Panes"}},
+		{"too narrow still quit", 5, []string{footerQuit}, []string{"F1 Help"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := footerText(tt.avail)
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("footerText(%d) = %q, missing %q", tt.avail, got, w)
+				}
+			}
+			for _, w := range tt.notWant {
+				if strings.Contains(got, w) {
+					t.Errorf("footerText(%d) = %q, unexpected %q", tt.avail, got, w)
+				}
+			}
+			if tt.avail >= len(footerQuit) && len(got) > tt.avail {
+				t.Errorf("footerText(%d) width %d overflows", tt.avail, len(got))
+			}
+			if !strings.HasSuffix(got, footerQuit) {
+				t.Errorf("footerText(%d) = %q, Quit must be last", tt.avail, got)
+			}
+		})
+	}
+}

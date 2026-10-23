@@ -1317,17 +1317,46 @@ func fmtTime(t time.Time) string {
 
 // ---- Footer -----------------------------------------------------------------
 
+// footerHints — подсказки основного экрана в порядке важности: при нехватке
+// ширины отбрасываются с конца. "q/F10 Quit" показывается всегда, последней.
+var footerHints = []string{
+	"F1 Help",
+	"s Usage",
+	"m Models",
+	"/ Filter",
+	"Enter Details",
+	"t Tail",
+	"Tab Panes",
+	"F5 Refresh",
+}
+
+const (
+	footerQuit = "q/F10 Quit"
+	footerSep  = "   "
+)
+
 func renderFooter(showFilter bool, width int) string {
-	var text string
-	if showFilter {
-		text = "Esc Cancel filter   Enter Confirm"
-	} else if width < 80 {
-		// Narrow terminal — show minimal hints only.
-		text = "F1 Help · q Quit"
-	} else {
-		text = "F1 Help   F5 Refresh   / Filter   m Models   t Tail   Tab panes   q/F10 Quit"
+	text := "Esc Cancel filter   Enter Confirm"
+	if !showFilter {
+		text = footerText(width - 2)
 	}
 	return StyleFooter.Width(width - 2).Render(text)
+}
+
+// footerText берёт столько подсказок из footerHints, сколько влезает в avail
+// колонок вместе с Quit.
+func footerText(avail int) string {
+	used := lipgloss.Width(footerQuit)
+	parts := make([]string, 0, len(footerHints)+1)
+	for _, h := range footerHints {
+		w := lipgloss.Width(h) + len(footerSep)
+		if used+w > avail {
+			break
+		}
+		used += w
+		parts = append(parts, h)
+	}
+	return strings.Join(append(parts, footerQuit), footerSep)
 }
 
 // ---- TooNarrow --------------------------------------------------------------
@@ -1361,7 +1390,7 @@ var helpItems = []helpItem{
 	{"/", "filter requests (model / client / server / status)"},
 	{"Esc", "cancel filter / close overlay"},
 	{"mouse wheel", "scroll pane under cursor; select server in header"},
-	{"q / F10", "quit"},
+	{"q / F10", "quit (inside an overlay: close it)"},
 }
 
 // renderHelpOverlay возвращает help overlay, отцентрированный в терминале
