@@ -173,7 +173,7 @@ Runs a small local HTTP server and opens the default browser (unless `--no-open`
 
 ## Build from Source
 
-Requires Go 1.25.12 or later. No CGO.
+Requires Go 1.26.10 or later. No CGO.
 
 ```sh
 git clone https://github.com/MaxWD/ProxyLM.GO.git

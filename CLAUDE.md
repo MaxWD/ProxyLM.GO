@@ -4,7 +4,7 @@
 
 ## Стек
 
-Go 1.25+ (минимум диктует `modernc.org/sqlite`), `net/http` + `chi`, `coder/websocket`, `bubbletea`/`lipgloss`/`bubbles`, `modernc.org/sqlite` (pure-Go, без CGO), `gopkg.in/yaml.v3`, `spf13/cobra`, `kardianos/service`, `log/slog`.
+Go 1.26+ (ветка 1.25 — EOL, security-фиксы stdlib только в 1.26.x), `net/http` + `chi`, `coder/websocket`, `bubbletea`/`lipgloss`/`bubbles`, `modernc.org/sqlite` (pure-Go, без CGO), `gopkg.in/yaml.v3`, `spf13/cobra`, `kardianos/service`, `log/slog`.
 
 ## Запуск, тесты, линт
 

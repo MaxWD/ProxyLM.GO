@@ -439,7 +439,7 @@ Package tests live alongside their code (Go convention: `scheduler.go` + `schedu
 
 | Layer          | Library                                       |
 |----------------|-----------------------------------------------|
-| Language       | Go 1.25+ (minimum dictated by `modernc.org/sqlite`) |
+| Language       | Go 1.26+ (1.25 is EOL; stdlib security fixes ship in 1.26.x) |
 | HTTP server    | `net/http` (stdlib, Go 1.22 mux) + `github.com/go-chi/chi/v5` |
 | HTTP client    | `net/http` (stdlib) + per-backend `*http.Client` |
 | WebSocket      | `github.com/coder/websocket`                  |

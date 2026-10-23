@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-23
+
+### Fixed
+
+- **Bumped Go to 1.26.10** to pick up standard-library security fixes flagged by `govulncheck`: GO-2026-6218 (`net/url`), GO-2026-6090 (`crypto/tls`), GO-2026-6089 (`net/http`), GO-2026-5972 (`encoding/asn1`), GO-2026-5026 (`net/http` / idna), plus the later GO-2026-6603…6617 (`net/http`, `net/textproto`, `crypto/tls`) and GO-2026-6809 (`crypto/x509`). The Go 1.25 line ended at 1.25.13 and does not carry the later fixes, so the minimum Go version for building from source is now **1.26.10**. No application code changed.
+- **Bumped `golang.org/x/text` to v0.43.0** (indirect, via bubbletea), clearing GO-2026-6629 and GO-2026-5970 (not reachable from our code).
+- **CI lint job**: `golangci-lint` is now pinned (`v2.15.0`, prebuilt binary) instead of `latest` built via `goinstall`, which broke when a linter release required a newer Go than `go.mod`. `golangci-lint-action` bumped to v9 and `upload-artifact` to v7 (Node 24 runtime). Two intentional channel waits (`api.Server.ListenAndServe` shutdown, `service.Runner.Stop`) are now annotated `//nolint:errcheck` with a reason (v2.15 `errcheck` flags bare channel receives, while `staticcheck` S1005 rejects `_ = <-ch`).
+
 ## [0.14.0] - 2026-07-22
 
 ### Added
@@ -228,7 +236,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.2...v0.14.0
 [0.13.2]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.13.0...v0.13.1

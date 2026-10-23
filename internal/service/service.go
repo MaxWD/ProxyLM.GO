@@ -49,7 +49,7 @@ func (r *Runner) Stop(_ service.Service) error {
 	}
 	if r.doneCh != nil {
 		// Дождёмся завершения, чтобы оставить чистое состояние.
-		<-r.doneCh
+		<-r.doneCh //nolint:errcheck // только ждём завершения daemon, чтобы Stop вернулся после остановки
 	}
 	return nil
 }

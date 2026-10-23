@@ -7,7 +7,7 @@ general-purpose proxy framework.
 
 ## Prerequisites
 
-- **Go 1.25 or later** (required by `modernc.org/sqlite`; pure-Go, no CGO).
+- **Go 1.26 or later** (the 1.25 line is EOL; stdlib security fixes ship in 1.26.x only; pure-Go, no CGO).
 - **golangci-lint** — install via the [official instructions](https://golangci-lint.run/welcome/install/).
 - A running LM Studio or Ollama instance is helpful for manual testing but not required
   for unit tests.
