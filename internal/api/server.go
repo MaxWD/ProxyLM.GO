@@ -131,7 +131,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = s.srv.Shutdown(shutdownCtx)
-		_ = <-errCh // ждём выхода горутины; ожидаемо http.ErrServerClosed
+		<-errCh //nolint:errcheck // ждём выхода горутины; ожидаемо http.ErrServerClosed
 		return ctx.Err()
 	case err := <-errCh:
 		return err
