@@ -49,7 +49,7 @@ func (r *Runner) Stop(_ service.Service) error {
 	}
 	if r.doneCh != nil {
 		// Дождёмся завершения, чтобы оставить чистое состояние.
-		<-r.doneCh
+		_ = <-r.doneCh
 	}
 	return nil
 }
