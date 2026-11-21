@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-11-21
+
+### Fixed
+
+- **Bumped Go to 1.26.11** to pick up the standard-library fix for GO-2026-6859 (`net/http`), flagged by `govulncheck`. No application code changed.
+
 ## [0.15.1] - 2026-10-23
 
 ### Fixed
@@ -256,7 +262,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.2...HEAD
+[0.15.2]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.14.0...v0.14.1
