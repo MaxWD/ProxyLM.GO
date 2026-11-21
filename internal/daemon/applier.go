@@ -183,6 +183,27 @@ func (a *Applier) Update(ctx context.Context, p ipc.ConfigUpdatePayload) ipc.Con
 	return res
 }
 
+// Reveal returns the plain value of a secret path from the config file.
+// Audit log carries the path only.
+func (a *Applier) Reveal(ctx context.Context, path string) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	data, _, err := config.ReadRevision(a.path)
+	if err != nil {
+		return "", err
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return "", err
+	}
+	v, err := config.SecretValue(cfg, path)
+	if err != nil {
+		return "", err
+	}
+	a.log.InfoContext(ctx, "secret revealed", "path", path)
+	return v, nil
+}
+
 // conflict заполняет результат при расхождении ревизий.
 func (a *Applier) conflict(res ipc.ConfigResultPayload, data []byte) ipc.ConfigResultPayload {
 	res.Conflict = true

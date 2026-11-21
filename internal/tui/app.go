@@ -2,8 +2,10 @@ package tui
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -528,6 +530,15 @@ func (m *model) handleEnvelope(env ipc.Envelope, payload json.RawMessage) error 
 			m.extraCmd = m.sendGetConfig()
 		}
 
+	case ipc.TypeSecretValue:
+		var p ipc.SecretValuePayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("bad envelope (secret_value): %w", err)
+		}
+		if m.showConfig && m.cfg != nil {
+			m.cfg.onSecretValue(p)
+		}
+
 	case ipc.TypeConfigChanged:
 		var p ipc.ConfigChangedPayload
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -782,10 +793,32 @@ func (m *model) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.sendGetConfig()
 	case actUpdate:
 		return m, m.sendUpdateConfig(m.cfg.out)
+	case actReveal:
+		return m, m.sendRevealSecret(m.cfg.revealWant)
+	case actCopy:
+		return m, copyToClipboardCmd(m.cfg.copyText)
 	case actClose:
+		m.cfg.hideSecrets()
 		m.showConfig = false
 	}
 	return m, nil
+}
+
+// sendRevealSecret asks the daemon for a plain secret (answered with secret_value).
+func (m *model) sendRevealSecret(path string) tea.Cmd {
+	return func() tea.Msg {
+		_ = m.client.RevealSecret(m.ctx, path)
+		return nil
+	}
+}
+
+// copyToClipboardCmd writes an OSC 52 sequence (best-effort, terminal dependent).
+func copyToClipboardCmd(text string) tea.Cmd {
+	return func() tea.Msg {
+		seq := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\x07"
+		_, _ = os.Stdout.WriteString(seq)
+		return nil
+	}
 }
 
 // usageTick планирует следующий refresh Usage overlay для поколения gen.
@@ -1191,7 +1224,7 @@ func (m *model) View() string {
 
 	// Config overlay — редактор конфигурации.
 	if m.showConfig && m.cfg != nil {
-		return renderConfigOverlay(cfgView{UI: m.cfg, RestartPending: m.restartPending}, m.width, m.height)
+		return renderConfigOverlay(cfgView{UI: m.cfg, RestartPending: m.restartPending, Servers: m.servers}, m.width, m.height)
 	}
 
 	// Usage overlay — статистика использования.

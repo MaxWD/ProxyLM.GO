@@ -626,15 +626,46 @@ func (d *cfgDraft) Modified(spec config.FieldSpec, idx int) bool {
 	return rawString(old) != rawString(d.curRaw(spec, idx))
 }
 
+// changeRow is one structured entry of the review dialog.
+type changeRow struct {
+	Path  string
+	Old   string
+	New   string // "changed" for secrets
+	Note  string // "added" / "removed" / "renamed"; empty for value changes
+	Apply string // "hot" / "restart" / ""
+	Text  string // legacy one-line form
+}
+
 // Changes returns the human-readable change list for the review dialog.
 func (d *cfgDraft) Changes() []string {
-	var out []string
+	rows := d.ChangeRows()
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.Text
+	}
+	return out
+}
+
+func (d *cfgDraft) fieldRow(f config.FieldSpec, idx int, arrow string) changeRow {
+	r := changeRow{Path: d.fieldPath(f, idx), Apply: string(f.Apply), Text: d.changeLine(f, idx, arrow)}
+	if string(f.Kind) == "secret" {
+		r.New = "changed"
+		return r
+	}
+	old, _ := d.origRaw(f, idx)
+	r.Old, r.New = quoteEmpty(rawString(old)), quoteEmpty(rawString(d.curRaw(f, idx)))
+	return r
+}
+
+// ChangeRows returns the structured change list.
+func (d *cfgDraft) ChangeRows() []changeRow {
+	var out []changeRow
 	arrow := glyph("→", "->")
 	for _, f := range d.schema.Fields {
 		if _, _, isItem := splitSpecPath(f.Path); isItem || !d.Modified(f, -1) {
 			continue
 		}
-		out = append(out, d.changeLine(f, -1, arrow))
+		out = append(out, d.fieldRow(f, -1, arrow))
 	}
 	for _, s := range d.schema.Sections {
 		if s.List == "" {
@@ -645,11 +676,11 @@ func (d *cfgDraft) Changes() []string {
 		for i, mt := range metas {
 			name := d.itemNameAt(s.List, i)
 			if mt.New {
-				out = append(out, fmt.Sprintf("+ %s[%s]: added", s.List, name))
+				out = append(out, changeRow{Path: fmt.Sprintf("%s[%s]", s.List, name), Note: "added", Text: fmt.Sprintf("+ %s[%s]: added", s.List, name)})
 			} else {
 				kept[mt.Orig] = true
 				if mt.Orig != name {
-					out = append(out, fmt.Sprintf("%s[%s]: renamed %s %s", s.List, mt.Orig, arrow, name))
+					out = append(out, changeRow{Path: fmt.Sprintf("%s[%s]", s.List, mt.Orig), Old: mt.Orig, New: name, Note: "renamed", Text: fmt.Sprintf("%s[%s]: renamed %s %s", s.List, mt.Orig, arrow, name)})
 				}
 			}
 			for _, f := range d.schema.Fields {
@@ -660,12 +691,12 @@ func (d *cfgDraft) Changes() []string {
 				if leaf == "name" && !mt.New {
 					continue // already reported as a rename
 				}
-				out = append(out, d.changeLine(f, i, arrow))
+				out = append(out, d.fieldRow(f, i, arrow))
 			}
 		}
 		for _, it := range listItems(d.orig, s.List) {
 			if n := itemName(it); !kept[n] {
-				out = append(out, fmt.Sprintf("- %s[%s]: removed", s.List, n))
+				out = append(out, changeRow{Path: fmt.Sprintf("%s[%s]", s.List, n), Note: "removed", Text: fmt.Sprintf("- %s[%s]: removed", s.List, n)})
 			}
 		}
 	}

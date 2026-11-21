@@ -594,7 +594,7 @@ func TestRenderSectionAndList(t *testing.T) {
 	goSection(t, u, "retry")
 	_ = u.draft.SetText(specOf(t, u.draft, "retry.max_attempts"), -1, "5")
 	out := renderCfg(u, []string{"proxy.port", "backends[gpu-2]"}, 100, 30)
-	for _, want := range []string{"Config", "/x/config.yaml", "rev abcdef12", "Clients (2)", "Backends (2)", "Max attempts", "5", " *", "restart pending: proxy.port, backends[gpu-2]"} {
+	for _, want := range []string{"Config", "/x/config.yaml", "rev abcdef1", "CLIENTS (2)", "BACKENDS (2)", "1 unsaved", "was 3", "live", "Max attempts", "5", "restart pending: proxy.port, backends[gpu-2]"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
@@ -612,7 +612,7 @@ func TestRenderSectionAndList(t *testing.T) {
 	}
 	press(u, "enter")
 	out = renderCfg(u, nil, 100, 30)
-	if !strings.Contains(out, "URL") || !strings.Contains(out, "http://a:1") || !strings.Contains(out, "…key1") {
+	if !strings.Contains(out, "URL") || !strings.Contains(out, "http://a:1") || !strings.Contains(out, "••••••••key1") {
 		t.Errorf("item form:\n%s", out)
 	}
 }
@@ -629,7 +629,7 @@ func TestRenderErrorsAndDialogs(t *testing.T) {
 	u.mode = cmGenerated
 	u.generated = []genEntry{{Path: "auth.api_keys[x].key", Key: "sk-proxy-FULLKEY"}}
 	out := renderCfg(u, nil, 100, 30)
-	if !strings.Contains(out, "sk-proxy-FULLKEY") || !strings.Contains(out, "Shown once") {
+	if !strings.Contains(out, "sk-proxy-FULLKEY") || !strings.Contains(out, "press v later") {
 		t.Errorf("generated modal:\n%s", out)
 	}
 	u.mode = cmReview
@@ -741,4 +741,197 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func renderWith(u *cfgUI, servers []ipc.ServerState, w, h int) string {
+	return renderConfigOverlay(cfgView{UI: u, Servers: servers}, w, h)
+}
+
+func TestRenderSizesAndASCII(t *testing.T) {
+	tests := []struct {
+		name    string
+		w, h    int
+		ascii   bool
+		want    []string
+		notWant []string
+	}{
+		{"wide", 140, 40, false, []string{"SERVER", "BEHAVIOUR", "Retry", "live", "Max attempts"}, nil},
+		{"80x24", 80, 24, false, []string{"SERVER", "Retry"}, nil},
+		{"narrow tab bar", 60, 24, false, []string{"Retry"}, []string{"BEHAVIOUR"}},
+		{"ascii", 100, 30, true, []string{"SERVER", "Retry"}, []string{"⟳", "●", "•", "›", "▸"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			old := noUnicodeFlag
+			noUnicodeFlag = tc.ascii
+			t.Cleanup(func() { noUnicodeFlag = old })
+			u := loadedUI(t)
+			goSection(t, u, "retry")
+			u.focusFields = true
+			_ = u.draft.SetText(specOf(t, u.draft, "retry.max_attempts"), -1, "5")
+			out := renderWith(u, nil, tc.w, tc.h)
+			for _, w := range tc.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("missing %q in:\n%s", w, out)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(out, w) {
+					t.Errorf("unexpected %q in:\n%s", w, out)
+				}
+			}
+		})
+	}
+}
+
+func TestRenderValueKinds(t *testing.T) {
+	u := loadedUI(t)
+	goSection(t, u, "retry")
+	u.focusFields = true
+	out := renderWith(u, nil, 140, 40)
+	for _, w := range []string{"500 ms", "8000 ms", "Total attempts per request", "1" + "–" + "10"} {
+		if w == "1–10" {
+			continue // range depends on the schema bounds
+		}
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q in:\n%s", w, out)
+		}
+	}
+	goSection(t, u, "proxy")
+	u.focusFields = true
+	out = renderWith(u, nil, 140, 40)
+	for _, w := range []string{"debug", "info", "warn", "error"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("enum options missing %q in:\n%s", w, out)
+		}
+	}
+	goSection(t, u, "discovery")
+	u.focusFields = true
+	if out = renderWith(u, nil, 140, 40); !strings.Contains(out, "[x] on") {
+		t.Errorf("bool on missing:\n%s", out)
+	}
+	press(u, "enter") // toggles the first field (enabled)
+	if out = renderWith(u, nil, 140, 40); !strings.Contains(out, "[ ] off") || !strings.Contains(out, "was true") {
+		t.Errorf("bool off / was missing:\n%s", out)
+	}
+}
+
+func TestSectionBadges(t *testing.T) {
+	u := loadedUI(t)
+	_ = u.draft.SetText(specOf(t, u.draft, "proxy.port"), -1, "9090")
+	u.onResult(ipc.ConfigResultPayload{Errors: []config.FieldError{{Path: "retry.max_attempts", Msg: "bad"}}})
+	out := renderWith(u, nil, 140, 40)
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(strings.TrimLeft(line, "│"), "  Proxy"):
+			if !strings.Contains(line, "●") || !strings.Contains(line, "⟳") {
+				t.Errorf("proxy badges (modified+restart): %q", line)
+			}
+		case strings.HasPrefix(strings.TrimLeft(line, "│"), "  Retry"):
+			if !strings.Contains(line, "!") {
+				t.Errorf("retry error badge: %q", line)
+			}
+		}
+	}
+}
+
+func TestSecretReveal(t *testing.T) {
+	u := loadedUI(t)
+	goSection(t, u, "clients")
+	u.focusFields = true
+	if act := press(u, "y"); act != actNone || u.toast != "press v to reveal first" {
+		t.Fatalf("y without reveal: act=%v toast=%q", act, u.toast)
+	}
+	if act := press(u, "v"); act != actReveal || u.revealWant != "auth.api_keys[crm].key" {
+		t.Fatalf("v: act=%v want=%q", act, u.revealWant)
+	}
+	u.onSecretValue(ipc.SecretValuePayload{Path: "auth.api_keys[crm].key", Value: "sk-FULL-CRM"})
+	if out := renderWith(u, nil, 140, 40); !strings.Contains(out, "sk-FULL-CRM") {
+		t.Errorf("revealed value not rendered:\n%s", out)
+	}
+	if act := press(u, "y"); act != actCopy || u.copyText != "sk-FULL-CRM" {
+		t.Errorf("y copy: act=%v", act)
+	}
+	press(u, "down")
+	if len(u.revealed) != 0 {
+		t.Error("moving the cursor must hide the secret")
+	}
+	if out := renderWith(u, nil, 140, 40); strings.Contains(out, "sk-FULL-CRM") {
+		t.Error("secret still rendered after move")
+	}
+	// Error frame -> toast, nothing stored.
+	press(u, "v")
+	u.onSecretValue(ipc.SecretValuePayload{Path: "auth.api_keys[bot].key", Error: "denied"})
+	if u.toast != "Error: denied" || len(u.revealed) != 0 {
+		t.Errorf("error handling: toast=%q", u.toast)
+	}
+	// Item form: v on a backend api_key, section change hides.
+	goSection(t, u, "backends")
+	u.focusFields = true
+	press(u, "enter")
+	u.revealed["x"] = "y"
+	press(u, "tab")
+	if len(u.revealed) != 0 {
+		t.Error("pane switch must hide secrets")
+	}
+}
+
+func TestSecretValueFrameInApp(t *testing.T) {
+	m := &model{width: 100, height: 30, requests: map[string]ipc.RequestState{}, flashMap: map[string]flashEntry{}}
+	m.showConfig, m.cfg = true, loadedUI(t)
+	goSection(t, m.cfg, "clients")
+	m.cfg.focusFields = true
+	_, cmd := m.handleKey(kmsg("v"))
+	if cmd == nil || m.cfg.revealWant == "" {
+		t.Fatal("v must emit a reveal cmd")
+	}
+	p := mustJSON(t, ipc.SecretValuePayload{Path: m.cfg.revealWant, Value: "sk-X"})
+	if err := m.handleEnvelope(ipc.Envelope{Type: ipc.TypeSecretValue}, p); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(m.View(), "sk-X") {
+		t.Error("revealed value missing from the view")
+	}
+}
+
+func TestReviewTableAndGenerated(t *testing.T) {
+	u := loadedUI(t)
+	_ = u.draft.SetText(specOf(t, u.draft, "retry.max_attempts"), -1, "5")
+	_ = u.draft.SetSecretOp(specOf(t, u.draft, "auth.admin_key"), -1, secOpGenerate, "")
+	press(u, "ctrl+s")
+	out := renderWith(u, nil, 120, 30)
+	for _, w := range []string{"Path", "Apply", "retry.max_attempts", "3 → 5", "auth.admin_key", "changed", "live"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("review missing %q:\n%s", w, out)
+		}
+	}
+	u.mode = cmGenerated
+	u.generated = []genEntry{{Path: "auth.admin_key", Key: "sk-GEN"}}
+	out = renderWith(u, nil, 120, 30)
+	if !strings.Contains(out, "sk-GEN") || !strings.Contains(out, "y copy") {
+		t.Errorf("generated modal:\n%s", out)
+	}
+	if act := press(u, "y"); act != actCopy || u.copyText != "sk-GEN" {
+		t.Errorf("generated copy: %v", act)
+	}
+}
+
+func TestBackendsTableHealth(t *testing.T) {
+	u := loadedUI(t)
+	goSection(t, u, "backends")
+	u.focusFields = true
+	out := renderWith(u, []ipc.ServerState{{Name: "gpu-1", Healthy: true}, {Name: "gpu-2", Healthy: false}}, 140, 40)
+	for _, w := range []string{"Name", "URL", "Protocol", "Models", "Health", "● up", "● down", "http://a:1"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("backends table missing %q:\n%s", w, out)
+		}
+	}
+	out = renderWith(u, nil, 140, 40)
+	if strings.Contains(out, "● up") || strings.Contains(out, "● down") {
+		t.Errorf("unknown health must render as a dash:\n%s", out)
+	}
+	press(u, "enter")
+	if out = renderWith(u, nil, 140, 40); !strings.Contains(out, "Backends › gpu-1") {
+		t.Errorf("breadcrumb missing:\n%s", out)
+	}
 }
