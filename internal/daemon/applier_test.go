@@ -340,6 +340,40 @@ func TestApplier_SecretsNeverLeak(t *testing.T) {
 	}
 }
 
+func TestApplier_Reveal(t *testing.T) {
+	r := newRig(t)
+	tests := []struct {
+		path, want string
+		wantErr    bool
+	}{
+		{"auth.admin_key", r.cfg.Auth.AdminKey, false},
+		{"auth.api_keys[" + r.cfg.Auth.APIKeys[0].Name + "].key", r.cfg.Auth.APIKeys[0].Key, false},
+		{"auth.api_keys[#1].key", r.cfg.Auth.APIKeys[1].Key, false},
+		{"auth.api_keys[nope].key", "", true},
+		{"proxy.port", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got, err := r.app.Reveal(context.Background(), tt.path)
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Errorf("Reveal = %q, %v", got, err)
+			}
+		})
+	}
+	logs := r.logBuf.String()
+	if !strings.Contains(logs, "secret revealed") {
+		t.Error("expected audit log entry")
+	}
+	for _, k := range r.cfg.Auth.APIKeys {
+		if strings.Contains(logs, k.Key) {
+			t.Error("revealed key leaked into logs")
+		}
+	}
+	if strings.Contains(logs, r.cfg.Auth.AdminKey) {
+		t.Error("admin key leaked into logs")
+	}
+}
+
 func TestApplier_RenameKeepsKey(t *testing.T) {
 	r := newRig(t)
 	oldKey := r.cfg.Auth.APIKeys[0].Key

@@ -690,6 +690,8 @@ Five frame types let an admin client read and edit `config.yaml` through the dae
 | `config_update` | client → server | — |
 | `config_result` | server → client | the requester only |
 | `config_changed` | server → client | all **other** connected clients, after a successful update |
+| `secret_reveal` | client → server | — |
+| `secret_value` | server → client | the requester only |
 
 In addition, `hello` carries `restart_pending` (array of paths, omitted when empty): fields already changed in the file but not yet applied to the running daemon.
 
@@ -874,9 +876,20 @@ Sent to every connected client except the requester after a successful `config_u
 
 The revision is a hash of the file bytes, so a conflict also occurs when `config.yaml` was edited by hand or by another client between `config_get` and `config_update`. On a mismatch the daemon answers `config_result` with `ok=false`, `conflict=true`, `error` = `conflict: config file changed since it was read; reload it`, and a recomputed `restart_pending`. The file and the running daemon are not touched, and nothing is merged automatically: the client must send `config_get`, show the fresh state and let the user redo the edit. The TUI shows a banner and the `r` key reloads (local edits are discarded).
 
+#### `secret_reveal` / `secret_value` (v0.17.0)
+
+Explicit request for the plain value of one secret (`auth.admin_key`, `auth.api_keys[<name>].key`, `backends[<name>].api_key`; `[#N]` addresses an item by index). The value is read from the file and sent only to the requesting connection; the daemon logs `secret revealed` with the path only.
+
+```json
+{"type": "secret_reveal", "payload": {"path": "auth.api_keys[crm].key"}}
+{"type": "secret_value", "time": "2026-11-22T10:00:00Z", "payload": {"path": "auth.api_keys[crm].key", "value": "sk-proxy-…"}}
+```
+
+On an unknown or non-secret path `value` is omitted and `error` is set (`not a secret path`, `item not found`).
+
 #### Secret handling rules
 
-1. Secrets travel from the daemon to clients only masked (see `config_state`).
+1. Secrets travel from the daemon to clients only masked (see `config_state`), except an explicit `secret_reveal` answered to the requester only.
 2. Secret values in a client-supplied `config` are ignored; the only way to change a secret is `secret_ops`. Without an op, an existing secret is kept (matched by item name after renames).
 3. A newly added list item has an empty secret until a `set` / `generate` op is applied (a client key must be non-empty for the config to validate).
 4. Full generated keys appear only in `config_result.generated` for the requesting connection — never in `config_changed`, `state_snapshot`, logs or the database. The client must show them once and not store them.

@@ -23,6 +23,8 @@ const (
 	TypeConfigUpdate  MessageType = "config_update"  // client→server
 	TypeConfigResult  MessageType = "config_result"  // server→requester
 	TypeConfigChanged MessageType = "config_changed" // server→all OTHER clients
+	TypeSecretReveal  MessageType = "secret_reveal"  // client→server {path}
+	TypeSecretValue   MessageType = "secret_value"   // server→requester ONLY
 )
 
 // Envelope — внешний контейнер для всех сообщений. Конкретный payload зависит от Type.
@@ -241,6 +243,18 @@ type ConfigResultPayload struct {
 type ConfigChangedPayload struct {
 	Revision       string   `json:"revision"`
 	RestartPending []string `json:"restart_pending"`
+}
+
+// SecretRevealPayload — client→server secret_reveal.
+type SecretRevealPayload struct {
+	Path string `json:"path"`
+}
+
+// SecretValuePayload — server→requester only. Value is the plain secret.
+type SecretValuePayload struct {
+	Path  string `json:"path"`
+	Value string `json:"value,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 // StateSnapshotPayload — полный снимок состояния (отправляется при подключении и периодически).

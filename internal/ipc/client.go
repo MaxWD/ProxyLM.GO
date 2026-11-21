@@ -214,6 +214,19 @@ func (c *Client) UpdateConfig(ctx context.Context, p ConfigUpdatePayload) error 
 	return nil
 }
 
+// RevealSecret requests the plain value of a secret path. The answer is a
+// type=secret_value frame sent only to this client.
+func (c *Client) RevealSecret(ctx context.Context, path string) error {
+	data, err := json.Marshal(Envelope{Type: TypeSecretReveal, Payload: SecretRevealPayload{Path: path}})
+	if err != nil {
+		return fmt.Errorf("ipc: marshal secret_reveal: %w", err)
+	}
+	if err := c.conn.Write(ctx, websocket.MessageText, data); err != nil {
+		return fmt.Errorf("ipc: send secret_reveal: %w", err)
+	}
+	return nil
+}
+
 // IsAuthError возвращает true если err содержит признак ошибки аутентификации (401/403).
 func IsAuthError(err error) bool {
 	if err == nil {

@@ -1393,6 +1393,7 @@ var helpItems = []helpItem{
 	{"a d", "config editor: add / delete a client or backend"},
 	{"Ctrl+S", "config editor: review and save changes"},
 	{"r", "config editor: reload config from the daemon"},
+	{"v y", "config editor: reveal a secret / copy the revealed secret (OSC 52)"},
 	{"t", "toggle generation tail for the selected streaming request"},
 	{"/", "filter requests (model / client / server / status)"},
 	{"Esc", "cancel filter / close overlay"},

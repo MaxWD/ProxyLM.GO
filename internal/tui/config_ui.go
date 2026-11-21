@@ -23,6 +23,8 @@ const (
 	actGet
 	actUpdate
 	actClose
+	actReveal // fetch u.revealWant from the daemon
+	actCopy   // copy u.copyText to the clipboard (OSC 52)
 )
 
 type cfgMode int
@@ -77,13 +79,22 @@ type cfgUI struct {
 	generated []genEntry
 
 	out ipc.ConfigUpdatePayload // payload to send with actUpdate
+
+	reviewRows []changeRow
+
+	// Secret reveal: revealed holds plain values by concrete path; it is
+	// cleared whenever the focus moves, a dialog opens or the config reloads.
+	// Never log or persist its contents.
+	revealed   map[string]string
+	revealWant string // path requested from the daemon, awaiting secret_value
+	copyText   string // payload for actCopy
 }
 
 func newCfgUI() *cfgUI {
 	ti := textinput.New()
 	ti.CharLimit = 256
 	ti.Cursor.SetMode(cursor.CursorStatic)
-	return &cfgUI{input: ti, errs: map[string]string{}}
+	return &cfgUI{input: ti, errs: map[string]string{}, revealed: map[string]string{}}
 }
 
 // ---- schema navigation ------------------------------------------------------------
@@ -200,12 +211,14 @@ func (u *cfgUI) onState(p ipc.ConfigStatePayload) {
 		u.loadErr = p.Error
 		return
 	}
+	p.Schema = groupedSchema(p.Schema)
 	d, err := newCfgDraft(p.Config, p.Schema)
 	if err != nil {
 		u.loadErr = err.Error()
 		return
 	}
 	prevSec := u.secIdx
+	u.hideSecrets()
 	u.draft, u.loaded, u.loadErr = d, true, ""
 	u.path, u.revision = p.Path, p.Revision
 	u.secIdx = 0
@@ -275,6 +288,119 @@ func isEsc(s string) bool   { return s == "esc" }
 
 // handleKey processes one key press and returns the requested action.
 func (u *cfgUI) handleKey(msg tea.KeyMsg) cfgAction {
+	before := u.focusSig()
+	act := u.handleKeyInner(msg)
+	if u.focusSig() != before {
+		u.hideSecrets()
+	}
+	return act
+}
+
+// focusSig identifies the cursor position and mode; a change hides revealed secrets.
+func (u *cfgUI) focusSig() [7]int {
+	b := 0
+	if u.inItem {
+		b = 1
+	}
+	f := 0
+	if u.focusFields {
+		f = 1
+	}
+	return [7]int{u.secIdx, b, u.itemIdx, u.fieldIdx, int(u.mode), len(u.sections()), f}
+}
+
+// hideSecrets forgets every revealed value and any pending reveal request.
+func (u *cfgUI) hideSecrets() {
+	if len(u.revealed) > 0 {
+		u.revealed = map[string]string{}
+	}
+	u.revealWant = ""
+}
+
+// secretSpecAt returns the spec+index of the secret under the cursor: a
+// focused secret field, or the key of the selected Clients row.
+func (u *cfgUI) secretSpecAt() (config.FieldSpec, int, bool) {
+	if !u.loaded || u.draft == nil || !u.focusFields {
+		return config.FieldSpec{}, -1, false
+	}
+	if spec, idx, ok := u.focusedSpec(); ok {
+		return spec, idx, string(spec.Kind) == "secret"
+	}
+	if sec, ok := u.section(); ok && u.onListRows() && sec.List == cfgListClients && u.rowCount() > 0 {
+		for _, f := range u.sectionFields(sec) {
+			if string(f.Kind) == "secret" {
+				return f, u.itemIdx, true
+			}
+		}
+	}
+	return config.FieldSpec{}, -1, false
+}
+
+// focusedSecretPath returns the concrete path of the secret under the cursor.
+func (u *cfgUI) focusedSecretPath() (string, bool) {
+	spec, idx, ok := u.secretSpecAt()
+	if !ok {
+		return "", false
+	}
+	return u.draft.fieldPath(spec, idx), true
+}
+
+// toggleReveal handles the v key.
+func (u *cfgUI) toggleReveal() cfgAction {
+	path, ok := u.focusedSecretPath()
+	if !ok {
+		return actNone
+	}
+	if _, shown := u.revealed[path]; shown || u.revealWant == path {
+		delete(u.revealed, path)
+		u.revealWant = ""
+		return actNone
+	}
+	if spec, idx, ok := u.secretSpecAt(); ok && u.draft.SecretOpFor(spec, idx) != "" {
+		u.toast = "Pending change - save first to reveal the stored key"
+		return actNone
+	}
+	if strings.Contains(path, "[#") {
+		u.toast = "Name the item first"
+		return actNone
+	}
+	u.revealWant = path
+	return actReveal
+}
+
+// copyRevealed handles the y key in normal mode.
+func (u *cfgUI) copyRevealed() cfgAction {
+	path, ok := u.focusedSecretPath()
+	if !ok {
+		return actNone
+	}
+	val, shown := u.revealed[path]
+	if !shown {
+		u.toast = "press v to reveal first"
+		return actNone
+	}
+	u.copyText = val
+	u.toast = "copied to clipboard"
+	return actCopy
+}
+
+// onSecretValue applies a secret_value frame (addressed to this client only).
+func (u *cfgUI) onSecretValue(p ipc.SecretValuePayload) {
+	if p.Error != "" {
+		if u.revealWant == p.Path {
+			u.revealWant = ""
+		}
+		u.toast = "Error: " + p.Error
+		return
+	}
+	if u.revealWant != p.Path {
+		return // stale: the cursor moved on
+	}
+	u.revealWant = ""
+	u.revealed[p.Path] = p.Value
+}
+
+func (u *cfgUI) handleKeyInner(msg tea.KeyMsg) cfgAction {
 	s := msg.String()
 	if u.mode != cmNormal {
 		return u.handleModeKey(msg, s)
@@ -335,6 +461,10 @@ func (u *cfgUI) handleKey(msg tea.KeyMsg) cfgAction {
 		}
 	case "enter":
 		u.activate()
+	case "v":
+		return u.toggleReveal()
+	case "y":
+		return u.copyRevealed()
 	case "a":
 		if sec, ok := u.section(); ok && sec.List != "" && !u.inItem {
 			u.mode = cmAdd
@@ -358,6 +488,7 @@ func (u *cfgUI) tryClose() cfgAction {
 }
 
 func (u *cfgUI) startReview() cfgAction {
+	u.reviewRows = u.draft.ChangeRows()
 	u.review = u.draft.Changes()
 	if len(u.review) == 0 {
 		u.toast = "No changes"
@@ -560,7 +691,16 @@ func (u *cfgUI) handleModeKey(msg tea.KeyMsg, s string) cfgAction {
 			u.mode = cmNormal
 		}
 	case cmGenerated:
-		if isEnter(s) || isEsc(s) {
+		switch {
+		case s == "y":
+			keys := make([]string, 0, len(u.generated))
+			for _, g := range u.generated {
+				keys = append(keys, g.Key)
+			}
+			u.copyText = strings.Join(keys, "\n")
+			u.toast = "copied to clipboard"
+			return actCopy
+		case isEnter(s) || isEsc(s):
 			u.mode = cmNormal
 			u.generated = nil
 		}
@@ -576,4 +716,43 @@ func (u *cfgUI) setSecret(ok bool, spec config.FieldSpec, idx int, op, value str
 	if err := u.draft.SetSecretOp(spec, idx, op, value); err != nil {
 		u.toast = "Error: " + err.Error()
 	}
+}
+
+// cfgGroups defines the nav groups (display order = slice order).
+var cfgGroups = []struct {
+	Name string
+	IDs  []string
+}{
+	{"Server", []string{"proxy", "admin"}},
+	{"Clients", []string{"clients"}},
+	{"Backends", []string{"backends"}},
+	{"Behaviour", []string{"routing", "scheduler", "retry", "discovery"}},
+	{"Data & UI", []string{"storage", "tui", "compat"}},
+}
+
+// groupedSchema returns the schema with sections reordered to the nav order.
+// Sections unknown to the TUI keep their relative order at the end.
+func groupedSchema(sc config.Schema) config.Schema {
+	rank := map[string]int{}
+	n := 0
+	for _, g := range cfgGroups {
+		for _, id := range g.IDs {
+			rank[id] = n
+			n++
+		}
+	}
+	secs := append([]config.Section(nil), sc.Sections...)
+	sort.SliceStable(secs, func(i, j int) bool {
+		ri, ok := rank[secs[i].ID]
+		if !ok {
+			ri = n
+		}
+		rj, ok := rank[secs[j].ID]
+		if !ok {
+			rj = n
+		}
+		return ri < rj
+	})
+	sc.Sections = secs
+	return sc
 }

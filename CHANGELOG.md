@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-22
+
+### Added
+- Config overlay: `v` reveals a stored secret (client key, admin key, upstream key) on demand, `y` copies it via OSC 52. New IPC pair `secret_reveal` → `secret_value` (requester only; audit log `secret revealed` carries the path only).
+
+### Changed
+- Config overlay redesign: grouped section navigation with modified / error / restart badges, section descriptions with `live` / `restart` badge, type-aware values (toggles, inline enum options, units and ranges), `was <old>` for edited fields, inline field help, Clients / Backends as tables (backend health from the live snapshot), review table with apply class, boxed generated-key modal, tab bar on narrow terminals.
+
 ## [0.16.0] - 2026-11-21
 
 ### Added
@@ -278,7 +286,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.2...v0.16.0
 [0.15.2]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.0...v0.15.1

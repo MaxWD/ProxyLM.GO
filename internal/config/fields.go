@@ -97,37 +97,37 @@ func ConfigSchema() Schema {
 		Fields: []FieldSpec{
 			{Path: "proxy.host", Section: "proxy", Label: "Host", Help: "Listen address", Kind: KindString, Apply: ApplyRestart},
 			{Path: "proxy.port", Section: "proxy", Label: "Port", Help: "Listen port", Kind: KindInt, Apply: ApplyRestart, Min: intp(1), Max: intp(65535)},
-			{Path: "proxy.log_level", Section: "proxy", Label: "Log level", Kind: KindEnum, Enum: logLevels, Apply: ApplyHot},
+			{Path: "proxy.log_level", Section: "proxy", Label: "Log level", Help: "Daemon log verbosity", Kind: KindEnum, Enum: logLevels, Apply: ApplyHot},
 
 			{Path: "auth.api_keys[].name", Section: "clients", Label: "Name", Help: "Client name shown in logs and history", Kind: KindString, Apply: ApplyHot},
 			{Path: "auth.api_keys[].key", Section: "clients", Label: "Key", Help: "Bearer key of the client", Kind: KindSecret, Apply: ApplyHot},
 
 			{Path: PathAdminKey, Section: "admin", Label: "Admin key", Help: "Key for the TUI / Web UI / admin endpoints", Kind: KindSecret, Apply: ApplyRestart},
 
-			{Path: "routing.strategy", Section: "routing", Label: "Strategy", Kind: KindEnum, Enum: strategies, Apply: ApplyHot},
+			{Path: "routing.strategy", Section: "routing", Label: "Strategy", Help: "How a backend is chosen for a model (see config.example.yaml)", Kind: KindEnum, Enum: strategies, Apply: ApplyHot},
 			{Path: "scheduler.max_consecutive_per_model", Section: "routing", Label: "Max consecutive per model", Help: "fair_share_round_robin only; 0 = off", Kind: KindInt, Apply: ApplyHot, Min: intp(0)},
 
 			{Path: "retry.max_attempts", Section: "retry", Label: "Max attempts", Help: "Total attempts per request", Kind: KindInt, Apply: ApplyHot, Min: intp(1)},
-			{Path: "retry.initial_backoff_ms", Section: "retry", Label: "Initial backoff ms", Kind: KindInt, Apply: ApplyHot, Min: intp(0)},
-			{Path: "retry.max_backoff_ms", Section: "retry", Label: "Max backoff ms", Kind: KindInt, Apply: ApplyHot, Min: intp(0)},
+			{Path: "retry.initial_backoff_ms", Section: "retry", Label: "Initial backoff", Help: "Delay before the first retry; doubles each attempt", Kind: KindInt, Apply: ApplyHot, Min: intp(0)},
+			{Path: "retry.max_backoff_ms", Section: "retry", Label: "Max backoff", Help: "Upper bound for the retry delay", Kind: KindInt, Apply: ApplyHot, Min: intp(0)},
 
 			{Path: "discovery.enabled", Section: "discovery", Label: "Enabled", Help: "Periodic /v1/models polling", Kind: KindBool, Apply: ApplyRestart},
-			{Path: "discovery.interval_seconds", Section: "discovery", Label: "Interval seconds", Kind: KindInt, Apply: ApplyHot, Min: intp(1)},
-			{Path: "discovery.unhealthy_after_failed_polls", Section: "discovery", Label: "Unhealthy after failed polls", Kind: KindInt, Apply: ApplyHot, Min: intp(1)},
+			{Path: "discovery.interval_seconds", Section: "discovery", Label: "Poll interval", Help: "How often /v1/models is polled on each backend", Kind: KindInt, Apply: ApplyHot, Min: intp(1)},
+			{Path: "discovery.unhealthy_after_failed_polls", Section: "discovery", Label: "Unhealthy after", Help: "Failed polls in a row before a backend is marked down", Kind: KindInt, Apply: ApplyHot, Min: intp(1)},
 
-			{Path: "storage.database_path", Section: "storage", Label: "Database path", Kind: KindString, Apply: ApplyRestart},
-			{Path: "storage.history_retention_days", Section: "storage", Label: "History retention days", Kind: KindInt, Apply: ApplyHot, Min: intp(0)},
-			{Path: "storage.vacuum_on_start", Section: "storage", Label: "Vacuum on start", Kind: KindBool, Apply: ApplyRestart},
+			{Path: "storage.database_path", Section: "storage", Label: "Database path", Help: "SQLite file; relative paths are next to the binary", Kind: KindString, Apply: ApplyRestart},
+			{Path: "storage.history_retention_days", Section: "storage", Label: "History retention", Help: "Request history age limit; 0 = keep forever", Kind: KindInt, Apply: ApplyHot, Min: intp(0)},
+			{Path: "storage.vacuum_on_start", Section: "storage", Label: "Vacuum on start", Help: "Compact the database at daemon start", Kind: KindBool, Apply: ApplyRestart},
 
-			{Path: "tui.show_completed_minutes", Section: "tui", Label: "Show completed minutes", Kind: KindInt, Apply: ApplyHot, Min: intp(0)},
+			{Path: "tui.show_completed_minutes", Section: "tui", Label: "Show completed", Help: "How long finished requests stay in the TUI table; 0 = hide", Kind: KindInt, Apply: ApplyHot, Min: intp(0)},
 
-			{Path: "compat.response_format_mode", Section: "compat", Label: "Response format mode", Kind: KindEnum, Enum: formatModes, Apply: ApplyHot},
+			{Path: "compat.response_format_mode", Section: "compat", Label: "Response format", Help: "passthrough · normalize_json_object · strict_reject (400 unless json_schema/text)", Kind: KindEnum, Enum: formatModes, Apply: ApplyHot},
 
-			{Path: "backends[].name", Section: "backends", Label: "Name", Kind: KindString, Apply: ApplyRestart},
-			{Path: "backends[].url", Section: "backends", Label: "URL", Kind: KindString, Apply: ApplyRestart},
-			{Path: "backends[].type", Section: "backends", Label: "Type", Kind: KindEnum, Enum: backendTypes, Apply: ApplyRestart},
+			{Path: "backends[].name", Section: "backends", Label: "Name", Help: "Unique backend name", Kind: KindString, Apply: ApplyRestart},
+			{Path: "backends[].url", Section: "backends", Label: "URL", Help: "Base URL of the server, e.g. http://host:1234", Kind: KindString, Apply: ApplyRestart},
+			{Path: "backends[].type", Section: "backends", Label: "Type", Help: "Protocol / server kind; lmstudio and ollama enable the loaded-model probe", Kind: KindEnum, Enum: backendTypes, Apply: ApplyRestart},
 			{Path: "backends[].priority", Section: "backends", Label: "Priority", Help: "Lower = preferred", Kind: KindInt, Apply: ApplyRestart},
-			{Path: "backends[].timeout_seconds", Section: "backends", Label: "Timeout seconds", Kind: KindInt, Apply: ApplyRestart, Min: intp(1)},
+			{Path: "backends[].timeout_seconds", Section: "backends", Label: "Timeout", Help: "Per-request timeout to this backend", Kind: KindInt, Apply: ApplyRestart, Min: intp(1)},
 			{Path: "backends[].api_key", Section: "backends", Label: "API key", Help: "Upstream key, optional", Kind: KindSecret, Apply: ApplyRestart},
 			{Path: "backends[].models", Section: "backends", Label: "Models", Help: "Comma-separated; if set, discovery is off for this server", Kind: KindString, Apply: ApplyRestart},
 		},

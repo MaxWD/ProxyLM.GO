@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +38,13 @@ func (f *fakeConfigService) Update(_ context.Context, p ConfigUpdatePayload) Con
 	defer f.mu.Unlock()
 	f.updates = append(f.updates, p)
 	return f.result
+}
+
+func (f *fakeConfigService) Reveal(_ context.Context, path string) (string, error) {
+	if path == "auth.api_keys[crm].key" {
+		return fakeFullKey, nil
+	}
+	return "", errors.New("not a secret path")
 }
 
 func (f *fakeConfigService) RestartPending() []string {
@@ -173,6 +181,48 @@ func TestHub_ConfigGetUpdateChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	recvType(t, ctx, c2, TypeUsageStats)
+}
+
+func TestHub_SecretRevealOnlyToRequester(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	hub, _, url := newTestHub(t, true)
+	hub.SetConfigService(&fakeConfigService{})
+	c1, c2 := dialTest(t, url), dialTest(t, url)
+	for _, c := range []*Client{c1, c2} {
+		recvType(t, ctx, c, TypeHello)
+		recvType(t, ctx, c, TypeStateSnapshot)
+	}
+
+	tests := []struct {
+		path, wantValue string
+		wantErr         bool
+	}{
+		{"auth.api_keys[crm].key", fakeFullKey, false},
+		{"proxy.port", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if err := c1.RevealSecret(ctx, tt.path); err != nil {
+				t.Fatal(err)
+			}
+			var v SecretValuePayload
+			if err := json.Unmarshal(recvType(t, ctx, c1, TypeSecretValue), &v); err != nil {
+				t.Fatal(err)
+			}
+			if v.Path != tt.path || v.Value != tt.wantValue || (v.Error != "") != tt.wantErr {
+				t.Errorf("secret_value = %+v", v)
+			}
+		})
+	}
+
+	// c2 must not receive secret_value: the first frame it gets is its own snapshot.
+	if err := c2.RequestSnapshot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if raw := recvType(t, ctx, c2, TypeStateSnapshot); strings.Contains(string(raw), fakeFullKey) {
+		t.Errorf("secret leaked to another client: %s", raw)
+	}
 }
 
 func TestHub_ConfigWithoutService(t *testing.T) {

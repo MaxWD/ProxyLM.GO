@@ -167,31 +167,46 @@ func MergeUpdate(current, in *Config, renames []Rename, ops []SecretOp) (next *C
 	return next, generated, errs
 }
 
-// applySecretOp применяет одну операцию к next.
-func applySecretOp(c *Config, op SecretOp, generated map[string]string) error {
-	var (
-		target *string
-		prefix string
-	)
+// secretTarget resolves a secret path to the field it addresses and the
+// prefix used to generate a new value ("" — generation not allowed).
+func secretTarget(c *Config, path string) (*string, string, error) {
 	switch {
-	case op.Path == PathAdminKey:
-		target, prefix = &c.Auth.AdminKey, AdminKeyPrefix
-	case strings.HasPrefix(op.Path, "auth.api_keys[") && strings.HasSuffix(op.Path, "].key"):
-		key := op.Path[len("auth.api_keys[") : len(op.Path)-len("].key")]
+	case path == PathAdminKey:
+		return &c.Auth.AdminKey, AdminKeyPrefix, nil
+	case strings.HasPrefix(path, "auth.api_keys[") && strings.HasSuffix(path, "].key"):
+		key := path[len("auth.api_keys[") : len(path)-len("].key")]
 		idx := resolveItem(apiKeyNames(c.Auth.APIKeys), key)
 		if idx < 0 {
-			return fmt.Errorf("item not found")
+			return nil, "", fmt.Errorf("item not found")
 		}
-		target, prefix = &c.Auth.APIKeys[idx].Key, ClientKeyPrefix
-	case strings.HasPrefix(op.Path, "backends[") && strings.HasSuffix(op.Path, "].api_key"):
-		key := op.Path[len("backends[") : len(op.Path)-len("].api_key")]
+		return &c.Auth.APIKeys[idx].Key, ClientKeyPrefix, nil
+	case strings.HasPrefix(path, "backends[") && strings.HasSuffix(path, "].api_key"):
+		key := path[len("backends[") : len(path)-len("].api_key")]
 		idx := resolveItem(backendNames(c.Backends), key)
 		if idx < 0 {
-			return fmt.Errorf("item not found")
+			return nil, "", fmt.Errorf("item not found")
 		}
-		target = &c.Backends[idx].APIKey
+		return &c.Backends[idx].APIKey, "", nil
 	default:
-		return fmt.Errorf("not a secret path")
+		return nil, "", fmt.Errorf("not a secret path")
+	}
+}
+
+// SecretValue returns the plain value of a secret path (for an explicit
+// reveal request by an admin client). Never log the result.
+func SecretValue(c *Config, path string) (string, error) {
+	t, _, err := secretTarget(c, path)
+	if err != nil {
+		return "", err
+	}
+	return *t, nil
+}
+
+// applySecretOp применяет одну операцию к next.
+func applySecretOp(c *Config, op SecretOp, generated map[string]string) error {
+	target, prefix, err := secretTarget(c, op.Path)
+	if err != nil {
+		return err
 	}
 	switch op.Op {
 	case SecretOpSet:

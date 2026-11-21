@@ -85,6 +85,8 @@ type ConfigService interface {
 	State(ctx context.Context) ConfigStatePayload
 	// Update применяет config_update; обновления сериализуются внутри.
 	Update(ctx context.Context, p ConfigUpdatePayload) ConfigResultPayload
+	// Reveal returns the plain value of a secret path (explicit admin request).
+	Reveal(ctx context.Context, path string) (string, error)
 	// RestartPending — поля, ожидающие рестарта (для hello).
 	RestartPending() []string
 }
@@ -434,6 +436,8 @@ func (h *Hub) handleClientFrame(ctx context.Context, c *hubClient, data []byte) 
 		h.handleConfigGet(ctx, c)
 	case TypeConfigUpdate:
 		h.handleConfigUpdate(ctx, c, data)
+	case TypeSecretReveal:
+		h.handleSecretReveal(ctx, c, data)
 	default:
 		h.log.Debug("ipc: unknown frame type from client", "type", env.Type)
 	}
@@ -479,6 +483,29 @@ func (h *Hub) handleConfigUpdate(ctx context.Context, c *hubClient, data []byte)
 			Payload: ConfigChangedPayload{Revision: res.Revision, RestartPending: res.RestartPending},
 		}, c)
 	}
+}
+
+// handleSecretReveal answers secret_value ONLY to the requesting client.
+func (h *Hub) handleSecretReveal(ctx context.Context, c *hubClient, data []byte) {
+	var frame struct {
+		Payload SecretRevealPayload `json:"payload"`
+	}
+	var res SecretValuePayload
+	switch cs := h.configService(); {
+	case cs == nil:
+		res.Error = "config editing is not available"
+	case json.Unmarshal(data, &frame) != nil || frame.Payload.Path == "":
+		res.Error = "invalid secret_reveal payload"
+	default:
+		res.Path = frame.Payload.Path
+		v, err := cs.Reveal(ctx, frame.Payload.Path)
+		if err != nil {
+			res.Error = err.Error()
+		} else {
+			res.Value = v
+		}
+	}
+	h.sendTo(c, Envelope{Type: TypeSecretValue, Time: time.Now().UTC(), Payload: res})
 }
 
 func nonNil(s []string) []string {

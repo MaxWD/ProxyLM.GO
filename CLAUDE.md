@@ -67,7 +67,7 @@ ProxyLM.GO/
 - Не использовать CGO. SQLite — только `modernc.org/sqlite`.
 - Не использовать тяжёлые HTTP-фреймворки (`gin`, `fiber`, `echo`) — `net/http` + `chi` достаточно.
 - Не блокировать HTTP-handler синхронным I/O в обход воркера (планировщик — единственная точка диспатча к бэкенду).
-- Не логировать API-ключи / admin-ключ. В логи / БД / TUI идёт только `client_name`.
+- Не логировать API-ключи / admin-ключ. В логи / БД / TUI идёт только `client_name`. Исключение: оверлей Config в TUI показывает ключ по явному `v` (`secret_reveal`, только запросившему admin-клиенту, в лог — только путь).
 - Не реализовывать Prometheus, native Ollama API, rate limiting, persistence очереди — это v0.2+ (read-only Web UI реализован в v0.14.0, см. `docs/ARCHITECTURE.md` §19; редактирование конфигурации (read-write) существует только в TUI через admin-WS (v0.16.0, `docs/ARCHITECTURE.md` §11); Web UI остаётся строго read-only, read-write Web UI не делаем).
 - Не ретраить запрос после отправки клиенту первого SSE-чанка (INV-6).
 - Не использовать `panic` для штатных ошибок — только явный `error` через возврат.
