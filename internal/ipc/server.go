@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -23,11 +24,12 @@ type Hub struct {
 	history              *storage.History
 	log                  *slog.Logger
 	snapshotEvery        time.Duration
-	maxAttempts          int
-	showCompletedMinutes int
+	maxAttempts          atomic.Int64 // retry.max_attempts; hot
+	showCompletedMinutes atomic.Int64 // tui.show_completed_minutes; hot
 	perf                 *core.PerfTracker
 	liveTail             *core.LiveTail
-	retentionDays        int
+	retentionDays        atomic.Int64 // storage.history_retention_days; hot
+	configSvc            atomic.Pointer[ConfigService]
 
 	mu      sync.RWMutex
 	clients map[*hubClient]struct{}
@@ -61,23 +63,97 @@ func NewHub(version string, servers []*core.ServerInfo, history *storage.History
 	if snapshotEvery <= 0 {
 		snapshotEvery = 1 * time.Second
 	}
-	return &Hub{
-		version:              version,
-		servers:              servers,
-		history:              history,
-		log:                  log,
-		snapshotEvery:        snapshotEvery,
-		maxAttempts:          maxAttempts,
-		showCompletedMinutes: showCompletedMinutes,
-		perf:                 perf,
-		liveTail:             liveTail,
-		clients:              make(map[*hubClient]struct{}),
+	h := &Hub{
+		version:       version,
+		servers:       servers,
+		history:       history,
+		log:           log,
+		snapshotEvery: snapshotEvery,
+		perf:          perf,
+		liveTail:      liveTail,
+		clients:       make(map[*hubClient]struct{}),
+	}
+	h.maxAttempts.Store(int64(maxAttempts))
+	h.showCompletedMinutes.Store(int64(showCompletedMinutes))
+	return h
+}
+
+// ConfigService — серверная часть редактирования конфигурации (реализуется
+// пакетом daemon). Hub только маршрутизирует сообщения config_*.
+type ConfigService interface {
+	// State читает актуальное состояние конфига (Masked) для config_get.
+	State(ctx context.Context) ConfigStatePayload
+	// Update применяет config_update; обновления сериализуются внутри.
+	Update(ctx context.Context, p ConfigUpdatePayload) ConfigResultPayload
+	// RestartPending — поля, ожидающие рестарта (для hello).
+	RestartPending() []string
+}
+
+// SetConfigService подключает сервис редактирования конфигурации. Без него
+// config_get отвечает config_state с error, а config_update — config_result с error.
+func (h *Hub) SetConfigService(cs ConfigService) {
+	if cs == nil {
+		h.configSvc.Store(nil)
+		return
+	}
+	h.configSvc.Store(&cs)
+}
+
+func (h *Hub) configService() ConfigService {
+	if p := h.configSvc.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// SetMaxAttempts обновляет retry.max_attempts, отдаваемый в snapshot (hot).
+func (h *Hub) SetMaxAttempts(n int) { h.maxAttempts.Store(int64(n)) }
+
+// SetShowCompletedMinutes обновляет tui.show_completed_minutes (hot). При
+// изменении значения всем подключённым клиентам повторно отправляется hello.
+func (h *Hub) SetShowCompletedMinutes(n int) {
+	if h.showCompletedMinutes.Swap(int64(n)) == int64(n) {
+		return
+	}
+	h.broadcastEnvelope(h.helloEnvelope(), nil)
+}
+
+func (h *Hub) helloEnvelope() Envelope {
+	p := HelloPayload{
+		Version:              h.version,
+		NumServers:           len(h.servers),
+		ShowCompletedMinutes: int(h.showCompletedMinutes.Load()),
+	}
+	if cs := h.configService(); cs != nil {
+		p.RestartPending = cs.RestartPending()
+	}
+	return Envelope{Type: TypeHello, Time: time.Now().UTC(), Payload: p}
+}
+
+// broadcastEnvelope рассылает env всем клиентам, кроме except (может быть nil).
+// Переполненный клиент пропускается (его снимет broadcastSnapshot).
+func (h *Hub) broadcastEnvelope(env Envelope, except *hubClient) {
+	data, err := json.Marshal(env)
+	if err != nil {
+		h.log.Warn("ipc: marshal broadcast", "type", string(env.Type), "error", err.Error())
+		return
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.clients {
+		if c == except {
+			continue
+		}
+		select {
+		case c.out <- data:
+		default:
+		}
 	}
 }
 
 // SetRetentionDays задаёт storage.history_retention_days, который отдаётся в
 // usage_stats (0 = история хранится бесконечно). Вызывать до Run/Handler.
-func (h *Hub) SetRetentionDays(days int) { h.retentionDays = days }
+func (h *Hub) SetRetentionDays(days int) { h.retentionDays.Store(int64(days)) }
 
 // Run запускает периодический snapshot broadcaster. Блокирует до отмены ctx.
 func (h *Hub) Run(ctx context.Context) {
@@ -114,6 +190,9 @@ func (h *Hub) Handler() http.HandlerFunc {
 			h.log.Warn("ipc: accept failed", "error", err.Error())
 			return
 		}
+		// config_update несёт весь конфиг (десятки бэкендов/ключей) — дефолтных
+		// 32 KiB может не хватить.
+		conn.SetReadLimit(1 << 20)
 		client := &hubClient{
 			conn:   conn,
 			out:    make(chan []byte, 64),
@@ -123,15 +202,7 @@ func (h *Hub) Handler() http.HandlerFunc {
 		defer h.unregister(client)
 
 		// Hello message + первый snapshot.
-		h.sendTo(client, Envelope{
-			Type: TypeHello,
-			Time: time.Now().UTC(),
-			Payload: HelloPayload{
-				Version:              h.version,
-				NumServers:           len(h.servers),
-				ShowCompletedMinutes: h.showCompletedMinutes,
-			},
-		})
+		h.sendTo(client, h.helloEnvelope())
 		h.sendTo(client, h.buildSnapshot(r.Context()))
 
 		// writer goroutine — для строго одного producer'а на conn.
@@ -293,7 +364,7 @@ func (h *Hub) buildSnapshot(ctx context.Context) Envelope {
 				StartedAt:        r.StartedAt,
 				CompletedAt:      r.CompletedAt,
 				Attempt:          r.Attempt,
-				MaxAttempts:      h.maxAttempts,
+				MaxAttempts:      int(h.maxAttempts.Load()),
 				QueueWaitMs:      queueWait,
 				ModelReloaded:    r.ModelReloaded,
 				LastFailedServer: r.LastFailedServer,
@@ -359,9 +430,62 @@ func (h *Hub) handleClientFrame(ctx context.Context, c *hubClient, data []byte) 
 		h.sendTo(c, snap)
 	case TypeStatsRequest:
 		h.sendTo(c, h.buildUsageStats(ctx, statsWindow(env.Payload)))
+	case TypeConfigGet:
+		h.handleConfigGet(ctx, c)
+	case TypeConfigUpdate:
+		h.handleConfigUpdate(ctx, c, data)
 	default:
 		h.log.Debug("ipc: unknown frame type from client", "type", env.Type)
 	}
+}
+
+// handleConfigGet отвечает config_state только запросившему клиенту.
+func (h *Hub) handleConfigGet(ctx context.Context, c *hubClient) {
+	var st ConfigStatePayload
+	if cs := h.configService(); cs != nil {
+		st = cs.State(ctx)
+	} else {
+		st.Error = "config editing is not available"
+	}
+	if st.RestartPending == nil {
+		st.RestartPending = []string{}
+	}
+	h.sendTo(c, Envelope{Type: TypeConfigState, Time: time.Now().UTC(), Payload: st})
+}
+
+// handleConfigUpdate применяет config_update. config_result (с generated-ключами)
+// уходит ТОЛЬКО запросившему; остальным клиентам — config_changed без секретов.
+func (h *Hub) handleConfigUpdate(ctx context.Context, c *hubClient, data []byte) {
+	var frame struct {
+		Payload ConfigUpdatePayload `json:"payload"`
+	}
+	var res ConfigResultPayload
+	switch cs := h.configService(); {
+	case cs == nil:
+		res.Error = "config editing is not available"
+	case json.Unmarshal(data, &frame) != nil || frame.Payload.Config == nil:
+		res.Error = "invalid config_update payload"
+	default:
+		res = cs.Update(ctx, frame.Payload)
+	}
+	res.Applied = nonNil(res.Applied)
+	res.RestartRequired = nonNil(res.RestartRequired)
+	res.RestartPending = nonNil(res.RestartPending)
+	h.sendTo(c, Envelope{Type: TypeConfigResult, Time: time.Now().UTC(), Payload: res})
+	if res.OK {
+		h.broadcastEnvelope(Envelope{
+			Type:    TypeConfigChanged,
+			Time:    time.Now().UTC(),
+			Payload: ConfigChangedPayload{Revision: res.Revision, RestartPending: res.RestartPending},
+		}, c)
+	}
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // statsWindow извлекает window из произвольного payload (после json.Unmarshal в
@@ -385,7 +509,7 @@ func (h *Hub) buildUsageStats(ctx context.Context, window string) Envelope {
 	payload := UsageStatsPayload{
 		Window:        window,
 		GeneratedAt:   now,
-		RetentionDays: h.retentionDays,
+		RetentionDays: int(h.retentionDays.Load()),
 		Rows:          []UsageRow{},
 	}
 	var since time.Time

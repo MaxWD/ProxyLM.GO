@@ -613,8 +613,8 @@ func makeCoverageSched(t *testing.T, servers []*ServerInfo, retry RetryConfig) (
 	ctx, cancel := context.WithCancel(context.Background())
 	r := NewRouter(servers, RouterPreserveModelCoverage)
 	s := NewScheduler(servers, r, retry, nil)
-	if s.pool == nil || !s.coverageAware {
-		t.Fatal("ожидался pool + coverageAware=true в режиме preserve_model_coverage")
+	if s.pool == nil || s.strategy() != RouterPreserveModelCoverage {
+		t.Fatal("ожидался pool в режиме preserve_model_coverage")
 	}
 	s.Start(ctx)
 	return s, cancel

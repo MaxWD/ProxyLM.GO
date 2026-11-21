@@ -350,6 +350,73 @@ Config search path:
 
 Database: `storage.database_path` (default — `./proxylm.db` relative to the binary).
 
+### Configuration editing (v0.16.0)
+
+The TUI (key `c`) edits `config.yaml` through the daemon over `/admin/stream`; the wire contract is in `docs/API.md` §2.5, the requirement is FR-73. The Web UI stays read-only.
+
+```
+TUI (config overlay) ──config_get / config_update──► ipc.Hub (internal/ipc/server.go)
+                                                        │  routes config_* frames, owns no config logic
+                                                        ▼
+                                              daemon.Applier (internal/daemon/applier.go)
+                                                        │  mu: one State/Update at a time
+                                                        ├─ config.ReadRevision / config.Parse
+                                                        ├─ config.MergeUpdate   (renames, secrets, secret_ops)
+                                                        ├─ Validate / ValidateFields
+                                                        ├─ config.SaveRenamed   (revision check, atomic write, .bak)
+                                                        └─ applyHot(effective → next): hot setters
+                                                              ├─ api.AuthRegistry.Update      (auth.api_keys)
+                                                              ├─ logging.SetLevel             (proxy.log_level, slog.LevelVar)
+                                                              ├─ core.Router.SetStrategy      (routing.strategy) + Scheduler.WakeAll
+                                                              ├─ core.Scheduler.SetMaxConsecutivePerModel / SetRetry
+                                                              ├─ core.Discovery.SetInterval / SetUnhealthyAfter
+                                                              ├─ ipc.Hub.SetMaxAttempts / SetRetentionDays / SetShowCompletedMinutes
+                                                              ├─ api.Server.SetCompat         (compat.response_format_mode)
+                                                              └─ retention atomic             (storage.history_retention_days, maintenance loop)
+Applier ──config_result──► requester only (generated keys)
+Hub     ──config_changed─► all other clients (revision + restart_pending, no secrets)
+```
+
+**Components.**
+
+- `internal/config/fields.go` — `ConfigSchema()`: catalog of editable fields (path, section, label, kind `int|string|bool|enum|secret`, enum values, min/max, apply class `hot|restart`) and sections (`proxy`, `clients`, `admin`, `routing`, `retry`, `discovery`, `storage`, `tui`, `compat`, `backends`). It is sent to the TUI inside `config_state`, so the form is built from the daemon's own catalog. `ClassOf(path)` classifies a concrete path; unknown paths count as `restart` (the safe choice).
+- `internal/config/secrets.go` — `Masked` (secret hints), `MergeUpdate` (see below), `SecretOp` (`set` / `generate` / `clear`), `GenerateKey` (`sk-proxy-` / `sk-admin-` + 32 hex from `crypto/rand`).
+- `internal/config/diff.go` — `Diff(a, b)` returns concrete changed paths; list items are matched by name (index `#N` if the name is empty or duplicated) and reported as a whole (`backends[gpu-1]`); reordering is not a change; secrets take part in the comparison but only paths are returned. `DiffByClass` splits paths into hot and restart.
+- `internal/config/save.go` — `Save` / `SaveRenamed` (details below).
+- `internal/config/validate.go` — `ValidateFields()` returns **all** issues with concrete paths (`proxy.port`, `backends[gpu-1].url`, `auth.api_keys[#2].name`); `Validate()` (CLI) still returns the first one.
+- `internal/daemon/applier.go` — `Applier` implements `ipc.ConfigService` (`State`, `Update`, `RestartPending`).
+
+**`MergeUpdate`.** Builds the next config from the current file content and the client's config: renames are applied to a copy of the file config; non-secret fields and the composition/order of `backends` and `auth.api_keys` come from the client; secrets come from the file (items matched by name after renames) — any secret in the client's config is ignored; then `secret_ops` are applied. The result is validated with `ValidateFields` and normalized with `ApplyDefaults` exactly as `Load` does, so a zero value that reads back as a default does not produce a false `restart_pending`.
+
+**`Save` / `SaveRenamed`.** The revision is the first 12 hex characters of the SHA-256 of the file; a mismatch returns `ErrConflict` before anything is written. The file is parsed into a `yaml.Node` tree, the new config is encoded into a second tree, and the two are merged: unchanged subtrees are not touched, changed values are replaced in place keeping their head/line/foot comments, missing keys are appended, `backends` / `auth.api_keys` items are matched by `name` (matched items keep their comments, removed ones disappear, new ones are added without empty keys; `renames` map the new name to the old item). Whitespace used to align inline comments is normalized by the YAML encoder, blank lines between top-level blocks are restored, CRLF files stay CRLF. The merged text is parsed back and compared with the requested config (`Diff` must be empty), then written to a temp file in the same directory, fsync'ed, the previous content is copied to `<path>.bak`, and the temp file is renamed over the original.
+
+**`Applier.Update` flow.** Under one mutex: read file + revision → compare with the client's revision (mismatch → `conflict`, `restart_pending` recomputed from the file) → `Parse` → `MergeUpdate` → `ValidateFields` (errors → result, nothing written) → `ApplyDefaults` → `Diff(file, next)`; if anything changed (or there are renames) → `SaveRenamed` → compute the new *effective* config (the running config plus the hot fields just applied) → `pending = Diff(effective, next)` → store the `restart_pending` snapshot → `applyHot` pushes the hot differences to the subsystems → build `config_result` (`applied` = hot paths, `restart_required` = restart paths changed by this update, `restart_pending`, `generated`) and log `config updated` with **paths only**. The `Applier` keeps `effective` = the configuration the daemon is actually running; `restart_pending` is always `Diff(effective, file)`, so manual edits of the file and updates by other clients show up as pending too. The pending snapshot is also an atomic pointer so that `hello` can read it from inside a Hub setter without taking the Applier mutex.
+
+**`Hub` side.** `handleConfigGet` replies `config_state` to the requester; `handleConfigUpdate` calls the service, replies `config_result` to the requester (the only place `generated` appears) and, on `ok`, broadcasts `config_changed` to every other client. Without a service the replies carry `error`. The read limit of a WebSocket connection is 1 MiB because `config_update` carries the whole config.
+
+**Hot vs restart.** Each setter is an atomic value swap, so running requests and workers are not interrupted.
+
+| Class | Fields | Applied through |
+|-------|--------|-----------------|
+| hot | `proxy.log_level` | `logging.SetLevel` (`slog.LevelVar`) |
+| hot | `auth.api_keys[].name`, `auth.api_keys[].key` | `api.AuthRegistry.Update` |
+| hot | `routing.strategy` | `Router.SetStrategy` + `Scheduler.WakeAll` |
+| hot | `scheduler.max_consecutive_per_model` | `Scheduler.SetMaxConsecutivePerModel` |
+| hot | `retry.max_attempts`, `retry.initial_backoff_ms`, `retry.max_backoff_ms` | `Scheduler.SetRetry`, `Hub.SetMaxAttempts` |
+| hot | `discovery.interval_seconds`, `discovery.unhealthy_after_failed_polls` | `Discovery.SetInterval`, `Discovery.SetUnhealthyAfter` |
+| hot | `storage.history_retention_days` | retention atomic (maintenance loop), `Hub.SetRetentionDays` |
+| hot | `tui.show_completed_minutes` | `Hub.SetShowCompletedMinutes` (new `hello` payload) |
+| hot | `compat.response_format_mode` | `api.Server.SetCompat` |
+| restart | `proxy.host`, `proxy.port` | — (listener is bound at start) |
+| restart | `auth.admin_key` | — |
+| restart | `discovery.enabled` | — |
+| restart | `storage.database_path`, `storage.vacuum_on_start` | — |
+| restart | `backends[].name`, `url`, `type`, `priority`, `timeout_seconds`, `api_key`, `models` (and adding / removing a backend) | — |
+
+A restart-class change is saved to `config.yaml` but does not affect the running daemon. To apply it, restart the daemon. Until then the paths stay in `restart_pending`; the TUI shows a restart-pending badge in the title and in the editor.
+
+**TUI side.** `internal/tui/config_*.go` is a pure state machine (`config_ui.go`, no I/O: key handlers return an action that the app turns into a command), a draft model (`config_model.go`: editable copy of the config, list add/delete, secret ops, renames, diff review) and a renderer (`config_view.go`). Key `c` (main screen) opens the overlay and sends `config_get`. In the overlay: `Tab` switches between the section list and the fields, `↑`/`↓` move, `←`/`→` cycle an enum, `Enter` / `Space` edit a field, toggle a bool or open a list item, `a` / `d` add / delete a client or backend, on a secret field `t` types a value, `g` generates a key, `c` clears, `u` undoes the pending op; `Ctrl+S` shows a review of the changes and `Enter` saves; `r` reloads from the daemon (only without unsaved edits, or after a banner / conflict); `Esc` / `q` closes (with a discard confirmation if there are unsaved edits). After a save, generated keys are shown once. A banner is shown when another client changed the config (`config_changed`) or on a conflict. Fields that need a restart are marked with `⟳` (`R` with `PROXYLM_NO_UNICODE=1`).
+
 ## 12. CLI Commands
 
 ```
@@ -386,7 +453,7 @@ ProxyLM.GO/
 │   ├── service.go
 │   └── version.go
 ├── internal/
-│   ├── config/                   # YAML parsing + validation + auto-generation
+│   ├── config/                   # YAML parsing + validation + auto-generation; v0.16.0: fields.go (schema), save.go (atomic comment-preserving save), secrets.go, diff.go
 │   ├── logging/                  # log/slog setup (JSON handler, level)
 │   ├── core/
 │   │   ├── models.go             # RequestRecord, ServerInfo, ModelInfo, statuses
@@ -420,6 +487,8 @@ ProxyLM.GO/
 │   │       ├── 0001_init.sql
 │   │       ├── 0002_model_reloaded.sql  # ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0
 │   │       └── 0004_perf_observations.sql # perf_observations table (v0.14.0)
+│   ├── daemon/
+│   │   └── applier.go            # Applier: config_get/config_update service, hot-apply, restart_pending (v0.16.0, see §11)
 │   ├── ipc/
 │   │   ├── messages.go           # JSON message types (Envelope, state_snapshot, request_snapshot, hello, ...)
 │   │   ├── server.go             # publisher on the daemon side; negotiates "proxylm-admin" subprotocol

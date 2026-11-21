@@ -186,6 +186,34 @@ func (c *Client) RequestStats(ctx context.Context, window string) error {
 	return nil
 }
 
+// GetConfig запрашивает текущую конфигурацию (masked) и схему полей. Ответ —
+// фрейм type=config_state через обычный поток Recv, только этому клиенту.
+func (c *Client) GetConfig(ctx context.Context) error {
+	env := Envelope{Type: TypeConfigGet, Payload: struct{}{}}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("ipc: marshal config_get: %w", err)
+	}
+	if err := c.conn.Write(ctx, websocket.MessageText, data); err != nil {
+		return fmt.Errorf("ipc: send config_get: %w", err)
+	}
+	return nil
+}
+
+// UpdateConfig отправляет изменение конфигурации. Итог — фрейм type=config_result
+// через Recv (с generated-ключами, только этому клиенту).
+func (c *Client) UpdateConfig(ctx context.Context, p ConfigUpdatePayload) error {
+	env := Envelope{Type: TypeConfigUpdate, Payload: p}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("ipc: marshal config_update: %w", err)
+	}
+	if err := c.conn.Write(ctx, websocket.MessageText, data); err != nil {
+		return fmt.Errorf("ipc: send config_update: %w", err)
+	}
+	return nil
+}
+
 // IsAuthError возвращает true если err содержит признак ошибки аутентификации (401/403).
 func IsAuthError(err error) bool {
 	if err == nil {

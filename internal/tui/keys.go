@@ -9,6 +9,7 @@ type keyMap struct {
 	Help     key.Binding
 	Models   key.Binding
 	Usage    key.Binding
+	Config   key.Binding
 	UsageWin key.Binding
 	TabLeft  key.Binding
 	TabRight key.Binding
@@ -45,6 +46,10 @@ var keys = keyMap{
 	Usage: key.NewBinding(
 		key.WithKeys("s"),
 		key.WithHelp("s", "usage statistics"),
+	),
+	Config: key.NewBinding(
+		key.WithKeys("c"),
+		key.WithHelp("c", "config editor"),
 	),
 	UsageWin: key.NewBinding(
 		key.WithKeys("1", "2", "3", "4"),

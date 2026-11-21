@@ -30,8 +30,8 @@ const (
 // и потокобезопасен. Round-robin счётчик — единственное локальное состояние.
 type Router struct {
 	servers  []*ServerInfo
-	strategy RouterStrategy
-	rrIdx    atomic.Int64 // только для round_robin; атомарный счётчик без блокировок
+	strategy atomic.Pointer[RouterStrategy] // горячая смена через SetStrategy
+	rrIdx    atomic.Int64                   // только для round_robin; атомарный счётчик без блокировок
 }
 
 // ErrNoServer — нет ни одного healthy-сервера с указанной моделью.
@@ -43,8 +43,23 @@ func (e *ErrNoServer) Error() string {
 
 // NewRouter создаёт router с заданной стратегией над фиксированным списком серверов.
 func NewRouter(servers []*ServerInfo, strategy RouterStrategy) *Router {
-	return &Router{servers: servers, strategy: strategy}
+	r := &Router{servers: servers}
+	r.strategy.Store(&strategy)
+	return r
 }
+
+// Strategy возвращает текущую стратегию (безопасно для конкурентного вызова).
+func (r *Router) Strategy() RouterStrategy {
+	if p := r.strategy.Load(); p != nil {
+		return *p
+	}
+	return RouterModelAffinityLeastBusy
+}
+
+// SetStrategy атомарно меняет стратегию (hot-reload routing.strategy). Уже
+// поставленные в очередь Job'ы доезжают штатно: Scheduler при смене режима
+// (push/pull) дренирует оба источника работы.
+func (r *Router) SetStrategy(s RouterStrategy) { r.strategy.Store(&s) }
 
 // Pick выбирает следующий сервер для запроса с моделью model, исключая серверы
 // из exclude (используется для failover: уже посещённые серверы). Учитывает только
@@ -54,7 +69,7 @@ func (r *Router) Pick(model string, exclude map[string]bool) (*ServerInfo, error
 	if len(candidates) == 0 {
 		return nil, &ErrNoServer{Model: model}
 	}
-	switch r.strategy {
+	switch r.Strategy() {
 	case RouterRoundRobin:
 		return r.pickRoundRobin(candidates), nil
 	case RouterLeastBusy:

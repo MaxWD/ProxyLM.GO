@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,12 +35,12 @@ type proxyHandler struct {
 	sched    *core.Scheduler
 	backends map[string]backends.Backend
 	history  *storage.History
-	compat   config.Compat
-	liveTail *core.LiveTail // «хвост» генерации для streaming (опционально, nil-safe)
+	compat   *atomic.Pointer[config.Compat] // hot-reload compat.*
+	liveTail *core.LiveTail                 // «хвост» генерации для streaming (опционально, nil-safe)
 	log      *slog.Logger
 }
 
-func newProxyHandler(endpoint string, sched *core.Scheduler, bks map[string]backends.Backend, history *storage.History, compat config.Compat, liveTail *core.LiveTail, log *slog.Logger) *proxyHandler {
+func newProxyHandler(endpoint string, sched *core.Scheduler, bks map[string]backends.Backend, history *storage.History, compat *atomic.Pointer[config.Compat], liveTail *core.LiveTail, log *slog.Logger) *proxyHandler {
 	return &proxyHandler{
 		endpoint: endpoint,
 		sched:    sched,
@@ -72,7 +73,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Применяем compat.response_format_mode (normalize_json_object | strict_reject).
 	// passthrough / пусто — no-op. Только для /v1/chat/completions: для completions/
 	// embeddings поле response_format нерелевантно.
-	body, err = applyResponseFormatCompat(body, h.endpoint, h.compat.ResponseFormatMode, h.log)
+	body, err = applyResponseFormatCompat(body, h.endpoint, h.compat.Load().ResponseFormatMode, h.log)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return

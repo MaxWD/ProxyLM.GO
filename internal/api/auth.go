@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"proxylm/internal/config"
 )
@@ -19,23 +20,36 @@ const (
 
 // AuthRegistry — таблица соответствия "api-key → client name" + admin_key.
 type AuthRegistry struct {
-	keys     map[string]string // key → client name
-	adminKey string
+	keys     atomic.Pointer[map[string]string] // key → client name; заменяется целиком через Update
+	adminKey string                            // неизменен до рестарта daemon'а
 }
 
 // NewAuthRegistry строит реестр из config.Auth. Ключи проходят простое сравнение
 // без констант-тайма — мы внутри корпоративного периметра и не пытаемся защититься
 // от timing-атак (это явное упрощение MVP).
 func NewAuthRegistry(a config.Auth) *AuthRegistry {
+	r := &AuthRegistry{adminKey: a.AdminKey}
+	r.Update(a)
+	return r
+}
+
+// Update атомарно подменяет таблицу клиентских ключей (hot-reload auth.api_keys).
+// admin_key НЕ меняется — он вступает в силу только после перезапуска.
+func (r *AuthRegistry) Update(a config.Auth) {
 	m := make(map[string]string, len(a.APIKeys))
 	for _, k := range a.APIKeys {
 		m[k.Key] = k.Name
 	}
-	return &AuthRegistry{keys: m, adminKey: a.AdminKey}
+	r.keys.Store(&m)
 }
 
 // LookupClient возвращает имя клиента по ключу. Пустая строка → ключ не найден.
-func (r *AuthRegistry) LookupClient(key string) string { return r.keys[key] }
+func (r *AuthRegistry) LookupClient(key string) string {
+	if m := r.keys.Load(); m != nil {
+		return (*m)[key]
+	}
+	return ""
+}
 
 // IsAdmin проверяет, совпадает ли ключ с admin_key.
 func (r *AuthRegistry) IsAdmin(key string) bool { return key != "" && key == r.adminKey }

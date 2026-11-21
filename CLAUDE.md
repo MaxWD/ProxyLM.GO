@@ -40,6 +40,7 @@ ProxyLM.GO/
 │   ├── core/                     # scheduler, router, retry, discovery, backends/
 │   ├── api/                      # net/http + chi: /v1/*, /admin/stream, /healthz, streaming (никаких Web UI роутов)
 │   ├── storage/                  # database/sql + modernc.org/sqlite + migrations//go:embed
+│   ├── daemon/                   # Applier: config_get/config_update по admin-WS, hot-применение настроек, restart_pending
 │   ├── ipc/                      # WS publisher (server.go) + client (для TUI)
 │   ├── tui/                      # Bubble Tea Model/Update/View
 │   ├── webui/                    # статический фронтенд (go:embed static/) для команды `proxylm web` — daemon его не отдаёт
@@ -67,7 +68,7 @@ ProxyLM.GO/
 - Не использовать тяжёлые HTTP-фреймворки (`gin`, `fiber`, `echo`) — `net/http` + `chi` достаточно.
 - Не блокировать HTTP-handler синхронным I/O в обход воркера (планировщик — единственная точка диспатча к бэкенду).
 - Не логировать API-ключи / admin-ключ. В логи / БД / TUI идёт только `client_name`.
-- Не реализовывать Prometheus, native Ollama API, rate limiting, persistence очереди — это v0.2+ (read-only Web UI реализован в v0.14.0, см. `docs/ARCHITECTURE.md` §19; полноценный read-write Web UI по-прежнему не делаем).
+- Не реализовывать Prometheus, native Ollama API, rate limiting, persistence очереди — это v0.2+ (read-only Web UI реализован в v0.14.0, см. `docs/ARCHITECTURE.md` §19; редактирование конфигурации (read-write) существует только в TUI через admin-WS (v0.16.0, `docs/ARCHITECTURE.md` §11); Web UI остаётся строго read-only, read-write Web UI не делаем).
 - Не ретраить запрос после отправки клиенту первого SSE-чанка (INV-6).
 - Не использовать `panic` для штатных ошибок — только явный `error` через возврат.
 - Не использовать `time.Sleep` в тестах планировщика — синхронизация через каналы / `sync.WaitGroup`.

@@ -123,6 +123,15 @@ type model struct {
 	usageData   *ipc.UsageStatsPayload
 	usageGen    int
 
+	// Config overlay — редактор конфигурации (хоткей c).
+	showConfig bool
+	cfg        *cfgUI
+	// restartPending — поля конфига, требующие рестарта daemon'а (hello /
+	// config_changed / config_result). Бейдж рядом с заголовком.
+	restartPending []string
+	// extraCmd — tea.Cmd, запрошенная handleEnvelope (например, reload после save).
+	extraCmd tea.Cmd
+
 	// showTail — показывать ли «хвост» генерации (последние токены) для
 	// выбранного streaming-запроса в InfoPane. По умолчанию false (приватность —
 	// это контент ответа модели). Переключается хоткеем t.
@@ -327,7 +336,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Diff/snapshot могли убрать выбранную строку — клампим.
 		m.clampSelected()
 		// Новый snapshot мог принести in-flight сервер — стартуем пульс-анимацию.
-		return m, tea.Batch(m.waitForMessage(), m.maybeStartAnim())
+		extra := m.extraCmd
+		m.extraCmd = nil
+		return m, tea.Batch(m.waitForMessage(), m.maybeStartAnim(), extra)
 
 	case connLostMsg:
 		m.connStatus = connStateReconnecting
@@ -486,12 +497,45 @@ func (m *model) handleEnvelope(env ipc.Envelope, payload json.RawMessage) error 
 			return fmt.Errorf("bad envelope (hello): %w", err)
 		}
 		m.version = h.Version
+		m.restartPending = h.RestartPending
 		// Если daemon явно передал TTL — применяем; 0 трактуем как «не задано»
 		// (daemon тоже подставляет дефолт 30 при загрузке конфига, так что
 		// 0 здесь означает «старый daemon без поля»). Сохраняем встроенный
 		// fallback 30 минут.
 		if h.ShowCompletedMinutes > 0 {
 			m.ttlMinutes = h.ShowCompletedMinutes
+		}
+
+	case ipc.TypeConfigState:
+		var p ipc.ConfigStatePayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("bad envelope (config_state): %w", err)
+		}
+		m.restartPending = p.RestartPending
+		if m.showConfig && m.cfg != nil {
+			m.cfg.onState(p)
+		}
+
+	case ipc.TypeConfigResult:
+		var p ipc.ConfigResultPayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("bad envelope (config_result): %w", err)
+		}
+		if p.OK || p.RestartPending != nil {
+			m.restartPending = p.RestartPending
+		}
+		if m.showConfig && m.cfg != nil && m.cfg.onResult(p) == actGet {
+			m.extraCmd = m.sendGetConfig()
+		}
+
+	case ipc.TypeConfigChanged:
+		var p ipc.ConfigChangedPayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("bad envelope (config_changed): %w", err)
+		}
+		m.restartPending = p.RestartPending
+		if m.showConfig && m.cfg != nil {
+			m.cfg.onChanged(p)
 		}
 
 	case ipc.TypeUsageStats:
@@ -567,6 +611,11 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Config overlay перехватывает все клавиши.
+	if m.showConfig {
+		return m.handleConfigKey(msg)
+	}
+
 	// Usage overlay перехватывает все клавиши.
 	if m.showUsage {
 		return m.handleUsageKey(msg)
@@ -627,6 +676,11 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.usageGen++
 		w := m.usageWindowOrDefault()
 		return m, tea.Batch(m.sendRequestStats(w), usageTick(m.usageGen))
+
+	case key.Matches(msg, keys.Config):
+		m.showConfig = true
+		m.cfg = newCfgUI()
+		return m, m.sendGetConfig()
 
 	case key.Matches(msg, keys.Tail):
 		// Тогл «хвоста» генерации в InfoPane (контент ответа — по явному запросу).
@@ -703,6 +757,35 @@ func (m *model) sendRequestStats(window string) tea.Cmd {
 		_ = m.client.RequestStats(m.ctx, window)
 		return nil
 	}
+}
+
+// sendGetConfig запрашивает config_state; ответ придёт через Recv-поток.
+func (m *model) sendGetConfig() tea.Cmd {
+	return func() tea.Msg {
+		_ = m.client.GetConfig(m.ctx)
+		return nil
+	}
+}
+
+// sendUpdateConfig отправляет config_update; ответ — config_result.
+func (m *model) sendUpdateConfig(p ipc.ConfigUpdatePayload) tea.Cmd {
+	return func() tea.Msg {
+		_ = m.client.UpdateConfig(m.ctx, p)
+		return nil
+	}
+}
+
+// handleConfigKey обрабатывает клавиши при открытом Config overlay.
+func (m *model) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.cfg.handleKey(msg) {
+	case actGet:
+		return m, m.sendGetConfig()
+	case actUpdate:
+		return m, m.sendUpdateConfig(m.cfg.out)
+	case actClose:
+		m.showConfig = false
+	}
+	return m, nil
 }
 
 // usageTick планирует следующий refresh Usage overlay для поколения gen.
@@ -1054,6 +1137,9 @@ func (m *model) View() string {
 	// Title — показывает версию daemon'а или статус соединения.
 	ver := m.connStatusLabel()
 	title := StyleTitle.Render("Proxy") + StyleHeader.Render("LM.GO") + StyleTitle.Render(" "+ver)
+	if badge := restartBadge(m.restartPending); badge != "" {
+		title += "  " + badge
+	}
 
 	// Panels.
 	header := renderHeaderBar(m.servers, reqSlice, flashModels, colorIdx, m.animPhase,
@@ -1101,6 +1187,11 @@ func (m *model) View() string {
 	// Help overlay — рендерится поверх всего содержимого.
 	if m.showHelp {
 		return renderHelpOverlay(m.width, m.height)
+	}
+
+	// Config overlay — редактор конфигурации.
+	if m.showConfig && m.cfg != nil {
+		return renderConfigOverlay(cfgView{UI: m.cfg, RestartPending: m.restartPending}, m.width, m.height)
 	}
 
 	// Usage overlay — статистика использования.

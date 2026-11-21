@@ -646,6 +646,8 @@ Sent **only to the connection that sent a `stats_request`** (see §2.3); it is n
 | `rows[].last_used` | string (RFC3339) | most recent request creation time in the group |
 | `error` | string | present only if the DB query failed; `rows` is then empty |
 
+Configuration messages (`config_state`, `config_result`, `config_changed`) are described in §2.5.
+
 ### 2.3. Client → server messages
 
 #### `request_snapshot`
@@ -676,6 +678,214 @@ Requests a usage aggregate (v0.15.0). The daemon replies with a `usage_stats` me
 | 1008 | Protocol violation / invalid JSON |
 | 1011 | Internal server error |
 | 4401 | Auth failure during connection (along with HTTP 401 before upgrade) |
+
+### 2.5. Configuration editing (v0.16.0)
+
+Five frame types let an admin client read and edit `config.yaml` through the daemon. They travel over the same `/admin/stream` connection and need no extra privilege beyond the admin key. Only the TUI uses them; the Web UI never sends `config_update` (it stays read-only, see §1.9). Design and apply classes: `docs/ARCHITECTURE.md` §11; requirement: FR-73 in `docs/SRS.md`.
+
+| Type | Direction | Recipient |
+|------|-----------|-----------|
+| `config_get` | client → server | — |
+| `config_state` | server → client | the requester only |
+| `config_update` | client → server | — |
+| `config_result` | server → client | the requester only |
+| `config_changed` | server → client | all **other** connected clients, after a successful update |
+
+In addition, `hello` carries `restart_pending` (array of paths, omitted when empty): fields already changed in the file but not yet applied to the running daemon.
+
+#### Field path syntax
+
+| Form | Example | Meaning |
+|------|---------|---------|
+| scalar | `retry.max_attempts`, `proxy.port` | a plain field |
+| list item field | `backends[gpu-1].url`, `auth.api_keys[crm].key` | an element of `backends` / `auth.api_keys`, addressed by its `name` |
+| whole list item | `backends[gpu-1]`, `auth.api_keys[crm]` | an added, removed or changed element as a whole (in `applied` / `restart_*` lists) |
+| index fallback | `backends[#2].url`, `auth.api_keys[#0].name` | 0-based index, used when the item name is empty or duplicated |
+| schema form | `backends[].url`, `auth.api_keys[].key` | `[]` instead of the name; used only in `schema.fields[].path` |
+
+Reordering list items is not reported as a change.
+
+#### `config_get`
+
+```json
+{"type": "config_get", "time": "2026-11-21T10:00:00Z", "payload": {}}
+```
+
+#### `config_state`
+
+```json
+{
+  "type": "config_state",
+  "time": "2026-11-21T10:00:00Z",
+  "payload": {
+    "path": "C:\\proxylm\\config.yaml",
+    "revision": "3fa91c0b72de",
+    "config": {
+      "proxy": {"host": "0.0.0.0", "port": 8080, "log_level": "info"},
+      "auth": {
+        "api_keys": [{"name": "crm", "key": "…9d2f"}],
+        "admin_key": "…a1b2"
+      },
+      "routing": {"strategy": "model_affinity_least_busy"},
+      "retry": {"max_attempts": 3, "initial_backoff_ms": 500, "max_backoff_ms": 5000},
+      "backends": [
+        {"name": "gpu-1", "url": "http://10.0.0.5:1234", "priority": 1, "type": "lmstudio",
+         "timeout_seconds": 600, "api_key": "", "models": []}
+      ]
+    },
+    "schema": {
+      "sections": [
+        {"id": "proxy", "label": "Proxy"},
+        {"id": "clients", "label": "Clients", "list": "auth.api_keys"},
+        {"id": "backends", "label": "Backends", "list": "backends"}
+      ],
+      "fields": [
+        {"path": "proxy.port", "section": "proxy", "label": "Port", "help": "Listen port",
+         "kind": "int", "apply": "restart", "min": 1, "max": 65535},
+        {"path": "proxy.log_level", "section": "proxy", "label": "Log level",
+         "kind": "enum", "enum": ["debug", "info", "warning", "error"], "apply": "hot"},
+        {"path": "backends[].url", "section": "backends", "label": "URL",
+         "kind": "string", "apply": "restart"}
+      ]
+    },
+    "restart_pending": []
+  }
+}
+```
+
+(`config` and `schema` are abbreviated here; the real frame contains every section and every field.)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | string | absolute path of the config file the daemon edits |
+| `revision` | string | revision of the file content: first 12 hex characters of its SHA-256. Send it back in `config_update` |
+| `config` | object | the whole config as in the file (JSON keys equal the YAML keys), with **every secret masked** (see below). `null` if the file could not be read or parsed (then `error` is set) |
+| `schema` | object | catalog of editable fields; the single source of truth for both the daemon and the TUI form |
+| `schema.sections[]` | array | `id`, `label`, and optional `list` — the list path (`auth.api_keys`, `backends`) if the section consists of items. Sections: `proxy`, `clients`, `admin`, `routing`, `retry`, `discovery`, `storage`, `tui`, `compat`, `backends` |
+| `schema.fields[]` | array | one entry per editable field, in `config.example.yaml` order |
+| `schema.fields[].path` | string | schema-form path (`[]` for list items) |
+| `schema.fields[].section` / `label` / `help` | string | section id, short label, optional hint |
+| `schema.fields[].kind` | string | `int`, `string`, `bool`, `enum`, `secret`. `backends[].models` is a list of strings edited as a comma-separated `string` |
+| `schema.fields[].enum` | array of string | allowed values for `kind=enum` |
+| `schema.fields[].apply` | string | `hot` — applied to the running daemon at once; `restart` — saved, effective after the daemon is restarted |
+| `schema.fields[].min` / `max` | int | optional numeric bounds |
+| `restart_pending` | array of string | paths where the file differs from the **running** configuration; never `null` |
+| `error` | string | present only if the file could not be read / parsed |
+
+**Secret masking.** `auth.api_keys[].key`, `auth.admin_key` and `backends[].api_key` are replaced by a hint: empty string if the secret is not set; `…` followed by the last 4 characters; `…set` if the secret is 8 characters or shorter. The full value is never sent to any client.
+
+#### `config_update`
+
+```json
+{
+  "type": "config_update",
+  "time": "2026-11-21T10:01:00Z",
+  "payload": {
+    "revision": "3fa91c0b72de",
+    "config": { "...": "the whole edited config, same shape as config_state.config" },
+    "secret_ops": [
+      {"path": "auth.api_keys[ci].key", "op": "generate"},
+      {"path": "backends[gpu-1].api_key", "op": "set", "value": "sk-upstream-..."},
+      {"path": "auth.admin_key", "op": "clear"}
+    ],
+    "renames": [
+      {"list": "backends", "from": "gpu-1", "to": "gpu-main"}
+    ]
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `revision` | string | the `revision` the edit is based on (from the last `config_state` / `config_result` / `config_changed`) |
+| `config` | object | the whole desired config. Required. Non-secret fields and the composition and order of `backends` / `auth.api_keys` are taken from it. **Secret values inside it are ignored** |
+| `secret_ops[]` | array | explicit secret operations: `path` (`auth.api_keys[<name>].key`, `auth.admin_key`, `backends[<name>].api_key`; names are the **post-rename** names), `op` (`set` — requires non-empty `value`; `generate`; `clear`), `value` |
+| `renames[]` | array | renamed list items: `list` (`backends` or `auth.api_keys`), `from`, `to`. Lets the daemon carry the item's secret and its YAML comments over to the new name |
+
+Processing order on the daemon: serialize against other updates → check `revision` → apply `renames` to the current file config → take non-secret fields and list composition from `config`, secrets from the current file (matched by name after renames) → apply `secret_ops` → validate everything → save → push hot changes to the running subsystems. Any error before saving leaves the file and the running daemon untouched.
+
+Generated keys: `generate` produces `sk-proxy-` + 32 hex characters for a client key and `sk-admin-` + 32 hex characters for the admin key (from `crypto/rand`); generating an upstream `backends[].api_key` is rejected.
+
+An update that changes nothing (no differing field, no renames) does not rewrite the file and returns the current revision with `ok=true`.
+
+#### `config_result`
+
+```json
+{
+  "type": "config_result",
+  "time": "2026-11-21T10:01:00Z",
+  "payload": {
+    "ok": true,
+    "revision": "c7e4150a98b3",
+    "applied": ["retry.max_attempts", "auth.api_keys[ci]"],
+    "restart_required": ["backends[gpu-1]"],
+    "restart_pending": ["backends[gpu-1]"],
+    "generated": {"auth.api_keys[ci].key": "sk-proxy-0123456789abcdef0123456789abcdef"}
+  }
+}
+```
+
+A failed validation looks like this:
+
+```json
+{
+  "type": "config_result",
+  "time": "2026-11-21T10:01:00Z",
+  "payload": {
+    "ok": false,
+    "revision": "3fa91c0b72de",
+    "applied": [],
+    "restart_required": [],
+    "restart_pending": [],
+    "errors": [
+      {"path": "proxy.port", "msg": "must be in 1..65535, got 0"},
+      {"path": "backends[gpu-1].url", "msg": "..."}
+    ],
+    "error": "validation failed"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ok` | bool | `true` if the update was accepted (saved, or a no-op) |
+| `conflict` | bool | `true` on a revision conflict (see below); omitted otherwise |
+| `revision` | string | the file revision after the update (on failure — the current one) |
+| `applied` | array of string | changed paths of `hot` fields that are now in effect; never `null` |
+| `restart_required` | array of string | changed paths of `restart` fields saved by **this** update; never `null` |
+| `restart_pending` | array of string | **all** paths where the file differs from the running configuration (including earlier updates); never `null` |
+| `errors[]` | array | field-level validation errors, all at once: `path` (concrete path, `backends[gpu-1].url` or `#N` form) and `msg` |
+| `generated` | object | path → **full** new key for every `generate` op. Sent only in this frame, only to the requester |
+| `error` | string | summary on failure: `validation failed`, `save failed: ...`, `config is required`, `invalid config_update payload`, `config editing is not available`, the conflict message, or a read/parse error |
+
+#### `config_changed`
+
+Sent to every connected client except the requester after a successful `config_update`. It contains no secrets and no field values: a client that has the editor open should reload.
+
+```json
+{
+  "type": "config_changed",
+  "time": "2026-11-21T10:01:00Z",
+  "payload": {"revision": "c7e4150a98b3", "restart_pending": ["backends[gpu-1]"]}
+}
+```
+
+#### Conflict semantics
+
+The revision is a hash of the file bytes, so a conflict also occurs when `config.yaml` was edited by hand or by another client between `config_get` and `config_update`. On a mismatch the daemon answers `config_result` with `ok=false`, `conflict=true`, `error` = `conflict: config file changed since it was read; reload it`, and a recomputed `restart_pending`. The file and the running daemon are not touched, and nothing is merged automatically: the client must send `config_get`, show the fresh state and let the user redo the edit. The TUI shows a banner and the `r` key reloads (local edits are discarded).
+
+#### Secret handling rules
+
+1. Secrets travel from the daemon to clients only masked (see `config_state`).
+2. Secret values in a client-supplied `config` are ignored; the only way to change a secret is `secret_ops`. Without an op, an existing secret is kept (matched by item name after renames).
+3. A newly added list item has an empty secret until a `set` / `generate` op is applied (a client key must be non-empty for the config to validate).
+4. Full generated keys appear only in `config_result.generated` for the requesting connection — never in `config_changed`, `state_snapshot`, logs or the database. The client must show them once and not store them.
+5. Changing `auth.admin_key` is a `restart` change: the running daemon keeps accepting the old key until it is restarted.
+6. The daemon logs `config updated` with the changed paths and counters only — never values or secrets.
+
+#### Saving
+
+The daemon writes the file atomically (temp file in the same directory, fsync, rename) and keeps the previous version as `config.yaml.bak` (overwritten by each save). Comments and key order of the existing file are preserved: values are updated in place in the parsed YAML tree, missing keys are appended, removed list items disappear together with their comments. Whitespace used to align inline comments is normalized, blank lines between top-level blocks are restored, and CRLF files stay CRLF. The result is parsed back and compared with the requested config before it replaces the file.
 
 ---
 

@@ -1,6 +1,10 @@
 package ipc
 
-import "time"
+import (
+	"time"
+
+	"proxylm/internal/config"
+)
 
 // Тип сообщения, передаваемого через WebSocket /admin/stream.
 // Используется как для server→client (TUI), так и (потенциально) для client→server.
@@ -12,6 +16,13 @@ const (
 	TypeRequestSnapshot MessageType = "request_snapshot" // client→server: запрос немедленного snapshot
 	TypeStatsRequest    MessageType = "stats_request"    // client→server: запрос статистики использования
 	TypeUsageStats      MessageType = "usage_stats"      // server→client: ответ, только запросившему
+
+	// Редактирование конфигурации (v0.16.0). Только по admin-WS.
+	TypeConfigGet     MessageType = "config_get"     // client→server, payload {}
+	TypeConfigState   MessageType = "config_state"   // server→requester
+	TypeConfigUpdate  MessageType = "config_update"  // client→server
+	TypeConfigResult  MessageType = "config_result"  // server→requester
+	TypeConfigChanged MessageType = "config_changed" // server→all OTHER clients
 )
 
 // Envelope — внешний контейнер для всех сообщений. Конкретный payload зависит от Type.
@@ -27,6 +38,9 @@ type HelloPayload struct {
 	Version              string `json:"version"`
 	NumServers           int    `json:"num_servers"`
 	ShowCompletedMinutes int    `json:"show_completed_minutes,omitempty"`
+	// RestartPending — поля конфига, изменённые в файле, но не применённые к
+	// работающему daemon'у (нужен рестарт). Введено в v0.16.0.
+	RestartPending []string `json:"restart_pending,omitempty"`
 }
 
 // ServerState — снимок состояния одного backend-сервера.
@@ -188,6 +202,45 @@ type UsageStatsPayload struct {
 	RetentionDays int        `json:"retention_days"`  // storage.history_retention_days; 0 = keep forever
 	Rows          []UsageRow `json:"rows"`            // never null: empty slice
 	Error         string     `json:"error,omitempty"` // set if the DB query failed
+}
+
+// ConfigStatePayload — server→requester ответ на config_get. Config — Masked
+// (секреты заменены подсказками), RestartPending никогда не null.
+type ConfigStatePayload struct {
+	Path           string         `json:"path"`
+	Revision       string         `json:"revision"`
+	Config         *config.Config `json:"config"`
+	Schema         config.Schema  `json:"schema"`
+	RestartPending []string       `json:"restart_pending"`
+	Error          string         `json:"error,omitempty"`
+}
+
+// ConfigUpdatePayload — client→server config_update. Секреты внутри Config
+// игнорируются; менять их можно только через SecretOps.
+type ConfigUpdatePayload struct {
+	Revision  string            `json:"revision"`
+	Config    *config.Config    `json:"config"`
+	SecretOps []config.SecretOp `json:"secret_ops,omitempty"`
+	Renames   []config.Rename   `json:"renames,omitempty"`
+}
+
+// ConfigResultPayload — server→requester итог config_update.
+type ConfigResultPayload struct {
+	OK              bool                `json:"ok"`
+	Conflict        bool                `json:"conflict,omitempty"`
+	Revision        string              `json:"revision"`
+	Applied         []string            `json:"applied"`          // never null
+	RestartRequired []string            `json:"restart_required"` // never null; changed in this update
+	RestartPending  []string            `json:"restart_pending"`  // never null; all fields differing from the RUNNING config
+	Errors          []config.FieldError `json:"errors,omitempty"`
+	Generated       map[string]string   `json:"generated,omitempty"` // path → full new key; ONLY to the requester
+	Error           string              `json:"error,omitempty"`
+}
+
+// ConfigChangedPayload — server→все ДРУГИЕ клиенты после успешного config_update.
+type ConfigChangedPayload struct {
+	Revision       string   `json:"revision"`
+	RestartPending []string `json:"restart_pending"`
 }
 
 // StateSnapshotPayload — полный снимок состояния (отправляется при подключении и периодически).

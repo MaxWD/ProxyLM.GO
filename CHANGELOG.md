@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-21
+
+### Added
+
+- **Configuration editing from the TUI** (key `c`, **Config** overlay): sections Proxy / Clients / Admin / Routing / Retry / Discovery / Storage / TUI / Compat / Backends, field form built from the daemon's own schema (`config.ConfigSchema()`), add / delete of clients and backends, renames, change review (`Ctrl+S`) and save. The Web UI stays read-only.
+- **Five new `/admin/stream` frames** (docs/API.md §2.5): `config_get` → `config_state` (masked config, schema, revision, `restart_pending`), `config_update` → `config_result` (applied / restart_required / restart_pending / field errors / generated keys), and `config_changed` broadcast to the other clients; `hello` carries `restart_pending`. Field paths: `backends[gpu-1].url`, with `#N` fallback for unnamed or duplicate items.
+- **Hot apply** (no restart) for `proxy.log_level`, `auth.api_keys[]`, `routing.strategy`, `scheduler.max_consecutive_per_model`, `retry.*`, `discovery.interval_seconds`, `discovery.unhealthy_after_failed_polls`, `storage.history_retention_days`, `tui.show_completed_minutes`, `compat.response_format_mode` — through new thread-safe setters (`AuthRegistry.Update`, `logging.SetLevel`, `Router.SetStrategy`, `Scheduler.SetRetry` / `SetMaxConsecutivePerModel` / `WakeAll`, `Discovery.SetInterval` / `SetUnhealthyAfter`, `Hub.Set*`, `Server.SetCompat`) orchestrated by the new `internal/daemon` package (`Applier`). Other fields (`proxy.host`, `proxy.port`, `auth.admin_key`, `discovery.enabled`, `storage.database_path`, `storage.vacuum_on_start`, all `backends[]`) are saved and reported as `restart_required` / `restart_pending`; they take effect after the daemon is restarted. The TUI shows a restart-pending badge.
+- **Safe config saving** (`internal/config/save.go`): optimistic concurrency by file revision (conflict instead of overwrite), atomic write (temp file + fsync + rename), previous version kept as `config.yaml.bak`, comments and key order of the existing file preserved (inline-comment alignment whitespace is normalized); a no-op update does not rewrite the file.
+- **Secret handling**: secrets are sent to clients only as hints (`…` + last 4 characters, `…set`); values inside a submitted config are ignored; changes only through `secret_ops` (`set` / `generate` / `clear`); generated keys (`sk-proxy-…` / `sk-admin-…`) go only to the requesting client; the audit log (`config updated`) contains field paths only.
+
+### Changed
+
+- `config.Config` gains JSON tags (wire format of the config frames); `config.ValidateFields()` returns all validation errors with concrete field paths (`Validate()` for the CLI is unchanged).
+- The `/admin/stream` read limit is raised to 1 MiB (a `config_update` carries the whole config).
+- TUI main footer and F1 help list the `c Config` key.
+
 ## [0.15.2] - 2026-11-21
 
 ### Fixed
@@ -262,7 +278,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release. See [README.md](README.md) for project description, quick start, and configuration reference.
 
-[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.2...HEAD
+[Unreleased]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.2...v0.16.0
 [0.15.2]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/MaxWD/ProxyLM.GO/compare/v0.14.1...v0.15.0

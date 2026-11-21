@@ -18,12 +18,20 @@ func Init(level string, w io.Writer) *slog.Logger {
 	if w == nil {
 		w = os.Stderr
 	}
-	lvl := parseLevel(level)
-	h := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: lvl})
+	levelVar.Set(parseLevel(level))
+	h := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: &levelVar})
 	logger := slog.New(h)
 	slog.SetDefault(logger)
 	return logger
 }
+
+// levelVar — динамический уровень логирования, общий для всех logger'ов Init;
+// меняется на лету через SetLevel (hot-reload proxy.log_level).
+var levelVar slog.LevelVar
+
+// SetLevel меняет минимальный уровень логирования у уже созданных logger'ов.
+// Принимает те же значения, что Init: debug, info, warn/warning, error.
+func SetLevel(level string) { levelVar.Set(parseLevel(level)) }
 
 func parseLevel(s string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(s)) {
