@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"proxylm/internal/core/backends"
@@ -80,8 +81,9 @@ func (d *Discovery) InitialHealthcheck(ctx context.Context) {
 // и обновляющий ServerInfo.Models / Healthy. При unhealthyAfterFailedPolls
 // подряд неуспехах сервер помечается Healthy=false.
 type Discovery struct {
-	interval                  time.Duration
-	unhealthyAfterFailedPolls int
+	interval                  atomic.Int64  // time.Duration; меняется через SetInterval
+	unhealthyAfterFailedPolls atomic.Int64  // меняется через SetUnhealthyAfter
+	resetCh                   chan struct{} // будит Run для пересоздания ticker'а
 	log                       *slog.Logger
 
 	mu      sync.Mutex
@@ -106,10 +108,32 @@ func NewDiscovery(interval time.Duration, unhealthyAfterFailedPolls int, log *sl
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Discovery{
-		interval:                  interval,
-		unhealthyAfterFailedPolls: unhealthyAfterFailedPolls,
-		log:                       log,
+	d := &Discovery{
+		resetCh: make(chan struct{}, 1),
+		log:     log,
+	}
+	d.interval.Store(int64(interval))
+	d.unhealthyAfterFailedPolls.Store(int64(unhealthyAfterFailedPolls))
+	return d
+}
+
+// SetInterval меняет период опроса на лету: запущенный ticker пересоздаётся.
+// Неположительные значения игнорируются.
+func (d *Discovery) SetInterval(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	d.interval.Store(int64(interval))
+	select {
+	case d.resetCh <- struct{}{}:
+	default: // сигнал уже ожидает — Run прочитает актуальное значение
+	}
+}
+
+// SetUnhealthyAfter меняет порог подряд неуспешных опросов до unhealthy.
+func (d *Discovery) SetUnhealthyAfter(n int) {
+	if n >= 1 {
+		d.unhealthyAfterFailedPolls.Store(int64(n))
 	}
 }
 
@@ -140,12 +164,14 @@ func (d *Discovery) Run(ctx context.Context) {
 	// быстрее увидел доступные модели.
 	d.pollAll(ctx)
 
-	t := time.NewTicker(d.interval)
+	t := time.NewTicker(time.Duration(d.interval.Load()))
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-d.resetCh:
+			t.Reset(time.Duration(d.interval.Load()))
 		case <-t.C:
 			d.pollAll(ctx)
 		}
@@ -189,7 +215,7 @@ func (d *Discovery) pollOne(ctx context.Context, e *discoveryEntry) {
 		}
 
 		e.failedPolls++
-		if e.failedPolls >= d.unhealthyAfterFailedPolls && e.server.Healthy.Load() {
+		if int64(e.failedPolls) >= d.unhealthyAfterFailedPolls.Load() && e.server.Healthy.Load() {
 			e.server.Healthy.Store(false)
 			if shapeErr {
 				d.log.Warn("сервер помечен unhealthy: /v1/models is not OpenAI-compatible — check backends[].url",

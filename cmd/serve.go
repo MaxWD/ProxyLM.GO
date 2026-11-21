@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"proxylm/internal/config"
 	"proxylm/internal/core"
 	"proxylm/internal/core/backends"
+	"proxylm/internal/daemon"
 	"proxylm/internal/ipc"
 	"proxylm/internal/logging"
 	"proxylm/internal/storage"
@@ -187,7 +189,10 @@ func runDaemon(parent context.Context, cfgPath string) error {
 	sched.Start(ctx)
 
 	// 5) Maintenance (retention истории + trim perf-наблюдений): простой ticker под ctx.
-	go runMaintenance(ctx, history, perfStore, time.Duration(cfg.Storage.HistoryRetentionDays)*24*time.Hour, log)
+	// retentionDays — атомарный: меняется на лету из редактора конфигурации.
+	var retentionDays atomic.Int64
+	retentionDays.Store(int64(cfg.Storage.HistoryRetentionDays))
+	go runMaintenance(ctx, history, perfStore, &retentionDays, log)
 
 	// 6) IPC Hub (WebSocket publisher) + HTTP API
 	// liveTail — общий in-memory стор «хвоста» генерации: пишется streaming-
@@ -208,6 +213,16 @@ func runDaemon(parent context.Context, cfgPath string) error {
 		LiveTail: liveTail,
 		Log:      log,
 	})
+	// Редактор конфигурации: hot-изменения пушатся в подсистемы через setters.
+	hub.SetConfigService(daemon.New(cfgPath, cfg, daemon.Targets{
+		Auth:          auth,
+		Server:        srv,
+		Router:        router,
+		Sched:         sched,
+		Disc:          disc,
+		Hub:           hub,
+		RetentionDays: &retentionDays,
+	}, log))
 	srv.SetAdminStream(hub.Handler())
 	if err := srv.ListenAndServe(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("HTTP server: %w", err)
@@ -225,7 +240,7 @@ func runDaemon(parent context.Context, cfgPath string) error {
 //     точек на ключ (server, model, endpoint), симметрично in-memory PerfTracker).
 //
 // Обе уборки независимы: ошибка одной не блокирует другую.
-func runMaintenance(ctx context.Context, history *storage.History, perfStore *storage.PerfStore, retention time.Duration, log interface{ Warn(string, ...any) }) {
+func runMaintenance(ctx context.Context, history *storage.History, perfStore *storage.PerfStore, retentionDays *atomic.Int64, log interface{ Warn(string, ...any) }) {
 	t := time.NewTicker(1 * time.Hour)
 	defer t.Stop()
 	for {
@@ -233,7 +248,7 @@ func runMaintenance(ctx context.Context, history *storage.History, perfStore *st
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if retention > 0 {
+			if retention := time.Duration(retentionDays.Load()) * 24 * time.Hour; retention > 0 {
 				cutoff := time.Now().Add(-retention)
 				n, err := history.DeleteOlderThan(ctx, cutoff)
 				if err != nil {

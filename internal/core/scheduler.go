@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -81,26 +82,23 @@ type JobResult struct {
 // Scheduler — оркестратор: per-server worker'ы + интеграция с router/retry.
 type Scheduler struct {
 	router  *Router
-	retry   RetryConfig
+	retry   atomic.Pointer[RetryConfig] // меняется на лету через SetRetry
 	servers []*ServerInfo
 	log     *slog.Logger
 	wg      sync.WaitGroup
 
-	// pool активен только для pull-стратегий (deferred_model_then_capable и
-	// preserve_model_coverage). В push-стратегиях остаётся nil, и Submit/worker
-	// идут по классическому пути через router.Pick + srv.Queue.
+	// pool — общий пул Job'ов pull-стратегий (deferred_model_then_capable,
+	// preserve_model_coverage, fair_share_round_robin). Создаётся всегда: режим
+	// (push / pull) определяется ТЕКУЩЕЙ стратегией роутера на каждом Submit и
+	// на каждой итерации worker'а, поэтому routing.strategy меняется на лету.
+	// В push-стратегиях Submit/worker идут через router.Pick + srv.Queue; Job'ы,
+	// оставшиеся в «чужом» источнике после смены стратегии, дренируются worker'ом.
 	pool *JobPool
-	// coverageAware включён для стратегии preserve_model_coverage; меняет
-	// логику PopFor: не drain'им current_model вслепую, а только если этот
-	// сервер — единственный её держатель.
-	coverageAware bool
-	// fairShare включён для стратегии fair_share_round_robin (v0.10.0).
-	// При maxConsecutivePerModel > 0 воркер принудительно переключает
-	// модель после N подряд диспатчей одной.
-	// 0 (или отрицательное) — лимит отключён, поведение совпадает с
-	// deferred_model_then_capable.
-	fairShare              bool
-	maxConsecutivePerModel int
+	// maxConsecutivePerModel — лимит подряд выполненных задач одной модели
+	// (fair_share_round_robin, v0.10.0). 0 (или отрицательное) — лимит отключён,
+	// поведение совпадает с deferred_model_then_capable. Меняется через
+	// SetMaxConsecutivePerModel.
+	maxConsecutivePerModel atomic.Int64
 
 	// perf — скользящее окно tok/s и TTFT по парам (server, model).
 	// nil-safe: если не передан, Record просто игнорируется.
@@ -147,24 +145,54 @@ func NewSchedulerWithOptions(servers []*ServerInfo, router *Router, retry RetryC
 	}
 	s := &Scheduler{
 		router:  router,
-		retry:   retry,
 		servers: servers,
 		log:     log,
+		pool:    NewJobPool(),
 	}
-	if router != nil {
-		switch router.strategy {
-		case RouterDeferredModelThenCapable:
-			s.pool = NewJobPool()
-		case RouterPreserveModelCoverage:
-			s.pool = NewJobPool()
-			s.coverageAware = true
-		case RouterFairShareRoundRobin:
-			s.pool = NewJobPool()
-			s.fairShare = true
-			s.maxConsecutivePerModel = opts.MaxConsecutivePerModel
-		}
-	}
+	s.retry.Store(&retry)
+	s.maxConsecutivePerModel.Store(int64(opts.MaxConsecutivePerModel))
 	return s
+}
+
+// retryConfig возвращает актуальные параметры retry.
+func (s *Scheduler) retryConfig() RetryConfig {
+	if p := s.retry.Load(); p != nil {
+		return *p
+	}
+	return RetryConfig{}
+}
+
+// SetRetry атомарно подменяет параметры retry (hot-reload retry.*). Действует
+// на следующие попытки и backoff'ы, в том числе уже выполняющихся Submit'ов.
+func (s *Scheduler) SetRetry(r RetryConfig) { s.retry.Store(&r) }
+
+// SetMaxConsecutivePerModel меняет лимит подряд диспатчей одной модели
+// (scheduler.max_consecutive_per_model); 0 — лимит отключён.
+func (s *Scheduler) SetMaxConsecutivePerModel(n int) { s.maxConsecutivePerModel.Store(int64(n)) }
+
+// WakeAll будит worker'ы всех серверов — после смены стратегии они заново
+// проверяют свои очереди и общий пул.
+func (s *Scheduler) WakeAll() {
+	for _, srv := range s.servers {
+		srv.Wake()
+	}
+}
+
+// strategy возвращает текущую стратегию роутера (nil-router → push по умолчанию).
+func (s *Scheduler) strategy() RouterStrategy {
+	if s.router == nil {
+		return RouterModelAffinityLeastBusy
+	}
+	return s.router.Strategy()
+}
+
+// isPullStrategy — стратегии с late-binding через общий JobPool.
+func isPullStrategy(st RouterStrategy) bool {
+	switch st {
+	case RouterDeferredModelThenCapable, RouterPreserveModelCoverage, RouterFairShareRoundRobin:
+		return true
+	}
+	return false
 }
 
 // SetPerfTracker подключает скользящее окно метрик; Scheduler начнёт
@@ -205,7 +233,7 @@ func (s *Scheduler) Submit(ctx context.Context, j *Job) (JobResult, error) {
 		res JobResult
 		err error
 	)
-	if s.pool != nil {
+	if isPullStrategy(s.strategy()) {
 		res, err = s.submitDeferred(ctx, j)
 	} else {
 		res, err = s.submitPush(ctx, j)
@@ -253,7 +281,7 @@ func (s *Scheduler) submitPush(ctx context.Context, j *Job) (JobResult, error) {
 
 		total++
 		if total > 1 {
-			if d := s.retry.Backoff(total); d > 0 {
+			if d := s.retryConfig().Backoff(total); d > 0 {
 				select {
 				case <-ctx.Done():
 					lastResult.Attempt = total
@@ -282,7 +310,7 @@ func (s *Scheduler) submitPush(ctx context.Context, j *Job) (JobResult, error) {
 			"model", j.Model,
 			"attempt", total,
 			"error", runErr.Error())
-		if total >= s.retry.MaxAttempts {
+		if total >= s.retryConfig().MaxAttempts {
 			return lastResult, lastErr
 		}
 		lastFailed = srv.Name
@@ -323,7 +351,7 @@ func (s *Scheduler) submitDeferred(ctx context.Context, j *Job) (JobResult, erro
 	for {
 		// Между попытками — backoff. На первой total ещё 0, паузы нет.
 		if total >= 1 {
-			if d := s.retry.Backoff(total + 1); d > 0 {
+			if d := s.retryConfig().Backoff(total + 1); d > 0 {
 				select {
 				case <-ctx.Done():
 					return lastResult, ctx.Err()
@@ -355,7 +383,7 @@ func (s *Scheduler) submitDeferred(ctx context.Context, j *Job) (JobResult, erro
 			if errors.Is(res.Err, context.Canceled) || errors.Is(res.Err, context.DeadlineExceeded) {
 				return res, res.Err
 			}
-			if total >= s.retry.MaxAttempts {
+			if total >= s.retryConfig().MaxAttempts {
 				return res, res.Err
 			}
 			// Rolling exclusion: исключаем только этот сервер на следующую попытку.
@@ -440,22 +468,40 @@ func (s *Scheduler) worker(ctx context.Context, srv *ServerInfo) {
 				s.failPending(srv, ctx.Err())
 				return
 			}
-			var j *Job
-			switch {
-			case s.pool != nil && s.coverageAware:
-				j = s.pool.PopForCoverage(srv, s.servers)
-			case s.pool != nil && s.fairShare:
-				j = s.pool.PopForFairShare(srv, s.maxConsecutivePerModel)
-			case s.pool != nil:
-				j = s.pool.PopFor(srv)
-			default:
-				j = s.pickNext(srv)
-			}
+			j := s.nextJob(srv)
 			if j == nil {
 				break
 			}
 			s.dispatch(ctx, srv, j)
 		}
+	}
+}
+
+// nextJob выбирает следующий Job для сервера по ТЕКУЩЕЙ стратегии. Если
+// стратегия сменилась (push <-> pull) и в «старом» источнике остались Job'ы —
+// они дренируются после основного (INV-7: ничего не теряется при hot-reload).
+func (s *Scheduler) nextJob(srv *ServerInfo) *Job {
+	switch st := s.strategy(); st {
+	case RouterPreserveModelCoverage:
+		if j := s.pool.PopForCoverage(srv, s.servers); j != nil {
+			return j
+		}
+		return s.pickNext(srv)
+	case RouterFairShareRoundRobin:
+		if j := s.pool.PopForFairShare(srv, int(s.maxConsecutivePerModel.Load())); j != nil {
+			return j
+		}
+		return s.pickNext(srv)
+	case RouterDeferredModelThenCapable:
+		if j := s.pool.PopFor(srv); j != nil {
+			return j
+		}
+		return s.pickNext(srv)
+	default:
+		if j := s.pickNext(srv); j != nil {
+			return j
+		}
+		return s.pool.PopFor(srv)
 	}
 }
 
@@ -715,14 +761,12 @@ func (s *Scheduler) failPending(srv *ServerInfo, err error) {
 		default:
 		}
 	}
-	if s.pool != nil {
-		for _, j := range s.pool.drainAll() {
-			// Submit может ещё держать сторону приёма; буфер j.done=1 не даст
-			// блокироваться, даже если Submit уже отменился по ctx.
-			select {
-			case j.done <- JobResult{Err: fmt.Errorf("scheduler stopped: %w", err)}:
-			default:
-			}
+	for _, j := range s.pool.drainAll() {
+		// Submit может ещё держать сторону приёма; буфер j.done=1 не даст
+		// блокироваться, даже если Submit уже отменился по ctx.
+		select {
+		case j.done <- JobResult{Err: fmt.Errorf("scheduler stopped: %w", err)}:
+		default:
 		}
 	}
 }

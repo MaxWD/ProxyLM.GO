@@ -646,6 +646,8 @@ Sec-WebSocket-Protocol: proxylm-admin, proxylm-token.<base64url-no-padding(admin
 | `rows[].last_used` | string (RFC3339) | время создания самого свежего запроса в группе |
 | `error` | string | присутствует только при ошибке запроса к БД; `rows` при этом пуст |
 
+Сообщения конфигурации (`config_state`, `config_result`, `config_changed`) описаны в §2.5.
+
 ### 2.3. Сообщения клиент → серверу
 
 #### `request_snapshot`
@@ -676,6 +678,214 @@ Payload не требуется. Daemon отвечает обычным `state_s
 | 1008 | Нарушение протокола / неверный JSON |
 | 1011 | Внутренняя ошибка сервера |
 | 4401 | Auth failure при подключении (вместе с HTTP 401 до апгрейда) |
+
+### 2.5. Редактирование конфигурации (v0.16.0)
+
+Пять типов фреймов позволяют admin-клиенту читать и редактировать `config.yaml` через daemon. Они идут по тому же соединению `/admin/stream` и не требуют привилегий сверх admin-ключа. Используются только в TUI; Web UI никогда не отправляет `config_update` (он остаётся read-only, см. §1.9). Устройство и классы применения — `docs/ARCHITECTURE.ru.md` §11; требование — FR-73 в `docs/SRS.ru.md`.
+
+| Тип | Направление | Получатель |
+|-----|-------------|------------|
+| `config_get` | клиент → сервер | — |
+| `config_state` | сервер → клиент | только запросивший |
+| `config_update` | клиент → сервер | — |
+| `config_result` | сервер → клиент | только запросивший |
+| `config_changed` | сервер → клиент | все **остальные** подключённые клиенты, после успешного обновления |
+
+Дополнительно `hello` несёт `restart_pending` (массив путей, опускается, если пуст): поля, уже изменённые в файле, но ещё не применённые к работающему daemon'у.
+
+#### Синтаксис путей полей
+
+| Форма | Пример | Смысл |
+|-------|--------|-------|
+| скаляр | `retry.max_attempts`, `proxy.port` | обычное поле |
+| поле элемента списка | `backends[gpu-1].url`, `auth.api_keys[crm].key` | элемент `backends` / `auth.api_keys`, адресуемый по `name` |
+| элемент списка целиком | `backends[gpu-1]`, `auth.api_keys[crm]` | добавленный, удалённый или изменённый элемент целиком (в списках `applied` / `restart_*`) |
+| fallback по индексу | `backends[#2].url`, `auth.api_keys[#0].name` | 0-based индекс, если имя элемента пустое или повторяется |
+| форма схемы | `backends[].url`, `auth.api_keys[].key` | `[]` вместо имени; только в `schema.fields[].path` |
+
+Перестановка элементов списка изменением не считается.
+
+#### `config_get`
+
+```json
+{"type": "config_get", "time": "2026-11-21T10:00:00Z", "payload": {}}
+```
+
+#### `config_state`
+
+```json
+{
+  "type": "config_state",
+  "time": "2026-11-21T10:00:00Z",
+  "payload": {
+    "path": "C:\\proxylm\\config.yaml",
+    "revision": "3fa91c0b72de",
+    "config": {
+      "proxy": {"host": "0.0.0.0", "port": 8080, "log_level": "info"},
+      "auth": {
+        "api_keys": [{"name": "crm", "key": "…9d2f"}],
+        "admin_key": "…a1b2"
+      },
+      "routing": {"strategy": "model_affinity_least_busy"},
+      "retry": {"max_attempts": 3, "initial_backoff_ms": 500, "max_backoff_ms": 5000},
+      "backends": [
+        {"name": "gpu-1", "url": "http://10.0.0.5:1234", "priority": 1, "type": "lmstudio",
+         "timeout_seconds": 600, "api_key": "", "models": []}
+      ]
+    },
+    "schema": {
+      "sections": [
+        {"id": "proxy", "label": "Proxy"},
+        {"id": "clients", "label": "Clients", "list": "auth.api_keys"},
+        {"id": "backends", "label": "Backends", "list": "backends"}
+      ],
+      "fields": [
+        {"path": "proxy.port", "section": "proxy", "label": "Port", "help": "Listen port",
+         "kind": "int", "apply": "restart", "min": 1, "max": 65535},
+        {"path": "proxy.log_level", "section": "proxy", "label": "Log level",
+         "kind": "enum", "enum": ["debug", "info", "warning", "error"], "apply": "hot"},
+        {"path": "backends[].url", "section": "backends", "label": "URL",
+         "kind": "string", "apply": "restart"}
+      ]
+    },
+    "restart_pending": []
+  }
+}
+```
+
+(`config` и `schema` здесь сокращены; реальный фрейм содержит все разделы и все поля.)
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `path` | string | абсолютный путь файла конфига, который редактирует daemon |
+| `revision` | string | ревизия содержимого файла: первые 12 hex-символов его SHA-256. Возвращается в `config_update` |
+| `config` | object | весь конфиг как в файле (JSON-ключи совпадают с YAML-ключами), **каждый секрет замаскирован** (см. ниже). `null`, если файл не удалось прочитать или разобрать (тогда задан `error`) |
+| `schema` | object | каталог редактируемых полей; единый источник правды и для daemon'а, и для формы TUI |
+| `schema.sections[]` | array | `id`, `label` и необязательный `list` — путь списка (`auth.api_keys`, `backends`), если раздел состоит из элементов. Разделы: `proxy`, `clients`, `admin`, `routing`, `retry`, `discovery`, `storage`, `tui`, `compat`, `backends` |
+| `schema.fields[]` | array | по записи на каждое редактируемое поле, в порядке `config.example.yaml` |
+| `schema.fields[].path` | string | путь в форме схемы (`[]` для элементов списков) |
+| `schema.fields[].section` / `label` / `help` | string | id раздела, короткая подпись, необязательная подсказка |
+| `schema.fields[].kind` | string | `int`, `string`, `bool`, `enum`, `secret`. `backends[].models` — список строк, редактируется как `string` через запятую |
+| `schema.fields[].enum` | array of string | допустимые значения для `kind=enum` |
+| `schema.fields[].apply` | string | `hot` — применяется к работающему daemon'у сразу; `restart` — сохраняется, действует после перезапуска daemon'а |
+| `schema.fields[].min` / `max` | int | необязательные числовые границы |
+| `restart_pending` | array of string | пути, по которым файл отличается от **работающей** конфигурации; никогда не `null` |
+| `error` | string | только если файл не удалось прочитать / разобрать |
+
+**Маскирование секретов.** `auth.api_keys[].key`, `auth.admin_key` и `backends[].api_key` заменяются подсказкой: пустая строка, если секрет не задан; `…` и последние 4 символа; `…set`, если секрет длиной 8 символов или короче. Полное значение не отправляется ни одному клиенту.
+
+#### `config_update`
+
+```json
+{
+  "type": "config_update",
+  "time": "2026-11-21T10:01:00Z",
+  "payload": {
+    "revision": "3fa91c0b72de",
+    "config": { "...": "весь отредактированный конфиг, той же формы, что config_state.config" },
+    "secret_ops": [
+      {"path": "auth.api_keys[ci].key", "op": "generate"},
+      {"path": "backends[gpu-1].api_key", "op": "set", "value": "sk-upstream-..."},
+      {"path": "auth.admin_key", "op": "clear"}
+    ],
+    "renames": [
+      {"list": "backends", "from": "gpu-1", "to": "gpu-main"}
+    ]
+  }
+}
+```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `revision` | string | `revision`, на которой основана правка (из последнего `config_state` / `config_result` / `config_changed`) |
+| `config` | object | весь желаемый конфиг. Обязателен. Из него берутся несекретные поля, а также состав и порядок `backends` / `auth.api_keys`. **Значения секретов в нём игнорируются** |
+| `secret_ops[]` | array | явные операции над секретами: `path` (`auth.api_keys[<name>].key`, `auth.admin_key`, `backends[<name>].api_key`; имена — **после** переименований), `op` (`set` — требует непустой `value`; `generate`; `clear`), `value` |
+| `renames[]` | array | переименованные элементы списков: `list` (`backends` или `auth.api_keys`), `from`, `to`. Позволяет daemon'у перенести секрет элемента и его YAML-комментарии на новое имя |
+
+Порядок обработки в daemon'е: сериализация относительно других обновлений → проверка `revision` → применение `renames` к текущему конфигу файла → несекретные поля и состав списков берутся из `config`, секреты — из текущего файла (сопоставление по имени после переименований) → применение `secret_ops` → валидация всего → сохранение → пуш hot-изменений в работающие подсистемы. Любая ошибка до сохранения оставляет файл и работающий daemon нетронутыми.
+
+Генерация ключей: `generate` создаёт `sk-proxy-` + 32 hex-символа для ключа клиента и `sk-admin-` + 32 hex-символа для admin-ключа (из `crypto/rand`); генерация upstream-ключа `backends[].api_key` отклоняется.
+
+Обновление без изменений (ни одно поле не отличается, переименований нет) файл не переписывает и возвращает текущую ревизию с `ok=true`.
+
+#### `config_result`
+
+```json
+{
+  "type": "config_result",
+  "time": "2026-11-21T10:01:00Z",
+  "payload": {
+    "ok": true,
+    "revision": "c7e4150a98b3",
+    "applied": ["retry.max_attempts", "auth.api_keys[ci]"],
+    "restart_required": ["backends[gpu-1]"],
+    "restart_pending": ["backends[gpu-1]"],
+    "generated": {"auth.api_keys[ci].key": "sk-proxy-0123456789abcdef0123456789abcdef"}
+  }
+}
+```
+
+Провал валидации выглядит так:
+
+```json
+{
+  "type": "config_result",
+  "time": "2026-11-21T10:01:00Z",
+  "payload": {
+    "ok": false,
+    "revision": "3fa91c0b72de",
+    "applied": [],
+    "restart_required": [],
+    "restart_pending": [],
+    "errors": [
+      {"path": "proxy.port", "msg": "must be in 1..65535, got 0"},
+      {"path": "backends[gpu-1].url", "msg": "..."}
+    ],
+    "error": "validation failed"
+  }
+}
+```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `ok` | bool | `true`, если обновление принято (сохранено или no-op) |
+| `conflict` | bool | `true` при конфликте ревизий (см. ниже); иначе опускается |
+| `revision` | string | ревизия файла после обновления (при ошибке — текущая) |
+| `applied` | array of string | изменённые пути `hot`-полей, которые уже действуют; никогда не `null` |
+| `restart_required` | array of string | изменённые пути `restart`-полей, сохранённых **этим** обновлением; никогда не `null` |
+| `restart_pending` | array of string | **все** пути, по которым файл отличается от работающей конфигурации (включая прежние обновления); никогда не `null` |
+| `errors[]` | array | ошибки валидации по полям, все сразу: `path` (конкретный путь, форма `backends[gpu-1].url` или `#N`) и `msg` |
+| `generated` | object | путь → **полный** новый ключ для каждой операции `generate`. Передаётся только в этом фрейме, только запросившему |
+| `error` | string | краткая причина при неудаче: `validation failed`, `save failed: ...`, `config is required`, `invalid config_update payload`, `config editing is not available`, сообщение о конфликте или ошибка чтения / разбора |
+
+#### `config_changed`
+
+Отправляется всем подключённым клиентам, кроме запросившего, после успешного `config_update`. Не содержит ни секретов, ни значений полей: клиенту с открытым редактором следует перезагрузить конфиг.
+
+```json
+{
+  "type": "config_changed",
+  "time": "2026-11-21T10:01:00Z",
+  "payload": {"revision": "c7e4150a98b3", "restart_pending": ["backends[gpu-1]"]}
+}
+```
+
+#### Семантика конфликта
+
+Ревизия — хэш байтов файла, поэтому конфликт возникает и тогда, когда `config.yaml` между `config_get` и `config_update` правили вручную или другой клиент. При несовпадении daemon отвечает `config_result` с `ok=false`, `conflict=true`, `error` = `conflict: config file changed since it was read; reload it` и пересчитанным `restart_pending`. Файл и работающий daemon не затрагиваются, автоматического слияния нет: клиент должен отправить `config_get`, показать свежее состояние и дать пользователю повторить правку. TUI показывает баннер, клавиша `r` перезагружает (локальные правки теряются).
+
+#### Правила работы с секретами
+
+1. Секреты идут от daemon'а к клиентам только в замаскированном виде (см. `config_state`).
+2. Значения секретов в присланном клиентом `config` игнорируются; единственный способ изменить секрет — `secret_ops`. Без операции существующий секрет сохраняется (сопоставление по имени элемента после переименований).
+3. У нового элемента списка секрет пуст, пока не применена операция `set` / `generate` (ключ клиента должен быть непустым, иначе конфиг не пройдёт валидацию).
+4. Полные сгенерированные ключи появляются только в `config_result.generated` для запросившего соединения — никогда в `config_changed`, `state_snapshot`, логах или БД. Клиент должен показать их один раз и не сохранять.
+5. Смена `auth.admin_key` — `restart`-изменение: работающий daemon принимает прежний ключ до перезапуска.
+6. Daemon логирует `config updated` только с путями изменённых полей и счётчиками — никогда значения или секреты.
+
+#### Сохранение
+
+Daemon пишет файл атомарно (временный файл в том же каталоге, fsync, rename) и оставляет прежнюю версию как `config.yaml.bak` (перезаписывается при каждом сохранении). Комментарии и порядок ключей существующего файла сохраняются: значения обновляются на месте в разобранном YAML-дереве, недостающие ключи добавляются, удалённые элементы списков исчезают вместе со своими комментариями. Пробелы, выравнивающие inline-комментарии, нормализуются, пустые строки между верхнеуровневыми блоками восстанавливаются, CRLF-файлы остаются CRLF. Результат разбирается обратно и сравнивается с запрошенным конфигом до замены файла.
 
 ---
 

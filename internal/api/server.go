@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -23,7 +24,7 @@ import (
 // Управляет жизненным циклом *http.Server и роутингом /v1/*, /admin/*, /healthz.
 type Server struct {
 	cfg      config.Proxy
-	compat   config.Compat
+	compat   atomic.Pointer[config.Compat] // hot-reload compat.*
 	auth     *AuthRegistry
 	sched    *core.Scheduler
 	backends map[string]backends.Backend
@@ -58,9 +59,8 @@ func New(cfg config.Proxy, d Deps) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{
+	s := &Server{
 		cfg:      cfg,
-		compat:   d.Compat,
 		auth:     d.Auth,
 		sched:    d.Sched,
 		backends: d.Backends,
@@ -69,7 +69,14 @@ func New(cfg config.Proxy, d Deps) *Server {
 		liveTail: d.LiveTail,
 		log:      log,
 	}
+	compat := d.Compat
+	s.compat.Store(&compat)
+	return s
 }
+
+// SetCompat атомарно подменяет compat-настройки (hot-reload compat.*);
+// действует на следующие запросы.
+func (s *Server) SetCompat(c config.Compat) { s.compat.Store(&c) }
 
 // Router возвращает http.Handler сервера — полезно для интеграционных тестов
 // (httptest.NewServer без поднятия реального listener'а).
@@ -94,7 +101,7 @@ func (s *Server) router() http.Handler {
 		r.Use(requestIDMiddleware) // X-Request-Id в response headers
 		r.Get("/models", listModelsHandler(s.servers))
 		for _, endpoint := range []string{"/chat/completions", "/completions", "/embeddings"} {
-			h := newProxyHandler("/v1"+endpoint, s.sched, s.backends, s.history, s.compat, s.liveTail, s.log)
+			h := newProxyHandler("/v1"+endpoint, s.sched, s.backends, s.history, &s.compat, s.liveTail, s.log)
 			r.Post(endpoint, h.ServeHTTP)
 		}
 		ah := newAnthropicHandler(s.sched, s.backends, s.history, s.log)

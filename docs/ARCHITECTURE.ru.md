@@ -350,6 +350,73 @@ CREATE INDEX idx_perf_obs_key ON perf_observations(server, model, endpoint, id);
 
 БД: `storage.database_path` (по умолчанию — `./proxylm.db` относительно бинарника).
 
+### Редактирование конфигурации (v0.16.0)
+
+TUI (клавиша `c`) редактирует `config.yaml` через daemon по `/admin/stream`; wire-контракт — `docs/API.ru.md` §2.5, требование — FR-73. Web UI остаётся read-only.
+
+```
+TUI (оверлей конфига) ──config_get / config_update──► ipc.Hub (internal/ipc/server.go)
+                                                        │  маршрутизирует фреймы config_*, логики конфига не содержит
+                                                        ▼
+                                              daemon.Applier (internal/daemon/applier.go)
+                                                        │  mu: одновременно только один State/Update
+                                                        ├─ config.ReadRevision / config.Parse
+                                                        ├─ config.MergeUpdate   (переименования, секреты, secret_ops)
+                                                        ├─ Validate / ValidateFields
+                                                        ├─ config.SaveRenamed   (проверка ревизии, атомарная запись, .bak)
+                                                        └─ applyHot(effective → next): hot-сеттеры
+                                                              ├─ api.AuthRegistry.Update      (auth.api_keys)
+                                                              ├─ logging.SetLevel             (proxy.log_level, slog.LevelVar)
+                                                              ├─ core.Router.SetStrategy      (routing.strategy) + Scheduler.WakeAll
+                                                              ├─ core.Scheduler.SetMaxConsecutivePerModel / SetRetry
+                                                              ├─ core.Discovery.SetInterval / SetUnhealthyAfter
+                                                              ├─ ipc.Hub.SetMaxAttempts / SetRetentionDays / SetShowCompletedMinutes
+                                                              ├─ api.Server.SetCompat         (compat.response_format_mode)
+                                                              └─ atomic retention             (storage.history_retention_days, цикл обслуживания)
+Applier ──config_result──► только запросившему (сгенерированные ключи)
+Hub     ──config_changed─► всем остальным клиентам (revision + restart_pending, без секретов)
+```
+
+**Компоненты.**
+
+- `internal/config/fields.go` — `ConfigSchema()`: каталог редактируемых полей (путь, раздел, подпись, kind `int|string|bool|enum|secret`, допустимые значения enum, min/max, класс применения `hot|restart`) и разделов (`proxy`, `clients`, `admin`, `routing`, `retry`, `discovery`, `storage`, `tui`, `compat`, `backends`). Каталог отправляется в TUI внутри `config_state`, поэтому форма строится из собственного каталога daemon'а. `ClassOf(path)` классифицирует конкретный путь; неизвестные пути считаются `restart` (безопасный вариант).
+- `internal/config/secrets.go` — `Masked` (подсказки вместо секретов), `MergeUpdate` (см. ниже), `SecretOp` (`set` / `generate` / `clear`), `GenerateKey` (`sk-proxy-` / `sk-admin-` + 32 hex из `crypto/rand`).
+- `internal/config/diff.go` — `Diff(a, b)` возвращает конкретные изменённые пути; элементы списков сопоставляются по имени (индекс `#N`, если имя пустое или повторяется) и сообщаются целиком (`backends[gpu-1]`); перестановка изменением не считается; секреты участвуют в сравнении, но возвращаются только пути. `DiffByClass` делит пути на hot и restart.
+- `internal/config/save.go` — `Save` / `SaveRenamed` (подробности ниже).
+- `internal/config/validate.go` — `ValidateFields()` возвращает **все** замечания с конкретными путями (`proxy.port`, `backends[gpu-1].url`, `auth.api_keys[#2].name`); `Validate()` (CLI) по-прежнему возвращает первое.
+- `internal/daemon/applier.go` — `Applier` реализует `ipc.ConfigService` (`State`, `Update`, `RestartPending`).
+
+**`MergeUpdate`.** Строит следующий конфиг из содержимого файла и конфига клиента: к копии конфига файла применяются переименования; несекретные поля и состав/порядок `backends` и `auth.api_keys` берутся от клиента; секреты берутся из файла (элементы сопоставляются по имени после переименований) — любой секрет в конфиге клиента игнорируется; затем применяются `secret_ops`. Результат проверяется `ValidateFields` и нормализуется `ApplyDefaults` ровно так же, как это делает `Load`, поэтому нулевое значение, которое после перезапуска читается как дефолт, не даёт ложного `restart_pending`.
+
+**`Save` / `SaveRenamed`.** Ревизия — первые 12 hex-символов SHA-256 файла; несовпадение возвращает `ErrConflict` до какой-либо записи. Файл разбирается в дерево `yaml.Node`, новый конфиг кодируется во второе дерево, и деревья сливаются: неизменённые поддеревья не трогаются, изменённые значения заменяются на месте с сохранением head/line/foot-комментариев, недостающие ключи добавляются, элементы `backends` / `auth.api_keys` сопоставляются по `name` (совпавшие сохраняют комментарии, удалённые исчезают, новые добавляются без пустых ключей; `renames` сопоставляют новое имя со старым элементом). Пробелы, выравнивающие inline-комментарии, нормализуются YAML-энкодером, пустые строки между верхнеуровневыми блоками восстанавливаются, CRLF-файлы остаются CRLF. Результат слияния разбирается обратно и сравнивается с запрошенным конфигом (`Diff` должен быть пустым), затем пишется во временный файл в том же каталоге, делается fsync, прежнее содержимое копируется в `<path>.bak`, и временный файл переименовывается поверх оригинала.
+
+**Поток `Applier.Update`.** Под одним мьютексом: чтение файла + ревизии → сравнение с ревизией клиента (несовпадение → `conflict`, `restart_pending` пересчитывается по файлу) → `Parse` → `MergeUpdate` → `ValidateFields` (ошибки → в результат, ничего не записывается) → `ApplyDefaults` → `Diff(file, next)`; если что-то изменилось (или есть переименования) → `SaveRenamed` → вычисление нового *effective*-конфига (работающий конфиг плюс только что применённые hot-поля) → `pending = Diff(effective, next)` → сохранение снимка `restart_pending` → `applyHot` пушит hot-различия в подсистемы → формирование `config_result` (`applied` = hot-пути, `restart_required` = restart-пути, изменённые этим обновлением, `restart_pending`, `generated`) и запись в лог `config updated` **только с путями**. `Applier` хранит `effective` — конфигурацию, с которой daemon реально работает; `restart_pending` всегда равен `Diff(effective, file)`, поэтому ручные правки файла и обновления других клиентов тоже отображаются как pending. Снимок pending — ещё и атомарный указатель, чтобы `hello` мог прочитать его изнутри сеттера Hub без захвата мьютекса `Applier`.
+
+**Сторона `Hub`.** `handleConfigGet` отвечает `config_state` запросившему; `handleConfigUpdate` вызывает сервис, отвечает `config_result` запросившему (единственное место, где есть `generated`) и при `ok` рассылает `config_changed` всем остальным клиентам. Без сервиса ответы несут `error`. Лимит чтения WebSocket-соединения — 1 МиБ, так как `config_update` несёт весь конфиг.
+
+**Hot и restart.** Каждый сеттер — атомарная подмена значения, поэтому выполняющиеся запросы и воркеры не прерываются.
+
+| Класс | Поля | Применяется через |
+|-------|------|-------------------|
+| hot | `proxy.log_level` | `logging.SetLevel` (`slog.LevelVar`) |
+| hot | `auth.api_keys[].name`, `auth.api_keys[].key` | `api.AuthRegistry.Update` |
+| hot | `routing.strategy` | `Router.SetStrategy` + `Scheduler.WakeAll` |
+| hot | `scheduler.max_consecutive_per_model` | `Scheduler.SetMaxConsecutivePerModel` |
+| hot | `retry.max_attempts`, `retry.initial_backoff_ms`, `retry.max_backoff_ms` | `Scheduler.SetRetry`, `Hub.SetMaxAttempts` |
+| hot | `discovery.interval_seconds`, `discovery.unhealthy_after_failed_polls` | `Discovery.SetInterval`, `Discovery.SetUnhealthyAfter` |
+| hot | `storage.history_retention_days` | atomic retention (цикл обслуживания), `Hub.SetRetentionDays` |
+| hot | `tui.show_completed_minutes` | `Hub.SetShowCompletedMinutes` (новый payload `hello`) |
+| hot | `compat.response_format_mode` | `api.Server.SetCompat` |
+| restart | `proxy.host`, `proxy.port` | — (listener привязывается при старте) |
+| restart | `auth.admin_key` | — |
+| restart | `discovery.enabled` | — |
+| restart | `storage.database_path`, `storage.vacuum_on_start` | — |
+| restart | `backends[].name`, `url`, `type`, `priority`, `timeout_seconds`, `api_key`, `models` (и добавление / удаление backend'а) | — |
+
+Restart-изменение сохраняется в `config.yaml`, но на работающий daemon не влияет. Чтобы применить его, перезапустите daemon. До тех пор пути остаются в `restart_pending`; TUI показывает бейдж restart pending в заголовке и в редакторе.
+
+**Сторона TUI.** `internal/tui/config_*.go` — чистая state machine (`config_ui.go`, без I/O: обработчики клавиш возвращают действие, которое приложение превращает в команду), модель черновика (`config_model.go`: редактируемая копия конфига, добавление/удаление элементов списков, secret-операции, переименования, ревью diff) и рендерер (`config_view.go`). Клавиша `c` (главный экран) открывает оверлей и отправляет `config_get`. В оверлее: `Tab` переключает список разделов и поля, `↑`/`↓` — перемещение, `←`/`→` — перебор enum, `Enter` / `Space` — правка поля, переключение bool или открытие элемента списка, `a` / `d` — добавить / удалить клиента или backend; на секретном поле `t` — ввести значение, `g` — сгенерировать ключ, `c` — очистить, `u` — отменить отложенную операцию; `Ctrl+S` показывает ревью изменений, `Enter` сохраняет; `r` перезагружает из daemon'а (только без несохранённых правок либо после баннера / конфликта); `Esc` / `q` закрывает (с подтверждением отказа от несохранённых правок). После сохранения сгенерированные ключи показываются один раз. Баннер появляется, когда конфиг изменил другой клиент (`config_changed`), или при конфликте. Поля, требующие перезапуска, помечены `⟳` (`R` при `PROXYLM_NO_UNICODE=1`).
+
 ## 12. Команды CLI
 
 ```
@@ -386,7 +453,7 @@ ProxyLM.GO/
 │   ├── service.go
 │   └── version.go
 ├── internal/
-│   ├── config/                   # YAML парсинг + валидация + автогенерация
+│   ├── config/                   # YAML парсинг + валидация + автогенерация; v0.16.0: fields.go (схема), save.go (атомарное сохранение с комментариями), secrets.go, diff.go
 │   ├── logging/                  # log/slog setup (JSON handler, level)
 │   ├── core/
 │   │   ├── models.go             # RequestRecord, ServerInfo, ModelInfo, статусы
@@ -420,6 +487,8 @@ ProxyLM.GO/
 │   │       ├── 0001_init.sql
 │   │       ├── 0002_model_reloaded.sql  # ALTER TABLE requests ADD COLUMN model_reloaded INTEGER NOT NULL DEFAULT 0
 │   │       └── 0004_perf_observations.sql # таблица perf_observations (v0.14.0)
+│   ├── daemon/
+│   │   └── applier.go            # Applier: сервис config_get/config_update, hot-применение, restart_pending (v0.16.0, см. §11)
 │   ├── ipc/
 │   │   ├── messages.go           # типы JSON-сообщений (Envelope, state_snapshot, request_snapshot, hello, ...)
 │   │   ├── server.go             # publisher на стороне daemon; согласовывает подпротокол "proxylm-admin"

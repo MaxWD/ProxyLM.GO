@@ -42,6 +42,12 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	return Parse(data)
+}
+
+// Parse разбирает содержимое config.yaml (с подстановкой дефолтов). Validate не
+// вызывается.
+func Parse(data []byte) (*Config, error) {
 	cfg := &Config{}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
@@ -72,6 +78,11 @@ func ResolveRelative(path string) string {
 	}
 	return filepath.Join(filepath.Dir(exe), path)
 }
+
+// ApplyDefaults подставляет дефолты вместо нулевых значений — ровно то, что делает
+// Load. Нужен редактору конфигурации: значение, сохранённое в файл, после рестарта
+// читается именно так, поэтому работающая конфигурация нормализуется тем же образом.
+func ApplyDefaults(c *Config) { applyDefaults(c) }
 
 // applyDefaults подставляет значения по умолчанию для пропущенных полей.
 // Дефолты совпадают с config.example.yaml, чтобы поведение прокси без явных
